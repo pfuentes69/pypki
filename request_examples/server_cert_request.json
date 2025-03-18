@@ -1,0 +1,10 @@
+{
+    "subject_name": {
+        "countryName": "CH",
+        "organizationName": "Naviter",
+        "commonName": "www.naviter.es"
+    },
+    "subjectAltName": {
+        "dnsNames": ["www.naviter.es", "naviter.es"]
+    }
+}

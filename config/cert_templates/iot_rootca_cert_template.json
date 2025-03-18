@@ -1,0 +1,32 @@
+{
+    "template_name": "IoT Root CA",
+    "max_validity" : -1,
+    "subject_name": {
+      "fields": {
+        "countryName": { "mandatory": true, "default": "CH" },
+        "stateOrProvinceName": { "mandatory": false, "default": "" },
+        "localityName": { "mandatory": false, "default": "" },
+        "organizationName": { "mandatory": true, "default": "" },
+        "organizationalUnitName": { "mandatory": false, "default": "" },
+        "commonName": { "mandatory": true, "default": "" }
+      }
+    },
+    "extensions": {
+      "keyUsage": {
+        "critical": true,
+        "values": ["keyCertSign", "cRLSign"]
+      },
+      "policyIdentifiers": { 
+        "critical": false,
+        "values":["2.5.29.32.0"]
+      },
+      "basicConstraints": { "critical": true, "ca": true, "pathLen": null },
+      "subjectKeyIdentifier": { "include": true }
+    },
+    "allowed_cryptography": {
+      "keyAlgorithms": [
+        { "name": "ECDSA", "curves": ["P-256", "P-384", "P-521"] }
+      ]
+    }
+  }
+  

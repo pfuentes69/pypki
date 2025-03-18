@@ -1,0 +1,33 @@
+{
+  "template_name": "IoT Device",
+  "max_validity" : -1,
+  "subject_name": {
+    "fields": {
+      "countryName": { "mandatory": false, "default": "" },
+      "stateOrProvinceName": { "mandatory": false, "default": "" },
+      "localityName": { "mandatory": false, "default": "" },
+      "organizationName": { "mandatory": false, "default": "" },
+      "organizationalUnitName": { "mandatory": false, "default": "" },
+      "serialNumber": { "mandatory": false, "default": "" },
+      "commonName": { "mandatory": true, "default": "" }
+    }
+  },
+  "extensions": {
+    "keyUsage": {
+      "critical": true,
+      "values": ["digitalSignature", "keyEncipherment"]
+    },
+    "extendedKeyUsage": {
+      "critical": false,
+      "allowed": ["clientAuth"]
+    },
+    "authorityKeyIdentifier": { "include": true, "critical": false }
+  },
+  "allowed_cryptography": {
+    "keyAlgorithms": [
+      { "name": "RSA", "min_size": 2048, "default_size": 3072, "max_size": 8192 },
+      { "name": "ECDSA", "curves": ["P-256", "P-384", "P-521"] },
+      { "name": "Ed25519" }
+    ]
+  }
+}

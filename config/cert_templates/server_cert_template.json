@@ -1,0 +1,52 @@
+{
+  "template_name": "Server Authentication",
+  "max_validity" : 398,
+  "subject_name": {
+    "fields": {
+      "countryName": { "mandatory": true, "default": "ES" },
+      "stateOrProvinceName": { "mandatory": false, "default": "" },
+      "localityName": { "mandatory": false, "default": "" },
+      "organizationName": { "mandatory": true, "default": "" },
+      "organizationalUnitName": { "mandatory": false, "default": "" },
+      "commonName": { "mandatory": true, "default": "" }
+    }
+  },
+  "extensions": {
+    "keyUsage": {
+      "critical": true,
+      "values": ["digitalSignature", "keyEncipherment"]
+    },
+    "extendedKeyUsage": {
+      "critical": false,
+      "allowed": ["serverAuth", "clientAuth"]
+    },
+    "basicConstraints": { "critical": true, "ca": false, "pathLen": null },
+    "policyIdentifiers": { 
+      "critical": false,
+      "values":["2.23.140.1.2.2"]
+    },
+    "subjectAltName": {
+      "allowed_types": {
+        "dnsNames": { "allowed": true, "mandatory": false, "min": 1, "max": 5 },
+        "ipAddresses": { "allowed": true, "mandatory": false, "min": 0, "max": 3 }
+      },
+      "critical": false
+    },
+    "subjectKeyIdentifier": { "include": true },
+    "authorityKeyIdentifier": { "include": true },
+    "cdp": {"url": "http://crl.example.com/root.crl", "critical": false },
+    "aia": {
+      "authorityInfoAccess": {
+        "caIssuers": { "url": "http://ca.example.com/ca.crt"}
+      },
+      "critical": false
+    }
+  },
+  "allowed_cryptography": {
+    "keyAlgorithms": [
+      { "name": "RSA", "min_size": 2048, "default_size": 3072, "max_size": 8192 },
+      { "name": "ECDSA", "curves": ["P-256", "P-384", "P-521"] },
+      { "name": "Ed25519" }
+    ]
+  }
+}
