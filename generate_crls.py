@@ -17,7 +17,7 @@ pki = PyPKI("config/config.json")
 ca_collection = pki.get_ca_collection()
 
 for ca in ca_collection:
-    print(f"Generating CRL for {ca["ca_name"]}")
+    print(f"Generating CRL for {ca['ca_name']}")
     pki.select_ca_by_id(ca["id"])
     # Generate the CRL
     crl = pki.generate_crl()
