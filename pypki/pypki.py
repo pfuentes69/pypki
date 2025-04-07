@@ -3,21 +3,17 @@ import os
 import glob
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives import serialization
 from cryptography.x509 import (
     CertificateRevocationListBuilder,
     RevokedCertificateBuilder,
-    NameOID,
 )
-from cryptography.x509.oid import ExtensionOID
-from cryptography.x509 import Certificate
 from datetime import datetime, timezone, timedelta
-import cryptography.hazmat.primitives.serialization as serialization
 
 from pypki.db import PKIDataBase
 from pypki.ca import CertificationAuthority
-from pypki.pki_tools import PKITools, KeyTools, CertificateTools
+from pypki.pki_tools import PKITools
+from pypki.key_tools import KeyTools
+from pypki.certificate_tools import CertificateTools
 
 
 class PyPKI:

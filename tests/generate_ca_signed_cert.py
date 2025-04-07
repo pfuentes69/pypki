@@ -1,10 +1,13 @@
-from cryptography import x509
-from cryptography.hazmat.primitives import serialization
+import sys
+import os
+
+# Adds the parent directory of utils/ (i.e., the project root) to sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import time
-import uuid
-import json
 from pypki.ca import CertificationAuthority
-from pypki.pki_tools import PKITools, CertificateTools, KeyTools
+from pypki.certificate_tools import CertificateTools
+from pypki.key_tools import KeyTools
 
 
 start_time = time.time()  # Record start time
@@ -13,10 +16,10 @@ print("Generate CA-signed certificate")
 
 ca = CertificationAuthority()
 #with open("config/ca_store/iot_rootca_config.json", "rb") as config_file:
-#with open("config/ca_store/ca1_config.json", "rb") as config_file:
+with open("config/ca_store/ca1_config.json", "rb") as config_file:
 #with open("config/ca_store/ca1_token_config.json", "rb") as config_file:
 #with open("config/ca_store/ca2_config.json", "rb") as config_file:
-with open("config/ca_store/ca3_token_config.json", "rb") as config_file:
+#with open("config/ca_store/ca3_token_config.json", "rb") as config_file:
     ca_config_json = config_file.read()  # Read bytes from file
 ca.load_config_json(ca_config_json)
 

@@ -1,10 +1,10 @@
-from cryptography import x509
-from cryptography.hazmat.primitives import serialization
+import sys
+import os
+
+# Adds the parent directory of utils/ (i.e., the project root) to sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import time
-import uuid
-import json
-from pypki.ca import CertificationAuthority
-from pypki.pki_tools import PKITools, CertificateTools
 from pypki.pypki import PyPKI
 
 start_time = time.time()  # Record start time

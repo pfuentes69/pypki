@@ -6,7 +6,7 @@ from cryptography.hazmat.primitives import serialization
 class CertificationAuthority:
     def __init__(self):
         """Initialize the PKI Utilities class."""
-        from .pki_tools import KeyTools
+        from .key_tools import KeyTools
         self.__config = {}
         self.__signing_key: KeyTools = KeyTools()
         self.__certificate: x509.Certificate = b""
@@ -15,7 +15,7 @@ class CertificationAuthority:
 
 
     def load_config_json(self, ca_config_json: str):
-        from .pki_tools import KeyTools
+        from .key_tools import KeyTools
 
         self.__config = json.loads(ca_config_json)
         # Get private key and certificate

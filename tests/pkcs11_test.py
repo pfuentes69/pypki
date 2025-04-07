@@ -1,10 +1,14 @@
-import getpass
-import PyKCS11
-from pypki.pkcs11_helper import PKCS11Helper  # Ensure this is your class
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.backends import default_backend
+import sys
+import os
 
+# Adds the parent directory of utils/ (i.e., the project root) to sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+import PyKCS11
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
+from pypki.pkcs11_helper import PKCS11Helper  # Ensure this is your class
 
 pkcs11 = PKCS11Helper()
 
