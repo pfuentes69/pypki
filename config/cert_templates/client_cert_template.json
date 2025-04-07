@@ -28,7 +28,7 @@
       }
     },
     "subjectKeyIdentifier": { "include": true },
-    "authorityKeyIdentifier": { "include": true },
+    "authorityKeyIdentifier": { "include": true, "critical": false },
     "cdp": {"url": "http://crl.example.com/root.crl", "critical": false },
     "aia": {
       "authorityInfoAccess": {

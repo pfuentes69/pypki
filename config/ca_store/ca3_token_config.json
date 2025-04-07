@@ -1,0 +1,24 @@
+{
+    "ca_name": "CA 3",
+    "max_validity" : -1,
+    "serial_number_length" : 10,
+    "crl_validity": 365,
+    "extensions": {
+      "cdp": {"url": "http://crl.example.com/testca3.crl", "critical": false },
+      "aia": {
+        "authorityInfoAccess": {
+          "OCSP": { "url": "http://ocsp.example.com"},
+          "caIssuers": { "url": "http://ca.example.com/testca3.cer"}
+        },
+        "critical": false
+      }
+    },
+    "crypto": {
+      "certificate": "-----BEGIN CERTIFICATE-----\nMIIDSTCCAjGgAwIBAgIUcZK1ItWZC5Oozad1r2VLib4AGPAwDQYJKoZIhvcNAQEL\nBQAwMzELMAkGA1UEBhMCRVMxEDAOBgNVBAoMB05hdml0ZXIxEjAQBgNVBAMMCVRl\nc3QgQ0EgMzAeFw0yNTA0MDcxNDI5MjNaFw0yNjA0MDcxNDI5MjNaMDMxCzAJBgNV\nBAYTAkVTMRAwDgYDVQQKDAdOYXZpdGVyMRIwEAYDVQQDDAlUZXN0IENBIDMwggEi\nMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDaOPmDHAJpXwazWmpXGIMdmMYq\nAbFAAj+nFd8QSv3R7Ksq7FegYNOpwRCDBWi7Zq3Qrt6iEcfvMfNN63QSaRvlCU1j\nd6otHKXTTWhsDzitf+dzlqg1+S+xJCvkSWN4THDP2r2lM9hYvGxBwkbUFh1IVm9h\nVuEEJXPEwbIj8k2jQxw2c7jatqlLFubM5IpsCJKSg1QsLZP22Cxy7UsfHDuWjP8U\nqqAR9Ke7avUH7UOMJoP7qRlZ1AfuRF3Ie2SYvuO3185UXJ0GVpdgt/0iK8nLWd+5\nk5OJw1EE+6spJWgCIqi5ls5fBWRpadzan5rvDAnr85immesE+zulhvFg2gXdAgMB\nAAGjVTBTMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MBEGA1UdIAQK\nMAgwBgYEVR0gADAdBgNVHQ4EFgQUqyk4ZbGS/yuhzdkey0BHuRna1YgwDQYJKoZI\nhvcNAQELBQADggEBANMllYX5/VEMwZxfmBqfCiITXHcSVl+xSfmN1PJ1ak9rpRMw\n6MhD88G0nOrFZEzcgIVKgULnCU6VyFU95nxZXtI7+60rJBOmcv7FVpsX3gKga/K0\n2RRr3a2E6ZvnN77JkVIy7q3+U7etAYdzzQQHCiDFwSAdaZ9bs5xxOF5V5KV3y1cS\nbqMUI0uauxmcxfBVyWnsIXsIBsD/A4WZTUGh9ksi5aSvZnhq3q2OR8HOtJKgTxBk\nL2aRqY6F2btQQkPjVf3Yama+Dezp1Udh9yqY7y3dwmV6udNez856SBgmax4E7kH3\nh0/AwjZEbxJw4/lVtWK86Nd2rgKbOm7K9Jw4EOs=\n-----END CERTIFICATE-----",
+      "private_key": "",
+      "certificate_chain": "-----BEGIN CERTIFICATE-----\nMIIDSTCCAjGgAwIBAgIUcZK1ItWZC5Oozad1r2VLib4AGPAwDQYJKoZIhvcNAQEL\nBQAwMzELMAkGA1UEBhMCRVMxEDAOBgNVBAoMB05hdml0ZXIxEjAQBgNVBAMMCVRl\nc3QgQ0EgMzAeFw0yNTA0MDcxNDI5MjNaFw0yNjA0MDcxNDI5MjNaMDMxCzAJBgNV\nBAYTAkVTMRAwDgYDVQQKDAdOYXZpdGVyMRIwEAYDVQQDDAlUZXN0IENBIDMwggEi\nMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDaOPmDHAJpXwazWmpXGIMdmMYq\nAbFAAj+nFd8QSv3R7Ksq7FegYNOpwRCDBWi7Zq3Qrt6iEcfvMfNN63QSaRvlCU1j\nd6otHKXTTWhsDzitf+dzlqg1+S+xJCvkSWN4THDP2r2lM9hYvGxBwkbUFh1IVm9h\nVuEEJXPEwbIj8k2jQxw2c7jatqlLFubM5IpsCJKSg1QsLZP22Cxy7UsfHDuWjP8U\nqqAR9Ke7avUH7UOMJoP7qRlZ1AfuRF3Ie2SYvuO3185UXJ0GVpdgt/0iK8nLWd+5\nk5OJw1EE+6spJWgCIqi5ls5fBWRpadzan5rvDAnr85immesE+zulhvFg2gXdAgMB\nAAGjVTBTMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MBEGA1UdIAQK\nMAgwBgYEVR0gADAdBgNVHQ4EFgQUqyk4ZbGS/yuhzdkey0BHuRna1YgwDQYJKoZI\nhvcNAQELBQADggEBANMllYX5/VEMwZxfmBqfCiITXHcSVl+xSfmN1PJ1ak9rpRMw\n6MhD88G0nOrFZEzcgIVKgULnCU6VyFU95nxZXtI7+60rJBOmcv7FVpsX3gKga/K0\n2RRr3a2E6ZvnN77JkVIy7q3+U7etAYdzzQQHCiDFwSAdaZ9bs5xxOF5V5KV3y1cS\nbqMUI0uauxmcxfBVyWnsIXsIBsD/A4WZTUGh9ksi5aSvZnhq3q2OR8HOtJKgTxBk\nL2aRqY6F2btQQkPjVf3Yama+Dezp1Udh9yqY7y3dwmV6udNez856SBgmax4E7kH3\nh0/AwjZEbxJw4/lVtWK86Nd2rgKbOm7K9Jw4EOs=\n-----END CERTIFICATE-----",
+      "token_slot": 0,
+      "token_key_id": "6704CC95735FDAB8F71B662E28AD3585C5B5A872",
+      "token_password": "Wisekey1!"
+    }
+}

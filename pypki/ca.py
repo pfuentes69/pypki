@@ -6,16 +6,32 @@ from cryptography.hazmat.primitives import serialization
 class CertificationAuthority:
     def __init__(self):
         """Initialize the PKI Utilities class."""
+        from .pki_tools import KeyTools
         self.__config = {}
-        self.__private_key: bytes = b""
+        self.__signing_key: KeyTools = KeyTools()
         self.__certificate: x509.Certificate = b""
+        self.__certificate_chain_pem: str = ""
         self.__issued_serials = set()
 
+
     def load_config_json(self, ca_config_json: str):
+        from .pki_tools import KeyTools
+
         self.__config = json.loads(ca_config_json)
         # Get private key and certificate
-        self.__private_key = serialization.load_pem_private_key(self.__config["crypto"]["private_key"].encode("utf-8"), password=None)
+        if self.__config["crypto"]["token_key_id"] == "":
+            # key is software
+            self.__signing_key.set_private_key(serialization.load_pem_private_key(self.__config["crypto"]["private_key"].encode("utf-8"), password=None))
+        else:
+            self.__signing_key = KeyTools(
+                private_key =  None,
+                key_id = self.__config["crypto"]["token_key_id"],
+                slot_num = self.__config["crypto"]["token_slot"],
+                token_password = self.__config["crypto"]["token_password"]
+            )
+
         self.__certificate = x509.load_pem_x509_certificate(self.__config["crypto"]["certificate"].encode("utf-8"))
+        self.__certificate_chain_pem = self.__config["crypto"]["certificate_chain"].encode("utf-8")
         pass
 
 
@@ -49,9 +65,15 @@ class CertificationAuthority:
                 return serial
 
 
+    def get_signing_key(self):
+        """Returns the private key in a controlled manner."""
+        return self.__signing_key
+    
+
     def get_private_key(self):
         """Returns the private key in a controlled manner."""
-        return self.__private_key
+        return self.__signing_key.get_private_key()
+    
 
     def export_private_key(self, password: bytes = None):
         """
@@ -63,7 +85,7 @@ class CertificationAuthority:
             if password else serialization.NoEncryption()
         )
         
-        return self.__private_key.private_bytes(
+        return self.__signing_key.get_private_key()(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=encryption_algorithm
@@ -73,8 +95,15 @@ class CertificationAuthority:
         """Public method to retrieve the stored certificate."""
         return self.__certificate
     
+    
+    def get_certificate_chain_pem(self) -> str:
+        """Public method to retrieve the stored certificate chain."""
+        return self.__certificate_chain_pem
+    
+    
     def get_serial(self) -> bytes:
         return x509.random_serial_number()
+    
     
     def get_config(self) -> dict:
         return self.__config

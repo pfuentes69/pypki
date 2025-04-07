@@ -63,15 +63,20 @@ class PKIDataBase:
             
             insert_query = """
                 INSERT INTO CertificationAuthorities (
-                    ca_name, certificate, private_key, 
+                    ca_name, certificate, private_key, certificate_chain,
+                    token_slot, token_key_id, token_password, 
                     max_validity, serial_number_length, 
                     crl_validity, extensions
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
             data = (
                 ca.get_config()["ca_name"],
                 ca.get_config()["crypto"]["certificate"],
                 ca.get_config()["crypto"]["private_key"],
+                ca.get_config()["crypto"]["certificate_chain"],
+                ca.get_config()["crypto"]["token_slot"],
+                ca.get_config()["crypto"]["token_key_id"],
+                ca.get_config()["crypto"]["token_password"],
                 ca.get_config()["max_validity"],
                 ca.get_config()["serial_number_length"],
                 ca.get_config()["crl_validity"],
@@ -533,6 +538,10 @@ class PKIDataBase:
                         public_key TEXT,
                         private_key TEXT,
                         private_key_reference INT,
+                        certificate_chain TEXT,
+                        token_slot INT, 
+                        token_key_id VARCHAR(64), 
+                        token_password VARCHAR(64), 
                         max_validity INT,
                         serial_number_length INT,
                         crl_validity  INT DEFAULT 365,

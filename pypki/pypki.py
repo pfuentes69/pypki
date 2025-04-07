@@ -17,7 +17,7 @@ import cryptography.hazmat.primitives.serialization as serialization
 
 from pypki.db import PKIDataBase
 from pypki.ca import CertificationAuthority
-from pypki.pki_tools import PKITools, CertificateTools
+from pypki.pki_tools import PKITools, KeyTools, CertificateTools
 
 
 class PyPKI:
@@ -106,7 +106,11 @@ class PyPKI:
                 "extensions": ca_record.get("extensions"),
                 "crypto": {
                     "certificate": ca_record.get("certificate"),
-                    "private_key": ca_record.get("private_key")
+                    "private_key": ca_record.get("private_key"),
+                    "certificate_chain": ca_record.get("certificate_chain"),
+                    "token_slot": ca_record.get("token_slot"),
+                    "token_key_id": ca_record.get("token_key_id"),
+                    "token_password": ca_record.get("token_password")
                 }
             }
             ca_config_json = json.dumps(ca_config, indent=2)
@@ -165,18 +169,32 @@ class PyPKI:
         return self.__cert_tool
 
 
-    def generate_certificate_from_template(self, request_json:str, private_key, use_active_ca=True, validity_days=PKITools.INFINITE_VALIDITY):
-        self.__cert_tool.load_certificate_request(request_json)
-        if private_key:
-            self.__cert_tool.generate_private_key("ECDSA", "P-256")
-        else:
-            self.__cert_tool.generate_private_key("ECDSA", "P-256")
+    def generate_certificate_and_key(self, 
+        request_json:str, 
+        use_active_ca=True, 
+        validity_days=PKITools.INFINITE_VALIDITY,
+        key_algorithm="RSA",
+        key_type="2048"
+    ):
+        certificate_key = KeyTools()
+        certificate_key.generate_private_key(algorithm=key_algorithm, key_type=key_type)
 
         if use_active_ca:
             ca_id = self.__ca_id
-            new_cert_pem = self.__cert_tool.generate_certificate_from_template(issuing_ca=self.__ca_active, validity_days=validity_days)
+            new_cert_pem = self.__cert_tool.generate_certificate_pem(
+                request_json=request_json,
+                issuing_ca=self.__ca_active,
+                certificate_key=certificate_key,
+                validity_days=validity_days
+            )
         else:
-            new_cert_pem = self.__cert_tool.generate_certificate_from_template(issuing_ca=None, validity_days=validity_days)
+            ca_id = None
+            new_cert_pem = self.__cert_tool.generate_certificate_pem(
+                request_json=request_json,
+                issuing_ca=None,
+                certificate_key=certificate_key,
+                validity_days=validity_days
+            )
         
         if new_cert_pem:
             self.__db.connect_to_db()

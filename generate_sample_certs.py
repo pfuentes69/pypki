@@ -13,8 +13,15 @@ def generate_sample_certs():
     pki.select_cert_template_by_name("IoT Device")
 
     # Load the JSON request template
-    with open("request_examples/iot_device_cert_request.json", "r") as request_file:
-        request_json_template = json.load(request_file)  # Load JSON as a dictionary
+    request_json_template_str = '''
+        {
+            "subject_name": {
+                "serialNumber": "999000888",
+                "commonName": "device_name 001"
+            }
+        }
+    '''
+    request_json_template = json.loads(request_json_template_str)
 
     for i in range(300):
         # Create a copy of the template and modify the serialNumber
@@ -25,11 +32,12 @@ def generate_sample_certs():
         request_json_str = json.dumps(request_json)
 
         # Generate the certificate
-        certificate_pem = pki.generate_certificate_from_template(
+        certificate_pem = pki.generate_certificate_and_key(
             request_json_str,
-            private_key=None,
             use_active_ca=True,
-            validity_days=PKITools.INFINITE_VALIDITY
+            validity_days=PKITools.INFINITE_VALIDITY,
+            key_algorithm="ECDSA", 
+            key_type="P-256"
         )
 
 start_time = time.time()  # Record start time
