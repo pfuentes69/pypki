@@ -1,5 +1,5 @@
 from cryptography import x509
-from cryptography.x509.oid import ObjectIdentifier, NameOID, ExtendedKeyUsageOID
+from cryptography.x509.oid import ObjectIdentifier, NameOID, ExtendedKeyUsageOID, ExtensionOID
 
 class PKITools:
     INFINITE_VALIDITY = -1 
@@ -72,8 +72,56 @@ class PKITools:
         10: x509.ReasonFlags.aa_compromise,
     }
 
-    @staticmethod
-    def get_revocation_reason(reason_code):
+    @classmethod
+    def get_revocation_reason(self, reason_code):
         """Return the reason description based on reason code."""
-        return PKITools.REVOCATION_REASONS.get(reason_code, "Unknown Reason")
+        return self.REVOCATION_REASONS.get(reason_code, "Unknown Reason")
+
+
+    @classmethod
+    def get_oid_name(cls, oid: ObjectIdentifier) -> str:
+        for name, known_oid in cls.OID_MAPPING.items():
+            if oid == known_oid:
+                return name
+        return oid.dotted_string
     
+
+    @classmethod
+    def parse_csr_to_json(self, pem_csr: str) -> dict:
+        csr = x509.load_pem_x509_csr(pem_csr.encode())
+
+        # Extract subject fields
+        subject = {}
+        for attr in csr.subject:
+            key = self.get_oid_name(attr.oid)
+            subject[key] = attr.value
+
+        # Extract SAN
+        san = {}
+        try:
+            san_ext = csr.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+            san_value = san_ext.value
+
+            dns_names = san_value.get_values_for_type(x509.DNSName)
+            if dns_names:
+                san["dnsNames"] = dns_names
+
+            ip_addresses = san_value.get_values_for_type(x509.IPAddress)
+            if ip_addresses:
+                san["ipAddresses"] = [str(ip) for ip in ip_addresses]
+
+            email_addresses = san_value.get_values_for_type(x509.RFC822Name)
+            if email_addresses:
+                san["emailAddresses"] = email_addresses
+
+            uris = san_value.get_values_for_type(x509.UniformResourceIdentifier)
+            if uris:
+                san["uniformResourceIdentifiers"] = [str(uri) for uri in uris]
+
+        except x509.ExtensionNotFound:
+            pass  # SAN not present
+
+        return {
+            "subject_name": subject,
+            "subjectAltName": san
+        }

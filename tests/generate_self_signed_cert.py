@@ -15,7 +15,7 @@ print("Generate self-signed certificate")
 certificate = CertificateTools()
 
 # Load template and request data
-with open("config/cert_templates/ca_cert_template.json", "r") as template_file:
+with open("config/cert_templates/client_cert_template.json", "r") as template_file:
     template_json = template_file.read()
 
 certificate.load_certificate_template(template_json=template_json)
@@ -62,7 +62,7 @@ with open("out/ca2_private_key.pem", "wb") as key_file:
 
 certificate_pem = certificate.generate_certificate_pem(request_json=request_json, certificate_key=certificate_key)
 
-with open("out/ca2_certificate.pem", "wb") as cert_file:
+with open("out/client_certificate.pem", "wb") as cert_file:
     cert_file.write(certificate_pem)
     cert_file.close()
 

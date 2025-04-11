@@ -17,6 +17,7 @@ class KeyTools:
         token_password: str = ""
     ):
         self.__private_key: bytes = private_key
+        self.__public_key: bytes = None
         if key_id is not None:
             self.__key_id: str = key_id
             self.__slot_num: int = slot_num
@@ -27,6 +28,12 @@ class KeyTools:
         else:
             self.__key_id = None
         pass
+
+    def has_private_key(self):
+        if self.private_key is None:
+            return False
+        else:
+            return True
 
     def is_hsm(self):
         return self.__key_id is not None
@@ -74,16 +81,22 @@ class KeyTools:
 
     def set_private_key(self, private_key: bytes):
         self.__private_key = private_key
+        self.__public_key = self.__private_key.public_key()
+        pass
+
+
+    def set_public_key(self, public_key: bytes):
+        """
+            This is to support the special case were the object is only used to store a public key
+        """
+        self.__public_key = public_key
         pass
 
 
     def get_public_key(self):
         """Returns the public key in a controlled manner."""
-        if self.__private_key:
-            return self.__private_key.public_key()
-        else:
-            return None
-
+        return self.__public_key
+        
 
     def get_private_key_pem(self, password: bytes = None):
         """

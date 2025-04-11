@@ -28,15 +28,7 @@
       }
     },
     "subjectKeyIdentifier": { "include": true },
-    "authorityKeyIdentifier": { "include": true, "critical": false },
-    "cdp": {"url": "http://crl.example.com/customcdp.crl", "critical": false },
-    "aia": {
-      "authorityInfoAccess": {
-        "caIssuers": { "url": "http://ca.example.com/customaia.crt"},
-        "OCSP": { "url": "http://ca.example.com/customocsp"}
-      },
-      "critical": false
-    }
+    "authorityKeyIdentifier": { "include": true, "critical": false }
   },
   "allowed_cryptography": {
     "keyAlgorithms": [

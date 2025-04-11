@@ -26,7 +26,7 @@ ca.load_config_json(ca_config_json)
 certificate = CertificateTools()
 
 # Load template and set request data
-with open("config/cert_templates/iot_device_cert_template.json", "r") as template_file:
+with open("config/cert_templates/client_cert_template_v2.json", "r") as template_file:
     template_json = template_file.read()
 certificate.load_certificate_template(template_json=template_json)
 
@@ -61,7 +61,7 @@ certificate_pem = certificate.generate_certificate_pem(
     certificate_key=certificate_key
 )
 
-with open("out/test_hw_certificate.pem", "wb") as cert_file:
+with open("out/client_certificate_v2.pem", "wb") as cert_file:
     cert_file.write(certificate_pem)
     cert_file.close()
 
