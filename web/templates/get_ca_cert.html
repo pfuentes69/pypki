@@ -1,0 +1,18 @@
+
+{% extends 'base.html' %}
+{% block content %}
+<h2>Get CA Certificate</h2>
+<button class="btn btn-secondary" id="fetch-ca-cert">Fetch CA Certificate</button>
+<div class="mt-3">
+    <label for="ca-cert-output" class="form-label">CA Certificate(s)</label>
+    <textarea id="ca-cert-output" class="form-control" rows="10" readonly></textarea>
+</div>
+
+<script>
+document.getElementById('fetch-ca-cert').addEventListener('click', async function() {
+    const response = await fetch('/fetch-ca-cert');
+    const result = await response.json();
+    document.getElementById('ca-cert-output').value = result.pem || result.error || 'Unexpected response';
+});
+</script>
+{% endblock %}

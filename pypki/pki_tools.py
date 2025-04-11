@@ -87,8 +87,8 @@ class PKITools:
     
 
     @classmethod
-    def parse_csr_to_json(self, pem_csr: str) -> dict:
-        csr = x509.load_pem_x509_csr(pem_csr.encode())
+    def parse_csr_to_json(self, csr: bytes) -> dict:
+        #csr = x509.load_pem_x509_csr(pem_csr.encode())
 
         # Extract subject fields
         subject = {}

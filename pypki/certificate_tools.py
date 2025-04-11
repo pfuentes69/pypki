@@ -248,7 +248,7 @@ class CertificateTools:
         csr_builder = self.build_template_extensions(csr_builder, certificate_key.get_public_key(), issuing_ca)
 
         # Add Request Extensions
-        if "extensions" in self.__template__:
+        if "subjectAltName" in self.__template__["extensions"]:
             # Subject Alternative Name (SAN)
             if "subjectAltName" in self.__request__:
                 alt_names = self.build_san()
@@ -303,7 +303,7 @@ class CertificateTools:
         csr_builder = self.build_template_extensions(csr_builder, csr_public_key, issuing_ca)
 
         # Add Request Extensions
-        if "extensions" in self.__template__:
+        if "subjectAltName" in self.__template__["extensions"]:
             # Subject Alternative Name (SAN)
             if "subjectAltName" in self.__request__:
                 alt_names = self.build_san()

@@ -25,7 +25,8 @@
       "allowed_types": {
         "dnsNames": { "allowed": true, "mandatory": false, "min": 1, "max": 5 },
         "ipAddresses": { "allowed": true, "mandatory": false, "min": 0, "max": 3 }
-      }
+      },
+      "critical": false
     },
     "subjectKeyIdentifier": { "include": true },
     "authorityKeyIdentifier": { "include": true, "critical": false }

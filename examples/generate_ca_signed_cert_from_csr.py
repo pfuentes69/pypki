@@ -37,11 +37,11 @@ request_json = '''{
 with open("request_examples/example.csr", "rb") as csr_file:
     csr_pem = csr_file.read()
 
-# Generate a self-signed certificate
+# Generate a ca-signed certificate
 
 certificate_pem = certificate.generate_certificate_pem_from_csr(
     csr_pem=csr_pem,
-    request_json=request_json,
+    request_json=None,
     issuing_ca=ca,
     certificate_key=None,
     validity_days=365,
