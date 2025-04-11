@@ -5,7 +5,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.backends import default_backend
 from datetime import datetime
-from pypki.ca import CertificationAuthority
+from .ca import CertificationAuthority
 
 
 class PKIDataBase:

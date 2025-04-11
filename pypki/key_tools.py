@@ -2,7 +2,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
 from cryptography.hazmat.primitives.asymmetric.utils import Prehashed
 import PyKCS11
-from pypki.pkcs11_helper import PKCS11Helper
+from .pkcs11_helper import PKCS11Helper
 
 
 #
@@ -67,6 +67,7 @@ class KeyTools:
             raise ValueError("Unsupported algorithm")
 
         self.__private_key = private_key
+        self.__public_key = self.__private_key.public_key()
 
         return self.__private_key
 

@@ -8,10 +8,9 @@ from asn1crypto import x509 as asn1_x509
 from asn1crypto.core import OctetBitString
 from ipaddress import ip_address
 from datetime import datetime, timedelta, timezone
-from pypki.ca import CertificationAuthority
-from pypki.pki_tools import PKITools
-from pypki.key_tools import KeyTools
-
+from .pki_tools import PKITools
+from .key_tools import KeyTools
+from .ca import CertificationAuthority
 
 #
 # Certificate Tools Class
@@ -81,11 +80,6 @@ class CertificateTools:
         """
         Add extensions based in the loaded template and Issuing CA
         """
-        if issuing_ca is not None:
-            # The extensions in the CA config must be processed
-            # We only check for CDP and AIA for now
-            if "extensions" in issuing_ca.get_config():
-                print("The CA has extensions")
 
         if "extensions" in self.__template__:
             # Subject Alternative Name (SAN) NOT CORRECT!!!

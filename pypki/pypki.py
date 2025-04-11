@@ -9,12 +9,11 @@ from cryptography.x509 import (
 )
 from datetime import datetime, timezone, timedelta
 
-from pypki.db import PKIDataBase
-from pypki.ca import CertificationAuthority
-from pypki.pki_tools import PKITools
-from pypki.key_tools import KeyTools
-from pypki.certificate_tools import CertificateTools
-
+from .db import PKIDataBase
+from .certificate_tools import CertificateTools
+from .pki_tools import PKITools
+from .key_tools import KeyTools
+from .ca import CertificationAuthority
 
 class PyPKI:
     def __init__(self, config_file_json:str = None):
@@ -280,7 +279,7 @@ class PyPKI:
             except ValueError:
                 raise ValueError(f"Invalid revocation reason: {reason_code}")  # Handle invalid codes gracefully
             revoked_cert = RevokedCertificateBuilder().serial_number(serial_number).revocation_date(revocation_time)
-            if reason_code is not 0:
+            if reason_code != 0:
                 revoked_cert = revoked_cert.add_extension(x509.CRLReason(x509.ReasonFlags(reason_enum)), critical=False)
             revoked_cert = revoked_cert.build()
             crl_builder = crl_builder.add_revoked_certificate(revoked_cert)

@@ -1,0 +1,36 @@
+pypki/
+│
+├── pypki/                  # Main package for reusable code
+│   ├── __init__.py
+│   ├── utils/                     # Shared utility classes
+│   │   ├── __init__.py
+│   │   └── crypto_utils.py
+│   │   └── validators.py
+│   ├── core/                      # Core logic and services
+│   │   ├── __init__.py
+│   │   └── main_service.py
+│   └── config.py                  # Central configuration
+│
+├── api/                           # Flask API
+│   ├── __init__.py
+│   ├── app.py                     # Flask app creation
+│   └── routes/
+│       ├── __init__.py
+│       ├── main_routes.py
+│       └── est_routes.py
+│
+├── examples/                      # Example programs and scripts
+│   ├── example_1.py
+│   └── example_2.py
+│
+├── tests/                         # Unit and integration tests
+│   ├── __init__.py
+│   ├── test_utils.py
+│   ├── test_core.py
+│   └── test_api.py
+│
+├── .env                           # Environment variables (gitignored)
+├── .gitignore
+├── requirements.txt
+├── setup.py                       # If packaging as a module
+└── README.md

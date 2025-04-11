@@ -5,9 +5,7 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import time
-from pypki.ca import CertificationAuthority
-from pypki.certificate_tools import CertificateTools
-from pypki.key_tools import KeyTools
+from pypki import CertificationAuthority, CertificateTools, KeyTools
 
 
 start_time = time.time()  # Record start time
