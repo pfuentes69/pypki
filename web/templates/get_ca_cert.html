@@ -10,7 +10,7 @@
 
 <script>
 document.getElementById('fetch-ca-cert').addEventListener('click', async function() {
-    const response = await fetch('/fetch-ca-cert');
+    const response = await fetch('/api/fetch-ca-cert');
     const result = await response.json();
     document.getElementById('ca-cert-output').value = result.pem || result.error || 'Unexpected response';
 });

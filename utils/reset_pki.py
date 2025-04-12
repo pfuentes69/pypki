@@ -5,7 +5,7 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import time
-from pypki.pypki import PyPKI
+from pypki import PyPKI
 
 start_time = time.time()  # Record start time
 

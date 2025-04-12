@@ -6,42 +6,27 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 
 from cryptography.hazmat.primitives import serialization
 
-from pypki import CertificateTools, CertificationAuthority
+from pypki import PKITools
 
-from . import ca
+from . import pki
 
 def generate_certificate(csr_pem: bytes):
 
-    certificate = CertificateTools()
-
-    # Load template and request data
-    with open("/Users/pedro/Development/Python/pypki/config/cert_templates/client_cert_template.json", "r") as template_file:
-        template_json = template_file.read()
-
-    certificate.load_certificate_template(template_json=template_json)
-
-    request_json = '''{
-        "subject_name": {
-            "countryName": "ES",
-            "organizationName": "Naviter",
-            "commonName": "Test CA 2"
-        }
-    }
-    '''
+    pki.select_cert_template_by_name("IoT Device")
 
     # Generate a ca-signed certificate
-    certificate_der = certificate.generate_certificate_from_csr(
+    certificate_der = pki.generate_certificate_from_csr(
         csr_pem=csr_pem,
         request_json=None,
-        issuing_ca=ca,
-        certificate_key=None,
-        validity_days=365,
-        enforce_template=True)
-
+        use_active_ca=True,
+        validity_days=PKITools.INFINITE_VALIDITY, 
+        enforce_template=True
+    )
+    
     return certificate_der
 
 def get_ca_certificate(data):
     
-    ca_certificate = ca.get_certificate()
+    ca_certificate = pki.get_ca_certificate()
 
     return ca_certificate.public_bytes(serialization.Encoding.PEM)

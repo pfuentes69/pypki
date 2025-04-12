@@ -1,0 +1,54 @@
+
+{% extends 'base.html' %}
+{% block content %}
+<h2>Generate Certificate</h2>
+<form id="generate-cert-form">
+    <div class="mb-3">
+        <label for="countryName" class="form-label">Country Name (C)</label>
+        <input type="text" class="form-control" id="countryName" name="countryName" maxlength="2" required>
+    </div>
+    <div class="mb-3">
+        <label for="organizationName" class="form-label">Organization Name (O)</label>
+        <input type="text" class="form-control" id="organizationName" name="organizationName" required>
+    </div>
+    <div class="mb-3">
+        <label for="commonName" class="form-label">Common Name (CN)</label>
+        <input type="text" class="form-control" id="commonName" name="commonName" required>
+    </div>
+    <div class="mb-3">
+        <label for="dnsNames" class="form-label">Subject Alternative Names (SAN - DNS names, comma separated)</label>
+        <input type="text" class="form-control" id="dnsNames" name="dnsNames" required>
+    </div>
+    <button type="submit" class="btn btn-primary">Generate Certificate</button>
+</form>
+
+<div class="mt-4">
+    <label for="generated-cert" class="form-label">Generated Certificate</label>
+    <textarea id="generated-cert" class="form-control" rows="10" readonly></textarea>
+</div>
+
+<script>
+document.getElementById('generate-cert-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const payload = {
+        subject_name: {
+            countryName: document.getElementById('countryName').value,
+            organizationName: document.getElementById('organizationName').value,
+            commonName: document.getElementById('commonName').value
+        },
+        subjectAltName: {
+            dnsNames: document.getElementById('dnsNames').value.split(',').map(s => s.trim())
+        }
+    };
+
+    const response = await fetch('/api/generate-cert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+
+    const result = await response.json();
+    document.getElementById('generated-cert').value = result.cert || result.error || 'Unexpected response';
+});
+</script>
+{% endblock %}

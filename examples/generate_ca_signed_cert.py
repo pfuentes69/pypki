@@ -13,8 +13,8 @@ start_time = time.time()  # Record start time
 print("Generate CA-signed certificate")
 
 ca = CertificationAuthority()
-#with open("config/ca_store/iot_rootca_config.json", "rb") as config_file:
-with open("config/ca_store/ca1_config.json", "rb") as config_file:
+with open("config/ca_store/iot_rootca_config.json", "rb") as config_file:
+#with open("config/ca_store/ca1_config.json", "rb") as config_file:
 #with open("config/ca_store/ca1_token_config.json", "rb") as config_file:
 #with open("config/ca_store/ca2_config.json", "rb") as config_file:
 #with open("config/ca_store/ca3_token_config.json", "rb") as config_file:

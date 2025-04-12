@@ -2,7 +2,7 @@ import json
 import os
 import glob
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.x509 import (
     CertificateRevocationListBuilder,
     RevokedCertificateBuilder,
@@ -98,7 +98,8 @@ class PyPKI:
                 "max_validity": ca_record.get("max_validity"),
                 "serial_number_length": ca_record.get("serial_number_length"),
                 "crl_validity": ca_record.get("crl_validity"),
-                "extensions": ca_record.get("extensions"),
+                #"extensions": ca_record.get("extensions"),
+                "extensions": json.loads(ca_record.get("extensions", "{}")),  # FIXED
                 "crypto": {
                     "certificate": ca_record.get("certificate"),
                     "private_key": ca_record.get("private_key"),
@@ -123,6 +124,14 @@ class PyPKI:
         ca_collection = self.__db.get_ca_collection()
         self.__db.close_db()
         return ca_collection
+
+
+    def get_ca_by_id(self, ca_id: int) -> CertificationAuthority:
+        # Get CA config from DB
+        self.__db.connect_to_db()
+        ca_record = self.__db.get_ca_record_by_id(ca_id)
+        self.__db.close_db()
+        return ca_record
 
 
     def create_cert_template_from_json(self, config_json: str):
@@ -198,20 +207,61 @@ class PyPKI:
         
         return new_cert_pem
 
+            
+    def generate_certificate_from_csr(
+            self, 
+            csr_pem: bytes,
+            request_json: str = None,
+            use_active_ca: bool = True,
+            validity_days=PKITools.INFINITE_VALIDITY,
+            enforce_template: bool = False ):
 
-    def generate_certificate_from_csr(self, csr_pem:bytes, use_active_ca=True, validity_days=PKITools.INFINITE_VALIDITY):
         if use_active_ca:
             ca_id = self.__ca_id
-            new_cert_pem = self.__cert_tool.generate_certificate_from_csr(csr_pem=csr_pem, issuing_ca=self.__ca_active, validity_days=validity_days)
+            new_cert = self.__cert_tool.generate_certificate_from_csr(
+                csr_pem=csr_pem, 
+                request_json=request_json,
+                issuing_ca=self.__ca_active, 
+                validity_days=validity_days,
+                enforce_template=enforce_template)
         else:
-            new_cert_pem = self.__cert_tool.generate_certificate_from_csr(csr_pem=csr_pem, issuing_ca=None, validity_days=validity_days)
+            ca_id = None
+            new_cert = self.__cert_tool.generate_certificate_from_csr(
+                csr_pem=csr_pem, 
+                request_json=request_json,
+                issuing_ca=None, 
+                validity_days=validity_days,
+                enforce_template=enforce_template)
         
-        if new_cert_pem:
+        if new_cert:
+            new_cert_pem = new_cert.public_bytes(serialization.Encoding.PEM)
             self.__db.connect_to_db()
             self.__db.insert_certificate(new_cert_pem, ca_id, self.__cert_template_id, private_key_reference = None)
             self.__db.close_db()
         
-        return new_cert_pem
+        return new_cert
+    
+    def generate_certificate_pem_from_csr(
+        self, 
+        csr_pem: bytes,
+        request_json: str = None,
+        use_active_ca: bool = True,
+        validity_days=PKITools.INFINITE_VALIDITY,
+        enforce_template: bool = False ):
+
+        new_cert = self.generate_certificate_from_csr(
+            csr_pem=csr_pem,
+            request_json=request_json,
+            use_active_ca=use_active_ca,
+            validity_days=validity_days,
+            enforce_template=enforce_template
+        )
+
+        return new_cert.public_bytes(serialization.Encoding.PEM)
+
+
+    def get_ca_certificate(self):
+        return self.__ca_active.get_certificate()
 
 
     def get_certificate_id(self, serial_number=None, fingerprint=None):

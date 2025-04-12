@@ -18,7 +18,7 @@
 document.getElementById('cert-form').addEventListener('submit', async function(e) {
     e.preventDefault();
     const csr = document.getElementById('csr').value;
-    const response = await fetch('/submit-csr', {
+    const response = await fetch('/api/submit-csr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ csr })

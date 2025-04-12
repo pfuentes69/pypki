@@ -1,0 +1,46 @@
+
+{% extends 'base.html' %}
+{% block content %}
+<h2>Select a Value</h2>
+
+<form id="select-value-form">
+    <div class="mb-3">
+        <label for="value-select" class="form-label">Choose an option:</label>
+        <select id="value-select" class="form-select" required>
+            <option value="" disabled selected>Select a value</option>
+        </select>
+    </div>
+    <button type="submit" class="btn btn-primary">Send Selection</button>
+</form>
+
+<div class="mt-3" id="response-message" class="alert alert-info" style="display: none;"></div>
+
+<script>
+document.addEventListener("DOMContentLoaded", async () => {
+    const select = document.getElementById('value-select');
+    const response = await fetch('/api/get_values');
+    const values = await response.json();
+
+    values.forEach(item => {
+        const option = document.createElement('option');
+        option.value = item.value;
+        option.textContent = item.label;
+        select.appendChild(option);
+    });
+});
+
+document.getElementById('select-value-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const value = document.getElementById('value-select').value;
+    const response = await fetch('/api/select_value', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value })
+    });
+    const result = await response.json();
+    const messageDiv = document.getElementById('response-message');
+    messageDiv.textContent = result.message || result.error || 'Unexpected response';
+    messageDiv.style.display = 'block';
+});
+</script>
+{% endblock %}
