@@ -14,6 +14,7 @@ from .certificate_tools import CertificateTools
 from .pki_tools import PKITools
 from .key_tools import KeyTools
 from .ca import CertificationAuthority
+from .log import logger
 
 class PyPKI:
     def __init__(self, config_file_json:str = None):
@@ -59,6 +60,10 @@ class PyPKI:
         pass
 
 
+    def get_db(self):
+        return self.__db
+
+
     def create_ca_from_config_json(self, config_json: str):
         ca = CertificationAuthority()
         # Load existing CA config from file
@@ -76,16 +81,17 @@ class PyPKI:
         if ca_id:
             self.__ca_id = ca_id
             self.__ca_active = self.select_ca_by_id(ca_id)
-            print(f"CA {ca_name} selected")
+            logger.info(f"CA {ca_name} selected")
         else:
             self.__ca_id = 0
-            print(f"CA {ca_name} not found!")
+            logger.info(f"CA {ca_name} not found!")
         self.__db.close_db()
         return self.__ca_active
 
 
     def select_ca_by_id(self, ca_id: int) -> CertificationAuthority:
         # Load CA config from DB
+        logger.info(f"Select CA ID = {ca_id}")
         self.__db.connect_to_db()
         ca_record = self.__db.get_ca_record_by_id(ca_id)
         self.__ca_active = None
@@ -94,7 +100,7 @@ class PyPKI:
             self.__ca_active = CertificationAuthority()
             # Build config JSON string
             ca_config = {
-                "ca_name": ca_record.get("ca_name"),
+                "ca_name": ca_record.get("name"),
                 "max_validity": ca_record.get("max_validity"),
                 "serial_number_length": ca_record.get("serial_number_length"),
                 "crl_validity": ca_record.get("crl_validity"),
@@ -150,15 +156,16 @@ class PyPKI:
         if cert_template_id:
             self.__cert_template_id = cert_template_id
             self.__cert_tool = self.select_cert_template_by_id(cert_template_id)
-            print(f"Certificate Template {cert_template_name} selected")
+            logger.info(f"Certificate Template {cert_template_name} selected")
         else:
             self.__cert_type_id = 0
-            print(f"Certificate Template {cert_template_name} not found!")
+            logger.info(f"Certificate Template {cert_template_name} not found!")
         self.__db.close_db()
         return self.__cert_tool
 
 
     def select_cert_template_by_id(self, cert_template_id: int) -> CertificateTools:
+        logger.info(f"Select Template ID = {cert_template_id}")
         self.__db.connect_to_db()
         cert_template_record = self.__db.get_cert_template_record_by_id(cert_template_id)
         self.__cert_tool = None
@@ -301,6 +308,8 @@ class PyPKI:
             The signed CRL.
         """
         
+        logger.info(f"Generating CRL for {self.__ca_active.get_config()['ca_name']}")
+
         if self.__ca_id == None:
             return None
 

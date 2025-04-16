@@ -6,6 +6,8 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+from .log import logger
+
 PKCS11_LIB = "/usr/local/lib/pkcs11/libeTPkcs11.dylib"
 
 class PKCS11Helper:
@@ -59,7 +61,7 @@ class PKCS11Helper:
             certs = self.__session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_CERTIFICATE)])
             return certs
         except PyKCS11.PyKCS11Error as e:
-            print(f"❌ Error retrieving certificates: {e}")
+            logger.error(f"❌ Error retrieving certificates: {e}")
             return []
 
 
@@ -74,7 +76,7 @@ class PKCS11Helper:
             private_keys = self.__session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY)])
             return private_keys
         except PyKCS11.PyKCS11Error as e:
-            print(f"❌ Error retrieving private keys: {e}")
+            logger.error(f"❌ Error retrieving private keys: {e}")
             return []
 
 

@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import time
 from cryptography.hazmat.primitives import serialization
-from pypki.pypki import PyPKI
+from pypki.core import PyPKI
 
 
 start_time = time.time()  # Record start time
@@ -25,6 +25,9 @@ for ca in ca_collection:
     # To save the CRL to a file
     ca_name = ca["ca_name"].replace(' ', '_')
     crl_name = f"out/{ca_name}.crl"
+    with open(crl_name, "wb") as crl_file:
+        crl_file.write(crl.public_bytes())
+    crl_name = f"out/{ca_name}.pem.crl"
     with open(crl_name, "wb") as crl_file:
         crl_file.write(crl.public_bytes(serialization.Encoding.PEM))
 

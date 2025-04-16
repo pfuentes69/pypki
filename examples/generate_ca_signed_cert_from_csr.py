@@ -47,7 +47,7 @@ certificate_pem = certificate.generate_certificate_pem_from_csr(
     validity_days=365,
     enforce_template=True)
 
-with open("out/test_from_csr_certificate.pem", "wb") as cert_file:
+with open("out/ca_signed_certificate_from_csr.pem", "wb") as cert_file:
     cert_file.write(certificate_pem)
     cert_file.close()
 

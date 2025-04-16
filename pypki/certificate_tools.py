@@ -4,12 +4,14 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.serialization import pkcs12
 from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature, decode_dss_signature
+from cryptography.x509 import NameOID, Name, NameAttribute, CertificateBuilder
 from asn1crypto import x509 as asn1_x509
 from asn1crypto.core import OctetBitString
 from ipaddress import ip_address
 from datetime import datetime, timedelta, timezone
 from .pki_tools import PKITools
 from .key_tools import KeyTools
+from .log import logger
 from .ca import CertificationAuthority
 
 #
@@ -148,11 +150,11 @@ class CertificateTools:
                 if "caIssuers" in issuing_ca.get_config()["extensions"]["aia"]["authorityInfoAccess"]:
                     aia_ca_list.append(x509.AccessDescription(x509.ObjectIdentifier('1.3.6.1.5.5.7.48.2'), x509.UniformResourceIdentifier(issuing_ca.get_config()["extensions"]["aia"]["authorityInfoAccess"]["caIssuers"]["url"])))
 
-            if aia_template_present:
+            if aia_template_present is True:
                 # The template takes precedence
                 aia = x509.AuthorityInformationAccess(aia_template_list)
                 builder = builder.add_extension(aia, critical = aia_critical_template)
-            elif aia_ca_present:
+            elif aia_ca_present is True:
                 # Defaults to the CA config, if present
                 aia = x509.AuthorityInformationAccess(aia_ca_list)
                 builder = builder.add_extension(aia, critical = aia_critical_ca)
@@ -189,10 +191,10 @@ class CertificateTools:
                 ])
                 cdp_critical_ca = issuing_ca.get_config()["extensions"]["cdp"]["critical"]
             
-            if cdp_template_present:
+            if cdp_template_present is True:
                 # The template takes precedence
                 builder = builder.add_extension(cdp_template, critical=cdp_critical_template)
-            elif cdp_ca_present:
+            elif cdp_ca_present is True:
                 # Defaults to the CA config, if present
                 builder = builder.add_extension(cdp_ca, critical=cdp_critical_ca)
 
@@ -212,7 +214,7 @@ class CertificateTools:
 
             # Subject Key Identifier (SKI)
             ski = x509.SubjectKeyIdentifier.from_public_key(public_key)
-            if "subjectKeyIdentifier" in self.__template__["extensions"]:
+            if "subjectKeyIdentifier" in self.__template__["extensions"] and self.__template__["extensions"]["subjectKeyIdentifier"]["include"]:
                 builder = builder.add_extension(ski, critical=False)
 
             # Authority Key Identifier (SKI)
@@ -283,7 +285,7 @@ class CertificateTools:
         request_json: str = None,
         issuing_ca: CertificationAuthority = None
     ) -> bytes:
-        
+        logger.info("Patch CSR")
         #csr = x509.load_pem_x509_csr(original_csr)
 
         # The request will override was comes in the CSR
@@ -358,7 +360,7 @@ class CertificateTools:
         """
         cert = asn1_x509.Certificate.load(pre_cert_der)
 
-        if is_ecdsa:
+        if is_ecdsa is True:
 #            half = len(real_signature) // 2
 #            r = int.from_bytes(real_signature[:half], byteorder='big')
 #            s = int.from_bytes(real_signature[half:], byteorder='big')
@@ -382,10 +384,11 @@ class CertificateTools:
         validity_days: int = 365,
         enforce_template: bool = False
     ) -> x509.Certificate:
-        
+        logger.info("Generate certificate from CSR")
+
         csr = x509.load_pem_x509_csr(csr_pem)
 
-        if enforce_template:
+        if enforce_template is True:
             # Patch CSR with template and CA details
             csr = self.patch_csr(original_csr=csr, request_json=request_json, issuing_ca=issuing_ca)
 
@@ -513,9 +516,10 @@ class CertificateTools:
         request_json: str,
         issuing_ca: CertificationAuthority = None,
         certificate_key: KeyTools = None,
-        validity_days: int = 365
+        validity_days: int = 365,
+        enforce_template: bool = False
     ) -> bytes:
-        
+        logger.info("Generate certificate")
         csr_pem = self.generate_csr_pem(request_json=request_json, certificate_key=certificate_key, issuing_ca=issuing_ca)
 
         return self.generate_certificate_from_csr(
@@ -523,7 +527,7 @@ class CertificateTools:
             issuing_ca=issuing_ca, 
             certificate_key=certificate_key, 
             validity_days=validity_days,
-            enforce_template=False
+            enforce_template=enforce_template
         )
 
 
@@ -532,14 +536,16 @@ class CertificateTools:
         request_json: str,
         issuing_ca: CertificationAuthority = None,
         certificate_key: KeyTools = None,
-        validity_days: int = 365
+        validity_days: int = 365,
+        enforce_template: bool = False
     ) -> bytes:
         
         certificate = self.generate_certificate(
             request_json=request_json,
             issuing_ca=issuing_ca,
             certificate_key=certificate_key,
-            validity_days=validity_days
+            validity_days=validity_days,
+            enforce_template=enforce_template
         )
 
         return certificate.public_bytes(serialization.Encoding.PEM)
@@ -555,7 +561,8 @@ class CertificateTools:
         pfx_password: bytes = b"",
         friendly_name: bytes = b"MyCert",
         key_algorithm: str = "RSA",
-        key_type: str = "2048"
+        key_type: str = "2048",
+        enforce_template: bool = "False"
     ) -> bytes:
         
         if issuing_ca is None:
@@ -565,14 +572,52 @@ class CertificateTools:
             ca_certs = self.load_ca_certificates(pem_data=ca_certs_pem)
 
         certificate_key = KeyTools()
-        certificate_key.generate_private_key(key_algorithm, key_type)
+        private_key = certificate_key.generate_private_key(key_algorithm, key_type)
 
         certificate = self.generate_certificate(
             request_json=request_json,
             issuing_ca=issuing_ca, 
             certificate_key=certificate_key, 
-            validity_days=validity_days
+            validity_days=validity_days,
+            enforce_template=enforce_template
         )
+
+        # DEBUG
+        """        
+        print("START DEBUG")
+
+        # Subject and issuer are the same for self-signed cert
+        subjectdebug = issuerdebug = Name([
+            NameAttribute(NameOID.COUNTRY_NAME, u"US"),
+            NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"California"),
+            NameAttribute(NameOID.LOCALITY_NAME, u"San Francisco"),
+            NameAttribute(NameOID.ORGANIZATION_NAME, u"Example Org"),
+            NameAttribute(NameOID.COMMON_NAME, u"example.com"),
+        ])
+
+        # Create certificate
+        certdebug = (
+            x509.CertificateBuilder()
+            .subject_name(subjectdebug)
+            .issuer_name(issuerdebug)
+            .public_key(certificate_key.get_public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
+            .sign(certificate_key.get_private_key(), hashes.SHA256())
+        )
+
+        # Create PKCS#12
+        passworddebug = b"mypassword"
+        p12debug = pkcs12.serialize_key_and_certificates(
+            name=b"example.com",
+            key=private_key,
+            cert=certdebug,
+            cas=None,
+            encryption_algorithm=serialization.BestAvailableEncryption(passworddebug)
+        )
+        print("END DEBUG")
+        """
 
         p12 = pkcs12.serialize_key_and_certificates(
             name=friendly_name,

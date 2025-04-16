@@ -1,4 +1,5 @@
 from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
 from cryptography.hazmat.primitives.asymmetric.utils import Prehashed
 import PyKCS11
@@ -49,8 +50,8 @@ class KeyTools:
             key_size = int(key_type)
             if key_size not in [2048, 3072, 4096]:
                 raise ValueError("Invalid RSA key size")
-            private_key = rsa.generate_private_key(
-                public_exponent=65537, key_size=key_size
+            private_key: rsa.RSAPrivateKey = rsa.generate_private_key(
+                public_exponent=65537, key_size=key_size, backend=default_backend()
             )
 
         elif algorithm == "ECDSA":
@@ -61,7 +62,7 @@ class KeyTools:
             }
             if key_type not in curve_mapping:
                 raise ValueError("Invalid ECDSA curve")
-            private_key = ec.generate_private_key(curve_mapping[key_type])
+            private_key: ec.EllipticCurvePrivateKey = ec.generate_private_key(curve_mapping[key_type], backend=default_backend())
 
         else:
             raise ValueError("Unsupported algorithm")

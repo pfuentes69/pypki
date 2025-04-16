@@ -1,0 +1,13 @@
+{
+    "db_config": {
+        "host": "phobos",
+        "port": 3306,
+        "user": "root",
+        "password": "Password1!",
+        "database": "pypki_db"
+    },
+    "template_folder": "config/cert_templates",
+    "ca_store_folder": "config/ca_store",
+    "default_ca_id": 0,
+    "default_template": 0
+}

@@ -1,6 +1,11 @@
 from flask import Flask
 
+from pypki import logger
+
+
 def create_app():
+    logger.info("Flask App creation")
+
     app = Flask(__name__)
 
     # Register Blueprints

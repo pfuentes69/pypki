@@ -1,26 +1,17 @@
 {
-  "template_name": "Client Authentication",
+  "template_name": "Client Authentication v2",
   "max_validity" : -1,
   "subject_name": {
     "fields": {
-      "countryName": { "mandatory": true, "default": "ES" },
+      "countryName": { "mandatory": false, "default": "" },
       "stateOrProvinceName": { "mandatory": false, "default": "" },
       "localityName": { "mandatory": false, "default": "" },
-      "organizationName": { "mandatory": true, "default": "" },
+      "organizationName": { "mandatory": false, "default": "" },
       "organizationalUnitName": { "mandatory": false, "default": "" },
       "commonName": { "mandatory": true, "default": "" }
     }
   },
   "extensions": {
-    "keyUsage": {
-      "critical": true,
-      "values": ["digitalSignature", "keyEncipherment"]
-    },
-    "extendedKeyUsage": {
-      "critical": false,
-      "allowed": ["clientAuth"]
-    },
-    "basicConstraints": { "critical": true, "ca": false, "pathLen": null },
     "subjectAltName": {
       "allowed_types": {
         "dnsNames": { "allowed": true, "mandatory": false, "min": 1, "max": 5 },
@@ -28,8 +19,8 @@
       },
       "critical": false
     },
-    "subjectKeyIdentifier": { "include": true },
-    "authorityKeyIdentifier": { "include": true, "critical": false }
+    "subjectKeyIdentifier": { "include": false },
+    "authorityKeyIdentifier": { "include": false, "critical": false }
   },
   "allowed_cryptography": {
     "keyAlgorithms": [

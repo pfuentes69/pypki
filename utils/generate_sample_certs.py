@@ -8,7 +8,7 @@ import time
 import uuid
 import json
 from pypki.pki_tools import PKITools
-from pypki.pypki import PyPKI
+from pypki.core import PyPKI
 
 def generate_sample_certs():
     # Load request data

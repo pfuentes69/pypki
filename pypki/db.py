@@ -6,6 +6,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.backends import default_backend
 from datetime import datetime
 from .ca import CertificationAuthority
+from .log import logger
 
 
 class PKIDataBase:
@@ -41,7 +42,7 @@ class PKIDataBase:
                 )
                 self.__connected = True
             except OperationalError as e:
-                print(f"Error connecting to MySQL: {e}")
+                logger.error(f"Error connecting to MySQL: {e}")
         pass
 
 
@@ -51,6 +52,12 @@ class PKIDataBase:
             self.__db_connection.close()
             self.__connected = False
         pass
+
+    def get_connection(self):
+        if self.__connected:
+            return self.__db_connection
+        else:
+            return None
 
     def insert_ca(self, ca: CertificationAuthority):
         """
@@ -63,7 +70,7 @@ class PKIDataBase:
             
             insert_query = """
                 INSERT INTO CertificationAuthorities (
-                    ca_name, certificate, private_key, certificate_chain,
+                    name, certificate, private_key, certificate_chain,
                     token_slot, token_key_id, token_password, 
                     max_validity, serial_number_length, 
                     crl_validity, extensions
@@ -80,15 +87,16 @@ class PKIDataBase:
                 ca.get_config()["max_validity"],
                 ca.get_config()["serial_number_length"],
                 ca.get_config()["crl_validity"],
+#                ca.get_config()["extensions"]
                 json.dumps(ca.get_config()["extensions"])
             )
 
             cursor.execute(insert_query, data)
             self.__db_connection.commit()
-            print("Certification Authority inserted successfully!")
+            logger.info("Certification Authority inserted successfully!")
 
         except mysql.connector.Error as err:
-            print(f"Error inserting Certification Authority: {err}")
+            logger.error(f"Error inserting Certification Authority: {err}")
         finally:
             cursor.close()
 
@@ -99,7 +107,7 @@ class PKIDataBase:
             cursor = self.__db_connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
             query = """
-                SELECT id FROM CertificationAuthorities WHERE ca_name = %s
+                SELECT id FROM CertificationAuthorities WHERE name = %s
             """
             cursor.execute(query, (ca_name,))
             result = cursor.fetchone()
@@ -107,7 +115,7 @@ class PKIDataBase:
         
             return result[0] if result else None
         except mysql.connector.Error as err:
-            print(f"Error: {err}")
+            logger.error(err)
             return None
 
 
@@ -132,7 +140,7 @@ class PKIDataBase:
             
             return result if result else None
         except mysql.connector.Error as err:
-            print(f"Error: {err}")
+            logger.error(f"Error: {err}")
             return None
 
     def get_ca_collection(self):
@@ -140,21 +148,21 @@ class PKIDataBase:
         Retrieves a collection of CA IDs and names from the CertificationAuthorities table.
         
         :param db_config: Dictionary containing database connection parameters.
-        :return: List of dictionaries with 'id' and 'ca_name'.
+        :return: List of dictionaries with 'id' and 'name'.
         """
         try:
             db_name = self.__config["database"]
             cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
             cursor.execute(f"USE {db_name}")
 
-            query = "SELECT id, ca_name FROM CertificationAuthorities"
+            query = "SELECT id, name FROM CertificationAuthorities"
             cursor.execute(query)
             ca_collection = cursor.fetchall()  # Fetch all results
 
             return ca_collection
 
         except mysql.connector.Error as e:
-            print(f"Database error: {e}")
+            logger.error(f"Database error: {e}")
             return []
 
         finally:
@@ -182,10 +190,10 @@ class PKIDataBase:
 
             cursor.execute(insert_query, data)
             self.__db_connection.commit()
-            print("Certificate Template inserted successfully!")
+            logger.info("Certificate Template inserted successfully!")
 
         except mysql.connector.Error as err:
-            print(f"Error inserting Certificate Template: {err}")
+            logger.error(f"Error inserting Certificate Template: {err}")
         finally:
             cursor.close()
 
@@ -204,7 +212,7 @@ class PKIDataBase:
         
             return result[0] if result else None
         except mysql.connector.Error as err:
-            print(f"Error: {err}")
+            logger.error(f"Error: {err}")
             return None
 
 
@@ -224,8 +232,49 @@ class PKIDataBase:
             cursor.close()
             
             return result if result else None
+
         except mysql.connector.Error as err:
-            print(f"Error: {err}")
+            logger.error(f"Error: {err}")
+            return None
+        
+
+    def get_ca_and_template_id_by_alias_name(self, alias_name = None):
+        """
+        Retrieve ca_id and template_id from ESTAliases by name.
+
+        Args:
+            db_config (dict): A dictionary containing database connection parameters.
+            name (str): The name to look up in the ESTAliases table.
+
+        Returns:
+            tuple or None: A tuple (ca_id, template_id) if found, otherwise None.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+            cursor.execute(f"USE {db_name}")
+            if alias_name:
+                query = """
+                    SELECT ca_id, template_id
+                    FROM ESTAliases
+                    WHERE name = %s
+                """
+                cursor.execute(query, (alias_name,))
+            else:
+                query = """
+                    SELECT ca_id, template_id 
+                    FROM ESTAliases 
+                    WHERE is_default = TRUE LIMIT 1;
+                """
+                cursor.execute(query)
+
+            result = cursor.fetchone()
+            cursor.close()
+
+            return result if result else None
+
+        except mysql.connector.Error as err:
+            logger.error(f"Database error: {err}")
             return None
 
 
@@ -287,12 +336,12 @@ class PKIDataBase:
             # Execute and commit
             cursor.execute(insert_query, data)
             self.__db_connection.commit()
-            print("Certificate inserted successfully!")
+            logger.info("Certificate inserted successfully!")
 
         except mysql.connector.Error as err:
-            print(f"Database error: {err}")
+            logger.error(f"Database error: {err}")
         except Exception as e:
-            print(f"Error processing certificate: {e}")
+            logger.error(f"Problem processing certificate: {e}")
         finally:
             cursor.close()
 
@@ -414,7 +463,7 @@ class PKIDataBase:
                 cursor.close()
                 return False  # No certificate found or already revoked
         except mysql.connector.Error as err:
-            print(f"Error: {err}")
+            logger.error(f"Error: {err}")
             return False
 
 
@@ -444,7 +493,7 @@ class PKIDataBase:
                 used_serials.add(serial_number)
 
         except mysql.connector.Error as err:
-            print(f"Database error: {err}")
+            logger.error(f"Database error: {err}")
 
         finally:
             cursor.close()
@@ -499,11 +548,42 @@ class PKIDataBase:
         
         return revoked_certificates
 
+
+    def get_estaliases_collection(self):
+        """
+        Retrieves a collection of EST aliaes from ESTAliases table.
+        
+        :return: List of dictionaries with 'id' and 'name'.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+            cursor.execute(f"USE {db_name}")
+
+            query = "SELECT * FROM ESTAliases"
+            cursor.execute(query)
+            estaliases_collection = cursor.fetchall()  # Fetch all results
+
+            return estaliases_collection
+
+        except mysql.connector.Error as e:
+            logger.error(f"Database error: {e}")
+            return []
+
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+
+
+
     def create_database(self):
         db_name = self.__config["database"]
 
         if self.__db_connection:
             cursor = self.__db_connection.cursor()
+
+            cursor.execute(f"GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' IDENTIFIED BY 'Password1!' WITH GRANT OPTION")
+            cursor.execute(f"FLUSH PRIVILEGES;")
             cursor.execute(f"DROP DATABASE IF EXISTS {db_name}")  # Drop the database if it exists
             cursor.execute(f"CREATE DATABASE {db_name}")         # Create the database
 
@@ -531,7 +611,7 @@ class PKIDataBase:
                 "CertificationAuthorities": """
                     CREATE TABLE IF NOT EXISTS CertificationAuthorities (
                         id INT PRIMARY KEY AUTO_INCREMENT,
-                        ca_name VARCHAR(255) NOT NULL,
+                        name VARCHAR(255) NOT NULL,
                         description TEXT,
                         contact_email VARCHAR(255),
                         certificate TEXT,
@@ -545,7 +625,8 @@ class PKIDataBase:
                         max_validity INT,
                         serial_number_length INT,
                         crl_validity  INT DEFAULT 365,
-                        extensions TEXT,
+                        extensions JSON NOT NULL,
+                        is_default BOOLEAN DEFAULT FALSE,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                     );
@@ -555,6 +636,7 @@ class PKIDataBase:
                         id INT PRIMARY KEY AUTO_INCREMENT,
                         name VARCHAR(255) NOT NULL,
                         definition JSON NOT NULL,
+                        is_default BOOLEAN DEFAULT FALSE,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                     );
@@ -580,12 +662,13 @@ class PKIDataBase:
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                     );
                 """,
-                "CertificateExtensions": """
-                    CREATE TABLE IF NOT EXISTS CertificateExtensions (
+                "ESTAliases": """
+                    CREATE TABLE IF NOT EXISTS ESTAliases (
                         id INT PRIMARY KEY AUTO_INCREMENT,
-                        certificate_id INT,
-                        extension_name VARCHAR(255) NOT NULL,
-                        extension_value TEXT NOT NULL,
+                        name VARCHAR(255) NOT NULL,
+                        ca_id INT,
+                        template_id INT,
+                        is_default BOOLEAN DEFAULT FALSE,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                     );
@@ -623,7 +706,7 @@ class PKIDataBase:
 
             # Create each table
             for table_name, create_statement in tables_without_fk.items():
-                print(f"Creating table: {table_name}")
+                logger.info(f"Creating table: {table_name}")
                 cursor.execute(create_statement)
 
             # STEP 2: Add foreign key constraints after tables are created
@@ -651,9 +734,14 @@ class PKIDataBase:
                 FOREIGN KEY (private_key_reference) REFERENCES PrivateKeyStorage(id);
                 """,
                 """
-                ALTER TABLE CertificateExtensions
-                ADD CONSTRAINT fk_extension_certificate_id
-                FOREIGN KEY (certificate_id) REFERENCES Certificates(id);
+                ALTER TABLE ESTAliases
+                ADD CONSTRAINT fk_estalias_ca_id
+                FOREIGN KEY (ca_id) REFERENCES CertificationAuthorities(id);
+                """,
+                """
+                ALTER TABLE ESTAliases
+                ADD CONSTRAINT fk_estalias_template_id
+                FOREIGN KEY (template_id) REFERENCES CertificateTemplates(id);
                 """,
                 """
                 ALTER TABLE CertificateLogs
@@ -669,10 +757,10 @@ class PKIDataBase:
 
             # Add foreign keys to the tables
             for fk_statement in foreign_keys:
-                print(f"Adding foreign key: {fk_statement}")
+                logger.info(f"Adding foreign key: {fk_statement}")
                 cursor.execute(fk_statement)
 
             cursor.close()
-            print("New PKI DB created successfully!")
+            logger.info("New PKI DB created successfully!")
         else:
-            print("New PKI DB not created. Connection error!")
+            logger.info("New PKI DB not created. Connection error!")

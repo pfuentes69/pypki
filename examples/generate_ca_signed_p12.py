@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import time
 from pypki.ca import CertificationAuthority
-from pypki.pki_tools import CertificateTools
+from pypki.certificate_tools import CertificateTools
 
 
 start_time = time.time()  # Record start time
@@ -44,7 +44,7 @@ certificate_p12 =  certificate.generate_pkcs12(
         key_algorithm = "RSA",
         key_type = "2048")
 
-with open("out/testv3_certificate.p12", "wb") as cert_file:
+with open("out/ca_signed_certificate.p12", "wb") as cert_file:
     cert_file.write(certificate_p12)
     cert_file.close()
 

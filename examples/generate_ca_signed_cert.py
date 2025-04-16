@@ -59,7 +59,7 @@ certificate_pem = certificate.generate_certificate_pem(
     certificate_key=certificate_key
 )
 
-with open("out/client_certificate_v2.pem", "wb") as cert_file:
+with open("out/ca_signed_certificate.pem", "wb") as cert_file:
     cert_file.write(certificate_pem)
     cert_file.close()
 
