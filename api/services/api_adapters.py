@@ -52,8 +52,13 @@ def get_ca_name(ca_id):
     else:
         return None
 
-def generate_certificate_from_csr(ca_template_config, csr_pem: bytes):
 
+def get_certificate_details_json(cert_id):
+    ca_details = pki.get_certificate_details(cert_id)
+    return ca_details
+
+
+def generate_certificate_from_csr(ca_template_config, csr_pem: bytes):
     pki.select_ca_by_id(ca_template_config["ca_id"])
     pki.select_cert_template_by_id(ca_template_config["template_id"])
 
@@ -93,3 +98,29 @@ def get_ca_and_template_id_by_alias_name(name):
     db.close_db()
 
     return result if result else None
+
+
+def get_certificate_status(cert_id:int = None, ca_id:int = None, ca_ski:str = None, serial_number:str = None):
+    """
+    Retrieve ca_id and template_id from ESTAliases by name.
+
+    Args:
+        db_config (dict): A dictionary containing database connection parameters.
+        name (str): The name to look up in the ESTAliases table.
+
+    Returns:
+        tuple or None: A tuple (ca_id, template_id) if found, otherwise None.
+    """
+    db = pki.get_db()
+    db.connect_to_db()
+    if ca_ski is not None:
+        ca_id = db.get_ca_id_by_ski(ca_ski=ca_ski)
+        if ca_id is None:
+            return None
+    result = db.get_certificate_status(certificate_id=cert_id, ca_id=ca_id, serial_number=serial_number)
+    db.close_db()
+
+    return result if result else None
+
+def get_ocsp_responder_by_issuer_ski(issuer_ski):
+    return pki.get_ocsp_responder_by_issuer_ski(issuer_ski=issuer_ski)

@@ -6,6 +6,7 @@ from .pki_tools import PKITools
 from .key_tools import KeyTools
 from .certificate_tools import CertificateTools
 from .pkcs11_helper import PKCS11Helper
+from .ocsp_responder import OCSPResponder
 from .log import logger
 from .core import PyPKI
 

@@ -14,6 +14,7 @@ from .certificate_tools import CertificateTools
 from .pki_tools import PKITools
 from .key_tools import KeyTools
 from .ca import CertificationAuthority
+from .ocsp_responder import OCSPResponder
 from .log import logger
 
 class PyPKI:
@@ -25,6 +26,7 @@ class PyPKI:
         self.__cert_tool = CertificateTools()
         self.__ca_id = 0
         self.__cert_template_id = 0
+        self.__ocsp_responders = []
 
         if config_file_json:
             with open(config_file_json, "rb") as config_file:
@@ -55,6 +57,12 @@ class PyPKI:
             with open(ca_store_path, "rb") as config_file:
                 ca_config_json = config_file.read()  # Read bytes from file
             self.create_ca_from_config_json(ca_config_json)
+
+        # Load existing OCSP Responder config from files
+        for ocsp_path in glob.glob(os.path.join(self.__config["ocsp_responder_folder"], "*.json")):
+            with open(ocsp_path, "rb") as config_file:
+                ocsp_config_json = config_file.read()  # Read bytes from file
+            self.create_ocsp_from_config_json(ocsp_config_json)
 
         self.__db.close_db()
         pass
@@ -140,6 +148,28 @@ class PyPKI:
         return ca_record
 
 
+    def create_ocsp_from_config_json(self, config_json: str):
+        ocsp_resp = OCSPResponder()
+        # Load existing CA config from file
+        ocsp_resp.load_config_json(config_json)
+        self.__db.connect_to_db()
+        self.__db.insert_ocsp_responder(ocsp_resp)
+        self.__db.close_db()
+        pass
+
+
+    def load_ocsp_responders(self):
+        self.__db.connect_to_db()
+        self.__ocsp_responders = self.__db.get_ocsp_responders_collection()
+        self.__db.close_db()
+        pass
+
+    def get_ocsp_responder_by_issuer_ski(self, issuer_ski):
+        for responder in self.__ocsp_responders:
+            if responder.get_issuer_ski() == issuer_ski:
+                return responder
+        return None
+
     def create_cert_template_from_json(self, config_json: str):
         # Load existing CA config from file
         cert_template = json.loads(config_json)
@@ -185,7 +215,8 @@ class PyPKI:
         use_active_ca=True, 
         validity_days=PKITools.INFINITE_VALIDITY,
         key_algorithm="RSA",
-        key_type="2048"
+        key_type="2048",
+        return_certificate = True
     ):
         certificate_key = KeyTools()
         certificate_key.generate_private_key(algorithm=key_algorithm, key_type=key_type)
@@ -196,7 +227,8 @@ class PyPKI:
                 request_json=request_json,
                 issuing_ca=self.__ca_active,
                 certificate_key=certificate_key,
-                validity_days=validity_days
+                validity_days=validity_days,
+                enforce_template=True
             )
         else:
             ca_id = None
@@ -204,15 +236,22 @@ class PyPKI:
                 request_json=request_json,
                 issuing_ca=None,
                 certificate_key=certificate_key,
-                validity_days=validity_days
+                validity_days=validity_days,
+                enforce_template=True
             )
         
         if new_cert_pem:
             self.__db.connect_to_db()
-            self.__db.insert_certificate(new_cert_pem, ca_id, self.__cert_template_id, private_key_reference = None)
+            new_cert_id = self.__db.insert_certificate(new_cert_pem, ca_id, self.__cert_template_id, private_key_reference = None)
             self.__db.close_db()
+        else:
+            logger.error("Problem generating new certificate")
+            return None
         
-        return new_cert_pem
+        if return_certificate is True:
+            return new_cert_pem
+        else:
+            return new_cert_id
 
             
     def generate_certificate_from_csr(
@@ -221,7 +260,9 @@ class PyPKI:
             request_json: str = None,
             use_active_ca: bool = True,
             validity_days=PKITools.INFINITE_VALIDITY,
-            enforce_template: bool = False ):
+            enforce_template: bool = False,
+            return_certificate = True
+        ):
 
         if use_active_ca:
             ca_id = self.__ca_id
@@ -243,25 +284,34 @@ class PyPKI:
         if new_cert:
             new_cert_pem = new_cert.public_bytes(serialization.Encoding.PEM)
             self.__db.connect_to_db()
-            self.__db.insert_certificate(new_cert_pem, ca_id, self.__cert_template_id, private_key_reference = None)
+            new_cert_id = self.__db.insert_certificate(new_cert_pem, ca_id, self.__cert_template_id, private_key_reference = None)
             self.__db.close_db()
+        else:
+            logger.error("Problem generating new certificate")
+            return None
         
-        return new_cert
+        if return_certificate is True:
+            return new_cert
+        else:
+            return new_cert_id
     
     def generate_certificate_pem_from_csr(
-        self, 
-        csr_pem: bytes,
-        request_json: str = None,
-        use_active_ca: bool = True,
-        validity_days=PKITools.INFINITE_VALIDITY,
-        enforce_template: bool = False ):
+            self, 
+            csr_pem: bytes,
+            request_json: str = None,
+            use_active_ca: bool = True,
+            validity_days=PKITools.INFINITE_VALIDITY,
+            enforce_template: bool = False,
+            return_certificate = True
+        ):
 
         new_cert = self.generate_certificate_from_csr(
             csr_pem=csr_pem,
             request_json=request_json,
             use_active_ca=use_active_ca,
             validity_days=validity_days,
-            enforce_template=enforce_template
+            enforce_template=enforce_template,
+            return_certificate=return_certificate
         )
 
         return new_cert.public_bytes(serialization.Encoding.PEM)
@@ -277,6 +327,12 @@ class PyPKI:
         self.__db.close_db()
         return id
 
+
+    def get_certificate_details(self, certificate_id=None, serial_number=None, fingerprint=None):
+        self.__db.connect_to_db()
+        cert_details = self.__db.get_certificate_record(certificate_id=certificate_id, serial_number=serial_number, ca_id=self.__ca_id, fingerprint=fingerprint)
+        self.__db.close_db()
+        return cert_details
 
     def get_certificate_pem(self, certificate_id=None, serial_number=None, fingerprint=None):
         self.__db.connect_to_db()

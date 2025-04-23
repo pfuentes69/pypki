@@ -37,6 +37,26 @@ def get_ca_details(ca_id):
     result = api_adapters.convert_to_serializable(ca_details)
     return jsonify(result)
 
+@bp.route('/certificate/<int:cert_id>', methods=['GET'])
+def get_certificate_details(cert_id):
+    logger.info("API - GET Certificate Details")
+    cert_details = api_adapters.get_certificate_details_json(cert_id)
+    if not cert_details:
+        abort(404, description="Certificate not found")
+    result = api_adapters.convert_to_serializable(cert_details)
+    return jsonify(result)
+
+
+@bp.route('/certificate/status/<int:cert_id>', methods=['GET'])
+def get_certificate_status(cert_id):
+    logger.info("API - GET Certificate Revocation Status")
+    cert_status = api_adapters.get_certificate_status(cert_id)
+    if not cert_status:
+        abort(404, description="Certificate not found")
+#    result = api_adapters.convert_to_serializable(cert_details)
+    return jsonify(cert_status)
+
+
 @bp.route("/ca/crl/<int:ca_id>", methods=["GET"])
 def download_crl(ca_id):
     ca_name:str = api_adapters.get_ca_name(ca_id)

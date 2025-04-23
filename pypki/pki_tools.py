@@ -42,6 +42,10 @@ class PKITools:
         "smartCardLogon": ObjectIdentifier("1.3.6.1.4.1.311.20.2.2"),  # Microsoft-specific
         "documentSigning": ObjectIdentifier("1.3.6.1.4.1.311.10.3.12"),  # Microsoft document signing
         "anyExtendedKeyUsage": ObjectIdentifier("2.5.29.37.0"),  # Any extended key usage
+
+        # Other OIDs
+        "OCSPNoCheck": ObjectIdentifier("1.3.6.1.5.5.7.48.1.5"),
+
     }
 
 

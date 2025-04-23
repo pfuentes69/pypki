@@ -14,7 +14,7 @@ print("Generate self-signed certificate")
 certificate = CertificateTools()
 
 # Load template and request data
-with open("config/cert_templates/client_cert_template_v2.json", "r") as template_file:
+with open("config/cert_templates/iot_rootca_cert_template.json", "r") as template_file:
 #with open("config/cert_templates/server_cert_template.json", "r") as template_file:
     template_json = template_file.read()
 
@@ -25,7 +25,7 @@ request_json = '''{
     "subject_name": {
         "countryName": "ES",
         "organizationName": "Naviter",
-        "commonName": "Test CA 2"
+        "commonName": "IoT Root CA"
     }
 }
 '''
@@ -33,7 +33,9 @@ request_json = '''{
 
 request_json = '''{
     "subject_name": {
-        "commonName": "Test"
+        "countryName": "ES",
+        "organizationName": "Naviter",
+        "commonName": "IoT Root CA"
     }
 }
 '''
@@ -47,9 +49,10 @@ request_json = '''{
     
 # Generate an RSA private key
 certificate_key = KeyTools()
-certificate_key.generate_private_key("RSA", "2048")
+#certificate_key.generate_private_key("RSA", "2048")
+certificate_key.generate_private_key("ECDSA", "P-256")
 private_key_pem = certificate_key.get_private_key_pem()
-with open("out/ss_private_key.pem", "wb") as key_file:
+with open("out/iot_rootca_private_key.pem", "wb") as key_file:
     key_file.write(private_key_pem)
     key_file.close()
 
@@ -71,7 +74,7 @@ with open("out/ss_private_key.pem", "wb") as key_file:
 
 certificate_pem = certificate.generate_certificate_pem(request_json=request_json, certificate_key=certificate_key)
 
-with open("out/ss_certificate.pem", "wb") as cert_file:
+with open("out/iot_rootca_certificate.pem", "wb") as cert_file:
     cert_file.write(certificate_pem)
     cert_file.close()
 

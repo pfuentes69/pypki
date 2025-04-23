@@ -8,6 +8,7 @@
     },
     "template_folder": "config/cert_templates",
     "ca_store_folder": "config/ca_store",
+    "ocsp_responder_folder": "config/ocsp_responders",
     "default_ca_id": 0,
     "default_template": 0
 }

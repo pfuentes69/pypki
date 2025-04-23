@@ -5,6 +5,7 @@ from cryptography.hazmat.primitives.serialization import pkcs12
 from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature, decode_dss_signature
 from cryptography.x509 import NameOID, Name, NameAttribute, CertificateBuilder
+from cryptography.x509.oid import ObjectIdentifier
 from asn1crypto import x509 as asn1_x509
 from asn1crypto.core import OctetBitString
 from ipaddress import ip_address
@@ -126,6 +127,25 @@ class CertificateTools:
                 policy = x509.CertificatePolicies(policy_information)
                 builder = builder.add_extension(policy, critical=self.__template__["extensions"]["policyIdentifiers"]["critical"])
             
+            ocsp_nocheck_present = False
+            # OCSP No-Chech Extension
+            if "OCSPNoCheck" in self.__template__["extensions"]  and self.__template__["extensions"]["OCSPNoCheck"]["include"]:
+                """
+                builder = builder.add_extension(
+                    x509.UnrecognizedExtension(PKITools.OID_MAPPING["OCSPNoCheck"], b''),
+                    critical=False
+                )
+                """
+                OCSP_NO_CHECK_OID = ObjectIdentifier("1.3.6.1.5.5.7.48.1.5")
+                ASN1_NULL_DER = b'\x05\x00'  # DER encoding for ASN.1 NULL
+
+                builder = builder.add_extension(
+                    x509.UnrecognizedExtension(OCSP_NO_CHECK_OID, ASN1_NULL_DER),
+                    critical=False
+                )
+                ocsp_nocheck_present = True
+
+
             # AIA extension can include OCSP URI and/or CA Issuers URI
             aia_ca_present = False
             aia_template_present = False
@@ -150,11 +170,11 @@ class CertificateTools:
                 if "caIssuers" in issuing_ca.get_config()["extensions"]["aia"]["authorityInfoAccess"]:
                     aia_ca_list.append(x509.AccessDescription(x509.ObjectIdentifier('1.3.6.1.5.5.7.48.2'), x509.UniformResourceIdentifier(issuing_ca.get_config()["extensions"]["aia"]["authorityInfoAccess"]["caIssuers"]["url"])))
 
-            if aia_template_present is True:
+            if aia_template_present is True and ocsp_nocheck_present is False:
                 # The template takes precedence
                 aia = x509.AuthorityInformationAccess(aia_template_list)
                 builder = builder.add_extension(aia, critical = aia_critical_template)
-            elif aia_ca_present is True:
+            elif aia_ca_present is True and ocsp_nocheck_present is False:
                 # Defaults to the CA config, if present
                 aia = x509.AuthorityInformationAccess(aia_ca_list)
                 builder = builder.add_extension(aia, critical = aia_critical_ca)
@@ -191,10 +211,10 @@ class CertificateTools:
                 ])
                 cdp_critical_ca = issuing_ca.get_config()["extensions"]["cdp"]["critical"]
             
-            if cdp_template_present is True:
+            if cdp_template_present is True and ocsp_nocheck_present is False:
                 # The template takes precedence
                 builder = builder.add_extension(cdp_template, critical=cdp_critical_template)
-            elif cdp_ca_present is True:
+            elif cdp_ca_present is True and ocsp_nocheck_present is False:
                 # Defaults to the CA config, if present
                 builder = builder.add_extension(cdp_ca, critical=cdp_critical_ca)
 
@@ -207,7 +227,12 @@ class CertificateTools:
                     "emailProtection": x509.ExtendedKeyUsageOID.EMAIL_PROTECTION,
                     "codeSigning": x509.ExtendedKeyUsageOID.CODE_SIGNING,
                     "timeStamping": x509.ExtendedKeyUsageOID.TIME_STAMPING,
+                    "ocspSigning": x509.ExtendedKeyUsageOID.OCSP_SIGNING,  # 1.3.6.1.5.5.7.3.9
+                    "smartCardLogon": ObjectIdentifier("1.3.6.1.4.1.311.20.2.2"),  # Microsoft-specific
+                    "documentSigning": ObjectIdentifier("1.3.6.1.4.1.311.10.3.12"),  # Microsoft document signing
+                    "anyExtendedKeyUsage": ObjectIdentifier("2.5.29.37.0"),  # Any extended key usage
                 }
+
                 eku_list = [eku_oids[usage] for usage in eku_values if usage in eku_oids]
                 if eku_list:
                     builder = builder.add_extension(x509.ExtendedKeyUsage(eku_list), critical=self.__template__["extensions"]["extendedKeyUsage"]["critical"])

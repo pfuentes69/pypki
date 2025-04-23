@@ -4,8 +4,11 @@ from mysql.connector import OperationalError
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from cryptography.hazmat.primitives.asymmetric import ec
 from datetime import datetime
 from .ca import CertificationAuthority
+from .ocsp_responder import OCSPResponder
 from .log import logger
 
 
@@ -70,15 +73,40 @@ class PKIDataBase:
             
             insert_query = """
                 INSERT INTO CertificationAuthorities (
-                    name, certificate, private_key, certificate_chain,
+                    name, certificate, ski, private_key, certificate_chain,
                     token_slot, token_key_id, token_password, 
                     max_validity, serial_number_length, 
                     crl_validity, extensions
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
+
+            # Load cert and extract public key
+            cert = x509.load_pem_x509_certificate(ca.get_config()["crypto"]["certificate"].encode("utf-8"))
+            public_key = cert.public_key()
+
+            if isinstance(public_key, ec.EllipticCurvePublicKey):
+                # Get raw public key bytes (uncompressed point format)
+                public_bytes = public_key.public_bytes(
+                    encoding=serialization.Encoding.X962,
+                    format=serialization.PublicFormat.UncompressedPoint
+                )
+
+                digest = hashes.Hash(hashes.SHA1())
+                digest.update(public_bytes)
+                ski = digest.finalize().hex()
+            else:
+                # DER-encode the public key (SPKI format)
+                spki_der = public_key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+
+                # SHA-1 hash of the DER-encoded SPKI = SKI
+                digest = hashes.Hash(hashes.SHA1())
+                digest.update(spki_der)
+                ski = digest.finalize().hex()
+
             data = (
                 ca.get_config()["ca_name"],
                 ca.get_config()["crypto"]["certificate"],
+                ski,
                 ca.get_config()["crypto"]["private_key"],
                 ca.get_config()["crypto"]["certificate_chain"],
                 ca.get_config()["crypto"]["token_slot"],
@@ -110,6 +138,23 @@ class PKIDataBase:
                 SELECT id FROM CertificationAuthorities WHERE name = %s
             """
             cursor.execute(query, (ca_name,))
+            result = cursor.fetchone()
+            cursor.close()
+        
+            return result[0] if result else None
+        except mysql.connector.Error as err:
+            logger.error(err)
+            return None
+
+    def get_ca_id_by_ski(self, ca_ski: str):
+        try:
+            db_name = self.__config["database"]
+            cursor = self.__db_connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+            query = """
+                SELECT id FROM CertificationAuthorities WHERE ski = %s
+            """
+            cursor.execute(query, (ca_ski,))
             result = cursor.fetchone()
             cursor.close()
         
@@ -168,6 +213,80 @@ class PKIDataBase:
         finally:
             if 'cursor' in locals():
                 cursor.close()
+
+
+    def insert_ocsp_responder(self, ocsp_resp: OCSPResponder):
+        """
+        Method to insert an OCSP Responder object into the database.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self.__db_connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+            
+            insert_query = """
+                INSERT INTO OCSPResponders (
+                    name, issuer_ski, issuer_certificate, 
+                    private_key, certificate, response_validity
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+            """
+
+            data = (
+                ocsp_resp.get_config()["name"],
+                ocsp_resp.get_config()["issuer_ski"],
+                ocsp_resp.get_config()["issuer_certificate"],
+                ocsp_resp.get_config()["crypto"]["private_key"],
+                ocsp_resp.get_config()["crypto"]["certificate"],
+                ocsp_resp.get_config()["response_validity"]
+            )
+
+            cursor.execute(insert_query, data)
+            self.__db_connection.commit()
+            logger.info("OCSP Responder inserted successfully!")
+
+        except mysql.connector.Error as err:
+            logger.error(f"Error inserting OCSP Respoder: {err}")
+        finally:
+            cursor.close()
+
+
+    def get_ocsp_responders_collection(self):
+        """
+        Retrieves a collection of OCSP Responders from the OCSPResponders table.
+        
+        :return: List of objects
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+            cursor.execute(f"USE {db_name}")
+
+            query = "SELECT * FROM OCSPResponders"
+            cursor.execute(query)
+
+            # Build the list of OCSPResponder objects
+            ocsp_responders = []
+            for row in cursor.fetchall():
+                responder = OCSPResponder(
+                    name=row['name'],
+                    issuer_ski=row['issuer_ski'],
+                    issuer_certificate=row['issuer_certificate'],
+                    response_validity=row['response_validity'],
+                    certificate_pem=row['certificate'],
+                    private_key_pem=row['private_key']
+                )
+                ocsp_responders.append(responder)
+
+            return ocsp_responders
+
+        except mysql.connector.Error as e:
+            logger.error(f"Database error: {e}")
+            return []
+
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+
 
     def insert_cert_template(self, cert_template: dict):
         """
@@ -292,7 +411,7 @@ class PKIDataBase:
             cert = x509.load_pem_x509_certificate(pem_certificate, default_backend())
             
             # Extract certificate details
-            serial_number = cert.serial_number
+            serial_number = format(cert.serial_number, 'x')
             subject_name = cert.subject.rfc4514_string()
             issuer_name = cert.issuer.rfc4514_string()
             not_before = cert.not_valid_before_utc
@@ -335,16 +454,21 @@ class PKIDataBase:
 
             # Execute and commit
             cursor.execute(insert_query, data)
+            # Get the generated ID
+            new_id = cursor.lastrowid
+            # Commit the transaction
             self.__db_connection.commit()
-            logger.info("Certificate inserted successfully!")
+            logger.info(f"Certificate inserted successfully! New ID: {new_id}")
 
         except mysql.connector.Error as err:
             logger.error(f"Database error: {err}")
+            return None
         except Exception as e:
             logger.error(f"Problem processing certificate: {e}")
         finally:
             cursor.close()
 
+        return new_id
 
     def get_certificate_id(self, serial_number=None, ca_id=None, fingerprint=None):
         """
@@ -411,7 +535,7 @@ class PKIDataBase:
             params.append(fingerprint)
         else:
             raise ValueError("At least one valid search criteria must be provided.")
-
+        
         # Establish database connection
         db_name = self.__config["database"]
         cursor = self.__db_connection.cursor(buffered=True, dictionary=True)
@@ -421,6 +545,51 @@ class PKIDataBase:
         cursor.close()
 
         return result  # Returns a dictionary or None if not found
+
+
+    def get_certificate_status(self, certificate_id=None, serial_number=None, ca_id=None, fingerprint=None):
+        """
+        Retrieve certificate status including serial number, fingerprint, revocation status, and revocation time.
+
+        Parameters:
+            certificate_id (int, optional): Unique certificate ID.
+            serial_number (str, optional): Certificate serial number.
+            ca_id (int, optional): Certificate Authority ID (required if searching by serial_number).
+            fingerprint (str, optional): Certificate fingerprint.
+
+        Returns:
+            tuple: (serial_number, fingerprint, status, revocation_time)
+                or None if certificate not found.
+        """
+        # Query for certificate record
+        cert = self.get_certificate_record(
+            certificate_id=certificate_id,
+            serial_number=serial_number,
+            ca_id=ca_id,
+            fingerprint=fingerprint
+        )
+
+        if not cert:
+            return None  # Not found
+
+        serial = cert.get("serial_number")
+        fp = cert.get("fingerprint")
+        revoked = cert.get("status")  # Expected to be boolean or similar
+        revocation_time = cert.get("revoked_at")  # Could be None or datetime
+        revocation_reason = cert.get("revocation_reason")  # Could be None or int
+        cert_pem = cert.get("certificate_data")
+
+        """
+        # Determine status
+        if revoked :
+            status = "Revoked"
+        elif revoked is False:
+            status = "Good"
+        else:
+            status = "Unknown"
+        """
+            
+        return (serial, fp, revoked, revocation_time, revocation_reason, cert_pem)
 
 
     def revoke_certificate(self, certificate_id, revocation_reason):
@@ -533,7 +702,7 @@ class PKIDataBase:
         
         # Iterate over the rows and format the data
         for row in rows:
-            serial_number = int(row['serial_number'])
+            serial_number = int(row['serial_number'], 16)
             revoked_at = row['revoked_at']
             revocation_reason = row['revocation_reason']
             
@@ -582,7 +751,7 @@ class PKIDataBase:
         if self.__db_connection:
             cursor = self.__db_connection.cursor()
 
-            cursor.execute(f"GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' IDENTIFIED BY 'Password1!' WITH GRANT OPTION")
+#            cursor.execute(f"GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' IDENTIFIED BY 'Password1$' WITH GRANT OPTION")
             cursor.execute(f"FLUSH PRIVILEGES;")
             cursor.execute(f"DROP DATABASE IF EXISTS {db_name}")  # Drop the database if it exists
             cursor.execute(f"CREATE DATABASE {db_name}")         # Create the database
@@ -616,6 +785,7 @@ class PKIDataBase:
                         contact_email VARCHAR(255),
                         certificate TEXT,
                         public_key TEXT,
+                        ski VARCHAR(64), 
                         private_key TEXT,
                         private_key_reference INT,
                         certificate_chain TEXT,
@@ -669,6 +839,25 @@ class PKIDataBase:
                         ca_id INT,
                         template_id INT,
                         is_default BOOLEAN DEFAULT FALSE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                    );
+                """,
+                "OCSPResponders": """
+                    CREATE TABLE IF NOT EXISTS OCSPResponders (
+                        id INT PRIMARY KEY AUTO_INCREMENT,
+                        name VARCHAR(255) NOT NULL,
+                        ca_id INT,
+                        issuer_ski VARCHAR(128) NOT NULL UNIQUE,
+                        issuer_certificate TEXT,
+                        not_after DATETIME,
+                        response_validity INT DEFAULT 1,
+                        private_key TEXT,
+                        private_key_reference INT,
+                        certificate TEXT,
+                        token_slot INT, 
+                        token_key_id VARCHAR(64), 
+                        token_password VARCHAR(64), 
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                     );
@@ -736,6 +925,11 @@ class PKIDataBase:
                 """
                 ALTER TABLE ESTAliases
                 ADD CONSTRAINT fk_estalias_ca_id
+                FOREIGN KEY (ca_id) REFERENCES CertificationAuthorities(id);
+                """,
+                """
+                ALTER TABLE OCSPResponders
+                ADD CONSTRAINT fk_ocspresponders_ca_id
                 FOREIGN KEY (ca_id) REFERENCES CertificationAuthorities(id);
                 """,
                 """
