@@ -11,7 +11,7 @@ start_time = time.time()  # Record start time
 
 print("Reset PKI Database")
 
-pki = PyPKI("config/config.json")
+pki = PyPKI("config/config.aws.json")
 
 pki.reset_pki()
 

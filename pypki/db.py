@@ -751,7 +751,7 @@ class PKIDataBase:
         if self.__db_connection:
             cursor = self.__db_connection.cursor()
 
-#            cursor.execute(f"GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' IDENTIFIED BY 'Password1$' WITH GRANT OPTION")
+            cursor.execute(f"GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' IDENTIFIED BY 'Password1$' WITH GRANT OPTION")
             cursor.execute(f"FLUSH PRIVILEGES;")
             cursor.execute(f"DROP DATABASE IF EXISTS {db_name}")  # Drop the database if it exists
             cursor.execute(f"CREATE DATABASE {db_name}")         # Create the database

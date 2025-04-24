@@ -27,3 +27,4 @@ Temporary Items
 __pycache__
 temp
 out
+config/config.aws.json
