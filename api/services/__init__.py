@@ -23,6 +23,8 @@ ca.load_config_json(ca_config_json)
 pki = PyPKI("config/config.json")
 
 pki.load_ocsp_responders()
+pki.load_template_collection()
+pki.load_ca_collection()
 
 # Select default CA
 #ca: CertificationAuthority = pki.select_ca_by_name("IoT Root CA 1")

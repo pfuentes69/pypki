@@ -13,8 +13,6 @@ from pypki.core import PyPKI
 def generate_sample_certs():
     # Load request data
 
-    pki.select_cert_template_by_name("IoT Device")
-
     # Load the JSON request template
     request_json_template_str = '''
         {
@@ -48,8 +46,11 @@ start_time = time.time()  # Record start time
 print("Generate sample certificates")
 
 pki = PyPKI("config/config.aws.json")
+pki.load_template_collection()
+
 
 ca = pki.select_ca_by_name("IoT Root CA 1")
+pki.select_cert_template_by_name("IoT Device")
 
 generate_sample_certs()
 

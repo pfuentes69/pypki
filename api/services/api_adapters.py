@@ -28,12 +28,12 @@ def process_input(data):
     return {"result": result}
 
 
-def get_ca_collection_json():
+def get_ca_collection():
     ca_list = pki.get_ca_collection()
     return ca_list
 
 
-def get_ca_details_json(ca_id):
+def get_ca_details(ca_id):
     ca_details = pki.get_ca_by_id(ca_id)
     return ca_details
 
@@ -58,7 +58,7 @@ def get_certificate_details_json(cert_id):
     return ca_details
 
 
-def generate_certificate_from_csr(ca_template_config, csr_pem: bytes):
+def generate_certificate_from_csr(ca_template_config, csr_pem: bytes, return_certificate:bool = True):
     pki.select_ca_by_id(ca_template_config["ca_id"])
     pki.select_cert_template_by_id(ca_template_config["template_id"])
 
@@ -68,7 +68,8 @@ def generate_certificate_from_csr(ca_template_config, csr_pem: bytes):
         request_json=None,
         use_active_ca=True,
         validity_days=PKITools.INFINITE_VALIDITY, 
-        enforce_template=True
+        enforce_template=True,
+        return_certificate=return_certificate
     )
     
     return certificate_der
@@ -122,5 +123,18 @@ def get_certificate_status(cert_id:int = None, ca_id:int = None, ca_ski:str = No
 
     return result if result else None
 
+
+def revoke_certificate(cert_id, revocation_reason):
+    try:
+        return pki.revoke_certificate(cert_id, revocation_reason)
+    except Exception as e:
+        return False
+
+
 def get_ocsp_responder_by_issuer_ski(issuer_ski):
     return pki.get_ocsp_responder_by_issuer_ski(issuer_ski=issuer_ski)
+
+
+def get_template_collection():
+    template_list = pki.get_template_collection()
+    return template_list

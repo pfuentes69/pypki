@@ -27,6 +27,8 @@ class PyPKI:
         self.__ca_id = 0
         self.__cert_template_id = 0
         self.__ocsp_responders = []
+        self.__ca_collection = []
+        self.__template_collection = []
 
         if config_file_json:
             with open(config_file_json, "rb") as config_file:
@@ -82,6 +84,25 @@ class PyPKI:
         pass
 
 
+    def load_ca_collection(self):
+        self.__db.connect_to_db()
+        self.__ca_collection = self.__db.get_ca_collection()
+        self.__db.close_db()
+        pass
+
+
+    def get_ca_collection(self):
+        return self.__ca_collection
+
+
+    def get_ca_by_id(self, ca_id: int) -> CertificationAuthority:
+        # Get CA config from DB
+        self.__db.connect_to_db()
+        ca_record = self.__db.get_ca_record_by_id(ca_id)
+        self.__db.close_db()
+        return ca_record
+
+
     def select_ca_by_name(self, ca_name: str) -> CertificationAuthority:
         self.__db.connect_to_db()
         ca_id = self.__db.get_ca_id_by_name(ca_name)
@@ -133,21 +154,6 @@ class PyPKI:
         return self.__ca_active
 
 
-    def get_ca_collection(self):
-        self.__db.connect_to_db()
-        ca_collection = self.__db.get_ca_collection()
-        self.__db.close_db()
-        return ca_collection
-
-
-    def get_ca_by_id(self, ca_id: int) -> CertificationAuthority:
-        # Get CA config from DB
-        self.__db.connect_to_db()
-        ca_record = self.__db.get_ca_record_by_id(ca_id)
-        self.__db.close_db()
-        return ca_record
-
-
     def create_ocsp_from_config_json(self, config_json: str):
         ocsp_resp = OCSPResponder()
         # Load existing CA config from file
@@ -179,6 +185,17 @@ class PyPKI:
         pass
 
 
+    def load_template_collection(self):
+        self.__db.connect_to_db()
+        self.__template_collection = self.__db.get_template_collection()
+        self.__db.close_db()
+        pass
+
+
+    def get_template_collection(self):
+        return self.__template_collection
+
+    """
     def select_cert_template_by_name(self, cert_template_name: str) -> CertificateTools:
         self.__db.connect_to_db()
         cert_template_id = self.__db.get_cert_template_id_by_name(cert_template_name)
@@ -192,8 +209,22 @@ class PyPKI:
             logger.info(f"Certificate Template {cert_template_name} not found!")
         self.__db.close_db()
         return self.__cert_tool
+    """
+
+    def select_cert_template_by_name(self, cert_template_name: str) -> CertificateTools:
+        self.__cert_template_id = 0
+        self.__cert_tool = None
+        if self.__template_collection:
+            for template in self.__template_collection:
+                if template.get("name") == cert_template_name:
+                    logger.info(f"Certificate Template {cert_template_name} selected")
+                    return self.select_cert_template_by_id(template.get("id"))
+
+        logger.info(f"Certificate Template {cert_template_name} not found!")
+        return None
 
 
+    """
     def select_cert_template_by_id(self, cert_template_id: int) -> CertificateTools:
         logger.info(f"Select Template ID = {cert_template_id}")
         self.__db.connect_to_db()
@@ -206,6 +237,22 @@ class PyPKI:
             self.__cert_tool.load_certificate_template(cert_template_json)
         else:
             self.__cert_type_id = 0
+
+        return self.__cert_tool
+    """
+
+    def select_cert_template_by_id(self, cert_template_id: int) -> CertificateTools:
+        logger.info(f"Select Template ID = {cert_template_id}")
+        self.__cert_template_id = 0
+        self.__cert_tool = None
+        if self.__template_collection:
+            for template in self.__template_collection:
+                if template.get("id") == cert_template_id:
+                    self.__cert_template_id = cert_template_id
+                    self.__cert_tool = CertificateTools()
+                    cert_template_json = template.get("definition")
+                    self.__cert_tool.load_certificate_template(cert_template_json)
+                    break
 
         return self.__cert_tool
 
@@ -280,7 +327,7 @@ class PyPKI:
                 issuing_ca=None, 
                 validity_days=validity_days,
                 enforce_template=enforce_template)
-        
+
         if new_cert:
             new_cert_pem = new_cert.public_bytes(serialization.Encoding.PEM)
             self.__db.connect_to_db()

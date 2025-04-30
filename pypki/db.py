@@ -200,7 +200,7 @@ class PKIDataBase:
             cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
             cursor.execute(f"USE {db_name}")
 
-            query = "SELECT id, name FROM CertificationAuthorities"
+            query = "SELECT * FROM CertificationAuthorities"
             cursor.execute(query)
             ca_collection = cursor.fetchall()  # Fetch all results
 
@@ -279,6 +279,31 @@ class PKIDataBase:
 
             return ocsp_responders
 
+        except mysql.connector.Error as e:
+            logger.error(f"Database error: {e}")
+            return []
+
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+
+
+    def get_template_collection(self):
+        """
+        Retrieves a collection of Cetificate Templates from the CertificateTemplates table.
+        
+        :return: List of objects
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+            cursor.execute(f"USE {db_name}")
+
+            query = "SELECT * FROM CertificateTemplates"
+            cursor.execute(query)
+            template_collection = cursor.fetchall()  # Fetch all results
+
+            return template_collection
         except mysql.connector.Error as e:
             logger.error(f"Database error: {e}")
             return []
