@@ -133,6 +133,12 @@ def get_template_details(template_id):
     return definition
 
 
+def export_cert_template(template_id):
+    db = pki.get_db()
+    with db.connection():
+        return db.export_cert_template(template_id)
+
+
 def update_template(template_id, template_dict):
     db = pki.get_db()
     with db.connection():

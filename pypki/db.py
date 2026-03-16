@@ -424,6 +424,19 @@ class PKIDataBase:
             return None
         
 
+    def export_cert_template(self, cert_template_id: int):
+        """
+        Returns the definition of a Certificate Template as a dict, suitable for export.
+        """
+        record = self.get_cert_template_record_by_id(cert_template_id)
+        if not record:
+            return None
+        definition = record.get("definition")
+        if isinstance(definition, str):
+            return json.loads(definition)
+        return definition
+
+
     def get_ca_and_template_id_by_alias_name(self, alias_name = None):
         """
         Retrieve ca_id and template_id from ESTAliases by name.

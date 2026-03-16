@@ -1,3 +1,6 @@
+import json
+import re
+
 from flask import Blueprint, jsonify, request, abort, Response, send_from_directory
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import pkcs7
@@ -236,6 +239,22 @@ def get_template_details(template_id):
     if not result:
         abort(404, description="Template not found")
     return jsonify(result), 200
+
+
+@bp.route('/template/<int:template_id>/export', methods=['GET'])
+def export_template(template_id):
+    logger.info(f"API - GET Export Template {template_id}")
+    definition = api_adapters.export_cert_template(template_id)
+    if not definition:
+        abort(404, description="Template not found")
+    name = definition.get("template_name", f"template_{template_id}")
+    filename = re.sub(r'[^a-zA-Z0-9_\-]', '_', name) + '.json'
+    response = Response(
+        json.dumps(definition, indent=2),
+        content_type='application/json'
+    )
+    response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response
 
 
 @bp.route('/template/<int:template_id>', methods=['PUT'])
