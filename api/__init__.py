@@ -1,4 +1,5 @@
 from flask import Flask
+from flask_cors import CORS
 
 from pypki import logger
 
@@ -7,6 +8,7 @@ def create_app():
     logger.info("Flask App creation")
 
     app = Flask(__name__)
+    CORS(app)
 
     # Register Blueprints
     from .routes.main_routes import bp as main_bp

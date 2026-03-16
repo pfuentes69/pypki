@@ -221,19 +221,7 @@ class CertificateTools:
             # Extended Key Usage
             if "extendedKeyUsage" in self.__template__["extensions"]:
                 eku_values = self.__template__["extensions"]["extendedKeyUsage"]["allowed"]
-                eku_oids = {
-                    "serverAuth": x509.ExtendedKeyUsageOID.SERVER_AUTH,
-                    "clientAuth": x509.ExtendedKeyUsageOID.CLIENT_AUTH,
-                    "emailProtection": x509.ExtendedKeyUsageOID.EMAIL_PROTECTION,
-                    "codeSigning": x509.ExtendedKeyUsageOID.CODE_SIGNING,
-                    "timeStamping": x509.ExtendedKeyUsageOID.TIME_STAMPING,
-                    "ocspSigning": x509.ExtendedKeyUsageOID.OCSP_SIGNING,  # 1.3.6.1.5.5.7.3.9
-                    "smartCardLogon": ObjectIdentifier("1.3.6.1.4.1.311.20.2.2"),  # Microsoft-specific
-                    "documentSigning": ObjectIdentifier("1.3.6.1.4.1.311.10.3.12"),  # Microsoft document signing
-                    "anyExtendedKeyUsage": ObjectIdentifier("2.5.29.37.0"),  # Any extended key usage
-                }
-
-                eku_list = [eku_oids[usage] for usage in eku_values if usage in eku_oids]
+                eku_list = [PKITools.OID_MAPPING[usage] for usage in eku_values if usage in PKITools.OID_MAPPING]
                 if eku_list:
                     builder = builder.add_extension(x509.ExtendedKeyUsage(eku_list), critical=self.__template__["extensions"]["extendedKeyUsage"]["critical"])
 
@@ -456,63 +444,38 @@ class CertificateTools:
             .not_valid_after(not_valid_after)
         )
 
-        # ✅ Copy all extensions from the CSR
+        # Copy all extensions from the CSR
         for ext in csr.extensions:
             cert_builder = cert_builder.add_extension(ext.value, ext.critical)
 
-        # Use a temporary key to generate the TBS certificate bytes
-        if signing_private_key.is_hsm() or isinstance(signing_private_key.get_private_key(), rsa.RSAPrivateKey):
+        if signing_private_key.is_hsm():
+            # PKCS#11 path: the token only signs pre-computed digests (CKM_RSA_PKCS),
+            # so we must sign with a dummy key first, extract the TBS bytes, hash them,
+            # sign the hash via the HSM, then patch the signature in the DER.
             dummy_private_key = rsa.generate_private_key(
                 public_exponent=65537,
                 key_size=2048,
                 backend=None
             )
-        else:
-            dummy_private_key = ec.generate_private_key(
-                ec.SECP256R1(),  # NIST P-256 TODO: THIS IS INCOMPLETE
-                backend=None
-            )
+            pre_cert = cert_builder.sign(private_key=dummy_private_key, algorithm=hashes.SHA256(), backend=None)
 
-        pre_cert = cert_builder.sign(
-            private_key=dummy_private_key,
-            algorithm=hashes.SHA256(),
-            backend=None
-        )
-        tbs_cert_bytes = pre_cert.tbs_certificate_bytes
+            digest = hashes.Hash(hashes.SHA256(), backend=None)
+            digest.update(pre_cert.tbs_certificate_bytes)
+            tbs_digest = digest.finalize()
 
-        # 🔹 Correct Signing: Hash the TBS certificate bytes
-        digest = hashes.Hash(hashes.SHA256(), backend=None)
-        digest.update(tbs_cert_bytes)
-        tbs_digest = digest.finalize()  # This is what we actually sign
-
-        #tbs_digest = b'\xf9t\x89\x17O\xbb\xe1\xb5@\x91\xf0w#$\xfe\x14\xf5\xe5\xd0LPeB\xb4\xfdo\xfc}\xbd\x7f\xbe\xd3'
-
-        # 🔹 Generate the actual signature using the signing key
-        signature = signing_private_key.sign_digest(tbs_digest)
-
-        # 🔹 Replace the incorrect signature with the real PKCS#11 signature
-        final_cert = x509.load_der_x509_certificate(
-            pre_cert.public_bytes(serialization.Encoding.DER), backend=None
-        )
-
-        if signing_private_key.is_hsm() or isinstance(signing_private_key.get_private_key(), rsa.RSAPrivateKey):
+            signature = signing_private_key.sign_digest(tbs_digest)
             final_der = self.patch_certificate_signature(
                 pre_cert_der=pre_cert.public_bytes(serialization.Encoding.DER),
-                real_signature=signature,          # raw signature (r||s for ECDSA, or RSA sig)
-                is_ecdsa=False                      # set False if RSA
+                real_signature=signature,
+                is_ecdsa=False
             )
+            return x509.load_der_x509_certificate(final_der)
         else:
-            final_der = self.patch_certificate_signature(
-                pre_cert_der=pre_cert.public_bytes(serialization.Encoding.DER),
-                real_signature=signature,          # raw signature (r||s for ECDSA, or RSA sig)
-                public_key=signing_private_key.get_public_key(),
-                is_ecdsa=True                      # set False if RSA
+            # Software key: sign directly — simple and correct for both RSA and ECDSA
+            return cert_builder.sign(
+                private_key=signing_private_key.get_private_key(),
+                algorithm=hashes.SHA256()
             )
-
-        # Convert final cert to PEM format
-        final_cert = x509.load_der_x509_certificate(final_der)
-
-        return final_cert
 
     
     def generate_certificate_pem_from_csr(

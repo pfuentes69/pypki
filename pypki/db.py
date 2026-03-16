@@ -1,4 +1,5 @@
 import json
+from contextlib import contextmanager
 import mysql.connector
 from mysql.connector import OperationalError
 from cryptography import x509
@@ -61,6 +62,14 @@ class PKIDataBase:
             return self.__db_connection
         else:
             return None
+
+    @contextmanager
+    def connection(self):
+        self.connect_to_db()
+        try:
+            yield self
+        finally:
+            self.close_db()
 
     def insert_ca(self, ca: CertificationAuthority):
         """
@@ -336,8 +345,41 @@ class PKIDataBase:
             self.__db_connection.commit()
             logger.info("Certificate Template inserted successfully!")
 
+            new_id = cursor.lastrowid
+            return new_id
+
         except mysql.connector.Error as err:
             logger.error(f"Error inserting Certificate Template: {err}")
+            return None
+        finally:
+            cursor.close()
+
+
+    def update_cert_template(self, template_id: int, cert_template: dict):
+        """Update an existing Certificate Template."""
+        try:
+            db_name = self.__config["database"]
+            cursor = self.__db_connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+
+            update_query = """
+                UPDATE CertificateTemplates
+                SET name = %s, definition = %s
+                WHERE id = %s
+            """
+            data = (
+                cert_template["template_name"],
+                json.dumps(cert_template),
+                template_id
+            )
+
+            cursor.execute(update_query, data)
+            self.__db_connection.commit()
+            return cursor.rowcount > 0
+
+        except mysql.connector.Error as err:
+            logger.error(f"Error updating Certificate Template: {err}")
+            return False
         finally:
             cursor.close()
 
@@ -494,6 +536,62 @@ class PKIDataBase:
             cursor.close()
 
         return new_id
+
+    def get_certificate_list(self, ca_id, template_id, page, per_page, offset):
+        try:
+            # Build SQL query dynamically
+            query = """
+                SELECT id, ca_id, template_id, serial_number, subject_name,
+                        not_before, not_after, status
+                FROM Certificates
+                WHERE 1=1
+            """
+            params = []
+
+            if ca_id is not None:
+                query += " AND ca_id = %s"
+                params.append(ca_id)
+
+            if template_id is not None:
+                query += " AND template_id = %s"
+                params.append(template_id)
+
+            query += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
+            params.extend([per_page, offset])
+
+            # Execute query
+            db_name = self.__config["database"]
+            cursor = self.__db_connection.cursor(buffered=True, dictionary=True)
+            cursor.execute(f"USE {db_name}")
+
+            cursor.execute(query, params)
+            results = cursor.fetchall()
+
+            # Get total count for pagination
+            count_query = "SELECT COUNT(*) FROM Certificates WHERE 1=1"
+            count_params = []
+
+            if ca_id is not None:
+                count_query += " AND ca_id = %s"
+                count_params.append(ca_id)
+
+            if template_id is not None:
+                count_query += " AND template_id = %s"
+                count_params.append(template_id)
+
+            cursor.execute(count_query, count_params)
+            total = cursor.fetchone()['COUNT(*)']
+
+        except mysql.connector.Error as err:
+            logger.error(f"Database error: {err}")
+            return None
+        except Exception as e:
+            logger.error(f"Problem processing certificate: {e}")
+        finally:
+            cursor.close()
+
+        return total, results
+
 
     def get_certificate_id(self, serial_number=None, ca_id=None, fingerprint=None):
         """

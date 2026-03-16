@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Template Editor</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" rel="stylesheet">
+  <style>
+    body { display: flex; min-height: 100vh; }
+    #sidebar { width: 220px; min-height: 100vh; background-color: #212529; flex-shrink: 0; }
+    #sidebar .nav-link { color: #adb5bd; border-radius: 0.375rem; }
+    #sidebar .nav-link:hover { color: #fff; background-color: #343a40; }
+    #sidebar .nav-link.active { color: #fff; background-color: #0d6efd; }
+    #sidebar .sidebar-brand { color: #fff; font-size: 1.1rem; font-weight: 600; padding: 1rem 1.25rem; border-bottom: 1px solid #343a40; }
+    #main { flex: 1; min-width: 0; overflow-y: auto; }
+    .card { margin-bottom: 1rem; }
+    .card-header { font-weight: 600; background-color: #f8f9fa; }
+    .section-toggle { cursor: pointer; }
+    .form-check-label { font-size: 0.9rem; }
+    .oid-row input { font-family: monospace; font-size: 0.85rem; }
+    .field-name { font-family: monospace; font-size: 0.85rem; color: #495057; }
+  </style>
+</head>
+<body>
+
+  <div id="sidebar" class="d-flex flex-column p-3">
+    <div class="sidebar-brand mb-3"><i class="bi bi-shield-lock me-2"></i>PyPKI</div>
+    <ul class="nav flex-column gap-1">
+      <li class="nav-item"><a href="certificate_list.html" class="nav-link"><i class="bi bi-card-list me-2"></i>Certificates</a></li>
+      <li class="nav-item"><a href="certificate_request.html" class="nav-link"><i class="bi bi-file-earmark-plus me-2"></i>Request</a></li>
+      <li class="nav-item"><a href="ca_certificate.html" class="nav-link"><i class="bi bi-patch-check me-2"></i>CA Certificate</a></li>
+      <li class="nav-item"><a href="template_list.html" class="nav-link active"><i class="bi bi-file-earmark-code me-2"></i>Templates</a></li>
+    </ul>
+  </div>
+
+  <div id="main" class="p-4">
+    <div class="mb-3">
+      <a href="template_list.html" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-chevron-left"></i> Back to list
+      </a>
+    </div>
+    <h4 class="mb-4" id="pageTitle">Certificate Template Editor</h4>
+
+    <div id="alertSection" class="d-none mb-3"></div>
+
+    <!-- ── General ───────────────────────────────────────────── -->
+    <div class="card">
+      <div class="card-header">General</div>
+      <div class="card-body row g-3">
+        <div class="col-md-6">
+          <label class="form-label">Template Name <span class="text-danger">*</span></label>
+          <input type="text" class="form-control" id="templateName" placeholder="e.g. Client Authentication">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Max Validity (days)</label>
+          <input type="number" class="form-control" id="maxValidity" value="365" min="-1">
+          <div class="form-text">Use -1 for unlimited</div>
+        </div>
+        <div class="col-md-3 align-self-end">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="unlimitedValidity"
+              onchange="document.getElementById('maxValidity').value = this.checked ? -1 : 365; document.getElementById('maxValidity').disabled = this.checked;">
+            <label class="form-check-label" for="unlimitedValidity">Unlimited validity</label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Subject Name ───────────────────────────────────────── -->
+    <div class="card">
+      <div class="card-header">Subject Name Fields</div>
+      <div class="card-body p-0">
+        <table class="table table-sm mb-0 align-middle">
+          <thead class="table-light">
+            <tr>
+              <th>Field</th>
+              <th class="text-center" style="width:90px">Include</th>
+              <th class="text-center" style="width:100px">Mandatory</th>
+              <th style="width:180px">Default Value</th>
+            </tr>
+          </thead>
+          <tbody id="subjectFieldsBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── Key Usage ──────────────────────────────────────────── -->
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        Key Usage
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="keyUsageEnabled" checked
+            onchange="toggleSection('keyUsageBody', this.checked)">
+          <label class="form-check-label" for="keyUsageEnabled">Include</label>
+        </div>
+      </div>
+      <div class="card-body" id="keyUsageBody">
+        <div class="mb-2">
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="checkbox" id="kuCritical">
+            <label class="form-check-label" for="kuCritical">Critical</label>
+          </div>
+        </div>
+        <div class="row row-cols-2 row-cols-md-4 g-2" id="keyUsageChecks"></div>
+      </div>
+    </div>
+
+    <!-- ── Extended Key Usage ────────────────────────────────── -->
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        Extended Key Usage
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="ekuEnabled" checked
+            onchange="toggleSection('ekuBody', this.checked)">
+          <label class="form-check-label" for="ekuEnabled">Include</label>
+        </div>
+      </div>
+      <div class="card-body" id="ekuBody">
+        <div class="mb-2">
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="checkbox" id="ekuCritical">
+            <label class="form-check-label" for="ekuCritical">Critical</label>
+          </div>
+        </div>
+        <div class="row row-cols-2 row-cols-md-4 g-2" id="ekuChecks"></div>
+      </div>
+    </div>
+
+    <!-- ── Basic Constraints ──────────────────────────────────── -->
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        Basic Constraints
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="bcEnabled" checked
+            onchange="toggleSection('bcBody', this.checked)">
+          <label class="form-check-label" for="bcEnabled">Include</label>
+        </div>
+      </div>
+      <div class="card-body row g-3" id="bcBody">
+        <div class="col-auto">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="bcCritical" checked>
+            <label class="form-check-label" for="bcCritical">Critical</label>
+          </div>
+        </div>
+        <div class="col-auto">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="bcCa"
+              onchange="document.getElementById('bcPathLen').disabled = !this.checked;">
+            <label class="form-check-label" for="bcCa">CA Certificate</label>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Path Length</label>
+          <input type="number" class="form-control form-control-sm" id="bcPathLen" min="0" placeholder="null (unlimited)" disabled>
+          <div class="form-text">Leave empty for no limit</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Subject Alternative Name ──────────────────────────── -->
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        Subject Alternative Name (SAN)
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="sanEnabled"
+            onchange="toggleSection('sanBody', this.checked)">
+          <label class="form-check-label" for="sanEnabled">Include</label>
+        </div>
+      </div>
+      <div class="card-body d-none" id="sanBody">
+        <div class="mb-3">
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="checkbox" id="sanCritical">
+            <label class="form-check-label" for="sanCritical">Critical</label>
+          </div>
+        </div>
+        <table class="table table-sm align-middle">
+          <thead class="table-light">
+            <tr><th>Type</th><th class="text-center">Allowed</th><th class="text-center">Mandatory</th><th>Min</th><th>Max</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>DNS Names</td>
+              <td class="text-center"><input type="checkbox" id="sanDnsAllowed" class="form-check-input"></td>
+              <td class="text-center"><input type="checkbox" id="sanDnsMandatory" class="form-check-input"></td>
+              <td><input type="number" id="sanDnsMin" class="form-control form-control-sm" value="0" min="0" style="width:70px"></td>
+              <td><input type="number" id="sanDnsMax" class="form-control form-control-sm" value="5" min="1" style="width:70px"></td>
+            </tr>
+            <tr>
+              <td>IP Addresses</td>
+              <td class="text-center"><input type="checkbox" id="sanIpAllowed" class="form-check-input"></td>
+              <td class="text-center"><input type="checkbox" id="sanIpMandatory" class="form-check-input"></td>
+              <td><input type="number" id="sanIpMin" class="form-control form-control-sm" value="0" min="0" style="width:70px"></td>
+              <td><input type="number" id="sanIpMax" class="form-control form-control-sm" value="3" min="1" style="width:70px"></td>
+            </tr>
+            <tr>
+              <td>Email Addresses</td>
+              <td class="text-center"><input type="checkbox" id="sanEmailAllowed" class="form-check-input"></td>
+              <td class="text-center"><input type="checkbox" id="sanEmailMandatory" class="form-check-input"></td>
+              <td colspan="2" class="text-muted small">—</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── Other Extensions ───────────────────────────────────── -->
+    <div class="card">
+      <div class="card-header">Other Extensions</div>
+      <div class="card-body row g-3">
+        <div class="col-auto">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="skiInclude" checked>
+            <label class="form-check-label" for="skiInclude">Subject Key Identifier</label>
+          </div>
+        </div>
+        <div class="col-auto">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="akiInclude" checked>
+            <label class="form-check-label" for="akiInclude">Authority Key Identifier</label>
+          </div>
+          <div class="form-check mt-1 ms-3">
+            <input class="form-check-input" type="checkbox" id="akiCritical">
+            <label class="form-check-label" for="akiCritical">Critical</label>
+          </div>
+        </div>
+        <div class="col-auto">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="ocspNoCheck">
+            <label class="form-check-label" for="ocspNoCheck">OCSP No-Check</label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Policy Identifiers ─────────────────────────────────── -->
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        Policy Identifiers
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="policyEnabled"
+            onchange="toggleSection('policyBody', this.checked)">
+          <label class="form-check-label" for="policyEnabled">Include</label>
+        </div>
+      </div>
+      <div class="card-body d-none" id="policyBody">
+        <div class="mb-2">
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="checkbox" id="policyCritical">
+            <label class="form-check-label" for="policyCritical">Critical</label>
+          </div>
+        </div>
+        <div id="policyOidList" class="mb-2"></div>
+        <button type="button" class="btn btn-outline-secondary btn-sm" onclick="addPolicyOid()">
+          <i class="bi bi-plus"></i> Add OID
+        </button>
+      </div>
+    </div>
+
+    <!-- ── CRL Distribution Point ─────────────────────────────── -->
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        CRL Distribution Point
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="cdpEnabled"
+            onchange="toggleSection('cdpBody', this.checked)">
+          <label class="form-check-label" for="cdpEnabled">Include</label>
+        </div>
+      </div>
+      <div class="card-body d-none" id="cdpBody">
+        <div class="row g-3 align-items-end">
+          <div class="col-md-8">
+            <label class="form-label">CRL URL</label>
+            <input type="url" class="form-control" id="cdpUrl" placeholder="http://crl.example.com/root.crl">
+          </div>
+          <div class="col-auto">
+            <div class="form-check">
+              <input class="form-check-input" type="checkbox" id="cdpCritical">
+              <label class="form-check-label" for="cdpCritical">Critical</label>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Authority Information Access ──────────────────────── -->
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        Authority Information Access (AIA)
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="aiaEnabled"
+            onchange="toggleSection('aiaBody', this.checked)">
+          <label class="form-check-label" for="aiaEnabled">Include</label>
+        </div>
+      </div>
+      <div class="card-body d-none" id="aiaBody">
+        <div class="row g-3 align-items-end">
+          <div class="col-md-6">
+            <label class="form-label">CA Issuers URL</label>
+            <input type="url" class="form-control" id="aiaIssuers" placeholder="http://ca.example.com/ca.crt">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">OCSP URL</label>
+            <input type="url" class="form-control" id="aiaOcsp" placeholder="http://ocsp.example.com">
+          </div>
+          <div class="col-auto">
+            <div class="form-check">
+              <input class="form-check-input" type="checkbox" id="aiaCritical">
+              <label class="form-check-label" for="aiaCritical">Critical</label>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Allowed Cryptography ───────────────────────────────── -->
+    <div class="card">
+      <div class="card-header">Allowed Cryptography</div>
+      <div class="card-body">
+        <div class="row g-4">
+          <!-- RSA -->
+          <div class="col-md-4">
+            <div class="form-check mb-2">
+              <input class="form-check-input" type="checkbox" id="cryptoRsa" checked
+                onchange="toggleSection('cryptoRsaOptions', this.checked)">
+              <label class="form-check-label fw-semibold" for="cryptoRsa">RSA</label>
+            </div>
+            <div id="cryptoRsaOptions" class="ms-3">
+              <div class="row g-2">
+                <div class="col-4">
+                  <label class="form-label form-label-sm">Min</label>
+                  <select class="form-select form-select-sm" id="rsaMin">
+                    <option>2048</option><option>3072</option><option>4096</option>
+                  </select>
+                </div>
+                <div class="col-4">
+                  <label class="form-label form-label-sm">Default</label>
+                  <select class="form-select form-select-sm" id="rsaDefault">
+                    <option>2048</option><option selected>3072</option><option>4096</option><option>8192</option>
+                  </select>
+                </div>
+                <div class="col-4">
+                  <label class="form-label form-label-sm">Max</label>
+                  <select class="form-select form-select-sm" id="rsaMax">
+                    <option>2048</option><option>3072</option><option>4096</option><option selected>8192</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- ECDSA -->
+          <div class="col-md-4">
+            <div class="form-check mb-2">
+              <input class="form-check-input" type="checkbox" id="cryptoEcdsa" checked
+                onchange="toggleSection('cryptoEcdsaOptions', this.checked)">
+              <label class="form-check-label fw-semibold" for="cryptoEcdsa">ECDSA</label>
+            </div>
+            <div id="cryptoEcdsaOptions" class="ms-3">
+              <div class="form-check"><input class="form-check-input" type="checkbox" id="ecP256" checked><label class="form-check-label" for="ecP256">P-256</label></div>
+              <div class="form-check"><input class="form-check-input" type="checkbox" id="ecP384" checked><label class="form-check-label" for="ecP384">P-384</label></div>
+              <div class="form-check"><input class="form-check-input" type="checkbox" id="ecP521" checked><label class="form-check-label" for="ecP521">P-521</label></div>
+            </div>
+          </div>
+          <!-- Ed25519 -->
+          <div class="col-md-4">
+            <div class="form-check mb-2">
+              <input class="form-check-input" type="checkbox" id="cryptoEd25519">
+              <label class="form-check-label fw-semibold" for="cryptoEd25519">Ed25519</label>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Action Buttons ─────────────────────────────────────── -->
+    <div class="d-flex gap-2 mt-3 mb-5">
+      <button class="btn btn-primary" onclick="saveTemplate()">
+        <i class="bi bi-floppy me-1"></i>Save Changes
+      </button>
+      <a href="template_list.html" class="btn btn-outline-secondary">Cancel</a>
+    </div>
+  </div><!-- end #main -->
+
+  <script>
+    const apiBase = 'http://127.0.0.1:8080/api';
+    let templateId = null;
+
+    // ── Static data ──────────────────────────────────────────────
+    const SUBJECT_FIELDS = [
+      'countryName', 'stateOrProvinceName', 'localityName',
+      'organizationName', 'organizationalUnitName', 'commonName',
+      'serialNumber', 'emailAddress'
+    ];
+
+    const KEY_USAGES = [
+      'digitalSignature', 'nonRepudiation', 'keyEncipherment',
+      'dataEncipherment', 'keyAgreement', 'keyCertSign', 'cRLSign'
+    ];
+
+    const EXTENDED_KEY_USAGES = [
+      'serverAuth', 'clientAuth', 'emailProtection', 'codeSigning',
+      'timeStamping', 'ocspSigning', 'smartCardLogon', 'documentSigning',
+      'anyExtendedKeyUsage'
+    ];
+
+    // ── Build static form elements ───────────────────────────────
+    function buildStaticForm() {
+      // Subject fields table
+      const tbody = document.getElementById('subjectFieldsBody');
+      SUBJECT_FIELDS.forEach(f => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td class="field-name">${f}</td>
+          <td class="text-center"><input type="checkbox" class="form-check-input" id="sf_include_${f}" checked></td>
+          <td class="text-center"><input type="checkbox" class="form-check-input" id="sf_mandatory_${f}"></td>
+          <td><input type="text" class="form-control form-control-sm" id="sf_default_${f}" placeholder="default value"></td>
+        `;
+        tbody.appendChild(tr);
+      });
+
+      // Key Usage checkboxes
+      const kuDiv = document.getElementById('keyUsageChecks');
+      KEY_USAGES.forEach(k => {
+        const d = document.createElement('div');
+        d.className = 'col';
+        d.innerHTML = `<div class="form-check"><input class="form-check-input" type="checkbox" id="ku_${k}"><label class="form-check-label" for="ku_${k}">${k}</label></div>`;
+        kuDiv.appendChild(d);
+      });
+
+      // EKU checkboxes
+      const ekuDiv = document.getElementById('ekuChecks');
+      EXTENDED_KEY_USAGES.forEach(k => {
+        const d = document.createElement('div');
+        d.className = 'col';
+        d.innerHTML = `<div class="form-check"><input class="form-check-input" type="checkbox" id="eku_${k}"><label class="form-check-label" for="eku_${k}">${k}</label></div>`;
+        ekuDiv.appendChild(d);
+      });
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────
+    function toggleSection(id, show) {
+      document.getElementById(id).classList.toggle('d-none', !show);
+    }
+
+    function chk(id) { return document.getElementById(id).checked; }
+    function val(id) { return document.getElementById(id).value.trim(); }
+    function setChk(id, v) { const el = document.getElementById(id); if (el) el.checked = !!v; }
+    function setVal(id, v) { const el = document.getElementById(id); if (el) el.value = v ?? ''; }
+
+    function showAlert(msg, type = 'danger') {
+      const el = document.getElementById('alertSection');
+      el.innerHTML = `<div class="alert alert-${type} alert-dismissible"><button type="button" class="btn-close" data-bs-dismiss="alert"></button>${msg}</div>`;
+      el.classList.remove('d-none');
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    // ── Policy OID list ──────────────────────────────────────────
+    let policyOidCount = 0;
+    function addPolicyOid(value = '') {
+      const id = `oid_${policyOidCount++}`;
+      const div = document.createElement('div');
+      div.className = 'oid-row d-flex gap-2 mb-2';
+      div.id = `oid_row_${id}`;
+      div.innerHTML = `
+        <input type="text" class="form-control form-control-sm" id="${id}" value="${value}" placeholder="e.g. 2.23.140.1.2.2">
+        <button type="button" class="btn btn-outline-danger btn-sm" onclick="document.getElementById('oid_row_${id}').remove()">
+          <i class="bi bi-trash"></i>
+        </button>`;
+      document.getElementById('policyOidList').appendChild(div);
+    }
+
+    function getPolicyOids() {
+      return [...document.getElementById('policyOidList').querySelectorAll('input')]
+        .map(i => i.value.trim()).filter(Boolean);
+    }
+
+    // ── Build JSON from form ─────────────────────────────────────
+    function buildTemplateJson() {
+      const template = {
+        template_name: val('templateName'),
+        max_validity: parseInt(val('maxValidity')) || -1,
+        subject_name: { fields: {} },
+        extensions: {},
+        allowed_cryptography: { keyAlgorithms: [] }
+      };
+
+      if (!template.template_name) throw new Error('Template name is required.');
+
+      // Subject fields
+      SUBJECT_FIELDS.forEach(f => {
+        if (chk(`sf_include_${f}`)) {
+          template.subject_name.fields[f] = {
+            mandatory: chk(`sf_mandatory_${f}`),
+            default: val(`sf_default_${f}`)
+          };
+        }
+      });
+
+      // Key Usage
+      if (chk('keyUsageEnabled')) {
+        const values = KEY_USAGES.filter(k => chk(`ku_${k}`));
+        template.extensions.keyUsage = { critical: chk('kuCritical'), values };
+      }
+
+      // Extended Key Usage
+      if (chk('ekuEnabled')) {
+        const allowed = EXTENDED_KEY_USAGES.filter(k => chk(`eku_${k}`));
+        template.extensions.extendedKeyUsage = { critical: chk('ekuCritical'), allowed };
+      }
+
+      // Basic Constraints
+      if (chk('bcEnabled')) {
+        const pathLenRaw = val('bcPathLen');
+        template.extensions.basicConstraints = {
+          critical: chk('bcCritical'),
+          ca: chk('bcCa'),
+          pathLen: pathLenRaw !== '' ? parseInt(pathLenRaw) : null
+        };
+      }
+
+      // SAN
+      if (chk('sanEnabled')) {
+        const san = { allowed_types: {}, critical: chk('sanCritical') };
+        if (chk('sanDnsAllowed')) san.allowed_types.dnsNames = { allowed: true, mandatory: chk('sanDnsMandatory'), min: parseInt(val('sanDnsMin')) || 0, max: parseInt(val('sanDnsMax')) || 5 };
+        if (chk('sanIpAllowed'))  san.allowed_types.ipAddresses = { allowed: true, mandatory: chk('sanIpMandatory'), min: parseInt(val('sanIpMin')) || 0, max: parseInt(val('sanIpMax')) || 3 };
+        if (chk('sanEmailAllowed')) san.allowed_types.emailAddresses = { allowed: true, mandatory: chk('sanEmailMandatory') };
+        template.extensions.subjectAltName = san;
+      }
+
+      // SKI / AKI / OCSPNoCheck
+      if (chk('skiInclude')) template.extensions.subjectKeyIdentifier = { include: true };
+      if (chk('akiInclude')) template.extensions.authorityKeyIdentifier = { include: true, critical: chk('akiCritical') };
+      if (chk('ocspNoCheck')) template.extensions.OCSPNoCheck = { include: true };
+
+      // Policy Identifiers
+      if (chk('policyEnabled')) {
+        const oids = getPolicyOids();
+        template.extensions.policyIdentifiers = { critical: chk('policyCritical'), values: oids };
+      }
+
+      // CDP
+      if (chk('cdpEnabled') && val('cdpUrl')) {
+        template.extensions.cdp = { url: val('cdpUrl'), critical: chk('cdpCritical') };
+      }
+
+      // AIA
+      if (chk('aiaEnabled') && (val('aiaIssuers') || val('aiaOcsp'))) {
+        const aia = { authorityInfoAccess: {}, critical: chk('aiaCritical') };
+        if (val('aiaIssuers')) aia.authorityInfoAccess.caIssuers = { url: val('aiaIssuers') };
+        if (val('aiaOcsp'))    aia.authorityInfoAccess.OCSP = { url: val('aiaOcsp') };
+        template.extensions.aia = aia;
+      }
+
+      // Cryptography
+      if (chk('cryptoRsa')) {
+        template.allowed_cryptography.keyAlgorithms.push({
+          name: 'RSA',
+          min_size: parseInt(val('rsaMin')),
+          default_size: parseInt(val('rsaDefault')),
+          max_size: parseInt(val('rsaMax'))
+        });
+      }
+      if (chk('cryptoEcdsa')) {
+        const curves = ['P-256', 'P-384', 'P-521'].filter((c, i) => chk(['ecP256','ecP384','ecP521'][i]));
+        template.allowed_cryptography.keyAlgorithms.push({ name: 'ECDSA', curves });
+      }
+      if (chk('cryptoEd25519')) {
+        template.allowed_cryptography.keyAlgorithms.push({ name: 'Ed25519' });
+      }
+
+      return template;
+    }
+
+    // ── Populate form from JSON ──────────────────────────────────
+    function populateForm(t) {
+      setVal('templateName', t.template_name);
+      const mv = t.max_validity ?? 365;
+      setVal('maxValidity', mv);
+      if (mv === -1) {
+        setChk('unlimitedValidity', true);
+        document.getElementById('maxValidity').disabled = true;
+      }
+
+      // Subject fields
+      const fields = t.subject_name?.fields || {};
+      SUBJECT_FIELDS.forEach(f => {
+        if (fields[f] !== undefined) {
+          setChk(`sf_include_${f}`, true);
+          setChk(`sf_mandatory_${f}`, fields[f].mandatory);
+          setVal(`sf_default_${f}`, fields[f].default || '');
+        } else {
+          setChk(`sf_include_${f}`, false);
+        }
+      });
+
+      const ext = t.extensions || {};
+
+      // Key Usage
+      const hasKu = !!ext.keyUsage;
+      setChk('keyUsageEnabled', hasKu);
+      toggleSection('keyUsageBody', hasKu);
+      if (hasKu) {
+        setChk('kuCritical', ext.keyUsage.critical);
+        (ext.keyUsage.values || []).forEach(k => setChk(`ku_${k}`, true));
+      }
+
+      // EKU
+      const hasEku = !!ext.extendedKeyUsage;
+      setChk('ekuEnabled', hasEku);
+      toggleSection('ekuBody', hasEku);
+      if (hasEku) {
+        setChk('ekuCritical', ext.extendedKeyUsage.critical);
+        (ext.extendedKeyUsage.allowed || []).forEach(k => setChk(`eku_${k}`, true));
+      }
+
+      // Basic Constraints
+      const hasBc = !!ext.basicConstraints;
+      setChk('bcEnabled', hasBc);
+      toggleSection('bcBody', hasBc);
+      if (hasBc) {
+        setChk('bcCritical', ext.basicConstraints.critical);
+        setChk('bcCa', ext.basicConstraints.ca);
+        document.getElementById('bcPathLen').disabled = !ext.basicConstraints.ca;
+        if (ext.basicConstraints.pathLen !== null && ext.basicConstraints.pathLen !== undefined)
+          setVal('bcPathLen', ext.basicConstraints.pathLen);
+      }
+
+      // SAN
+      const hasSan = !!ext.subjectAltName;
+      setChk('sanEnabled', hasSan);
+      toggleSection('sanBody', hasSan);
+      if (hasSan) {
+        setChk('sanCritical', ext.subjectAltName.critical);
+        const at = ext.subjectAltName.allowed_types || {};
+        if (at.dnsNames) { setChk('sanDnsAllowed', true); setChk('sanDnsMandatory', at.dnsNames.mandatory); setVal('sanDnsMin', at.dnsNames.min ?? 0); setVal('sanDnsMax', at.dnsNames.max ?? 5); }
+        if (at.ipAddresses) { setChk('sanIpAllowed', true); setChk('sanIpMandatory', at.ipAddresses.mandatory); setVal('sanIpMin', at.ipAddresses.min ?? 0); setVal('sanIpMax', at.ipAddresses.max ?? 3); }
+        if (at.emailAddresses) { setChk('sanEmailAllowed', true); setChk('sanEmailMandatory', at.emailAddresses.mandatory); }
+      }
+
+      // SKI / AKI / OCSPNoCheck
+      setChk('skiInclude', !!ext.subjectKeyIdentifier?.include);
+      setChk('akiInclude', !!ext.authorityKeyIdentifier?.include);
+      setChk('akiCritical', !!ext.authorityKeyIdentifier?.critical);
+      setChk('ocspNoCheck', !!ext.OCSPNoCheck?.include);
+
+      // Policy Identifiers
+      const hasPol = !!ext.policyIdentifiers;
+      setChk('policyEnabled', hasPol);
+      toggleSection('policyBody', hasPol);
+      if (hasPol) {
+        setChk('policyCritical', ext.policyIdentifiers.critical);
+        (ext.policyIdentifiers.values || []).forEach(oid => addPolicyOid(oid));
+      }
+
+      // CDP
+      const hasCdp = !!ext.cdp;
+      setChk('cdpEnabled', hasCdp);
+      toggleSection('cdpBody', hasCdp);
+      if (hasCdp) { setVal('cdpUrl', ext.cdp.url); setChk('cdpCritical', ext.cdp.critical); }
+
+      // AIA
+      const hasAia = !!ext.aia;
+      setChk('aiaEnabled', hasAia);
+      toggleSection('aiaBody', hasAia);
+      if (hasAia) {
+        setChk('aiaCritical', ext.aia.critical);
+        setVal('aiaIssuers', ext.aia.authorityInfoAccess?.caIssuers?.url || '');
+        setVal('aiaOcsp', ext.aia.authorityInfoAccess?.OCSP?.url || '');
+      }
+
+      // Cryptography
+      const algos = t.allowed_cryptography?.keyAlgorithms || [];
+      const rsa = algos.find(a => a.name === 'RSA');
+      const ecdsa = algos.find(a => a.name === 'ECDSA');
+      const ed = algos.find(a => a.name === 'Ed25519');
+      setChk('cryptoRsa', !!rsa);
+      toggleSection('cryptoRsaOptions', !!rsa);
+      if (rsa) { setVal('rsaMin', rsa.min_size); setVal('rsaDefault', rsa.default_size); setVal('rsaMax', rsa.max_size); }
+      setChk('cryptoEcdsa', !!ecdsa);
+      toggleSection('cryptoEcdsaOptions', !!ecdsa);
+      if (ecdsa) {
+        setChk('ecP256', (ecdsa.curves || []).includes('P-256'));
+        setChk('ecP384', (ecdsa.curves || []).includes('P-384'));
+        setChk('ecP521', (ecdsa.curves || []).includes('P-521'));
+      }
+      setChk('cryptoEd25519', !!ed);
+    }
+
+    // ── Save ─────────────────────────────────────────────────────
+    async function saveTemplate() {
+      let template;
+      try {
+        template = buildTemplateJson();
+      } catch (err) {
+        showAlert(err.message);
+        return;
+      }
+
+      const url = templateId ? `${apiBase}/template/${templateId}` : `${apiBase}/template`;
+      const method = templateId ? 'PUT' : 'POST';
+
+      try {
+        const res = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(template)
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+
+        showAlert(
+          `Template <strong>${template.template_name}</strong> ${templateId ? 'updated' : 'created'} successfully. ` +
+          `<a href="template_list.html" class="alert-link">Back to list</a>`,
+          'success'
+        );
+        if (!templateId && data.template_id) {
+          templateId = data.template_id;
+          history.replaceState(null, '', `?id=${templateId}`);
+          document.getElementById('pageTitle').textContent = 'Edit Template';
+        }
+      } catch (err) {
+        showAlert('Save failed: ' + err.message);
+      }
+    }
+
+    // ── Init ─────────────────────────────────────────────────────
+    window.onload = async () => {
+      buildStaticForm();
+
+      const params = new URLSearchParams(window.location.search);
+      const idParam = params.get('id');
+      templateId = idParam ? parseInt(idParam) : null;
+
+      if (templateId) {
+        document.getElementById('pageTitle').textContent = 'Edit Template';
+        try {
+          const res = await fetch(`${apiBase}/template/${templateId}`);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const template = await res.json();
+          populateForm(template);
+        } catch (err) {
+          showAlert('Failed to load template: ' + err.message);
+        }
+      } else {
+        document.getElementById('pageTitle').textContent = 'New Template';
+      }
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

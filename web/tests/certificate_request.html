@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Request Certificate</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" rel="stylesheet">
+  <style>
+    body { display: flex; min-height: 100vh; }
+    #sidebar {
+      width: 220px;
+      min-height: 100vh;
+      background-color: #212529;
+      flex-shrink: 0;
+    }
+    #sidebar .nav-link {
+      color: #adb5bd;
+      border-radius: 0.375rem;
+    }
+    #sidebar .nav-link:hover { color: #fff; background-color: #343a40; }
+    #sidebar .nav-link.active { color: #fff; background-color: #0d6efd; }
+    #sidebar .sidebar-brand {
+      color: #fff;
+      font-size: 1.1rem;
+      font-weight: 600;
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid #343a40;
+    }
+    #main { flex: 1; overflow-y: auto; }
+  </style>
+</head>
+<body>
+
+  <!-- Sidebar -->
+  <div id="sidebar" class="d-flex flex-column p-3">
+    <div class="sidebar-brand mb-3">
+      <i class="bi bi-shield-lock me-2"></i>PyPKI
+    </div>
+    <ul class="nav flex-column gap-1">
+      <li class="nav-item">
+        <a href="certificate_list.html" class="nav-link">
+          <i class="bi bi-card-list me-2"></i>Certificates
+        </a>
+      </li>
+      <li class="nav-item">
+        <a href="certificate_request.html" class="nav-link active">
+          <i class="bi bi-file-earmark-plus me-2"></i>Request
+        </a>
+      </li>
+      <li class="nav-item">
+        <a href="ca_certificate.html" class="nav-link">
+          <i class="bi bi-patch-check me-2"></i>CA Certificate
+        </a>
+      </li>
+      <li class="nav-item">
+        <a href="template_list.html" class="nav-link">
+          <i class="bi bi-file-earmark-code me-2"></i>Templates
+        </a>
+      </li>
+    </ul>
+  </div>
+
+  <!-- Main content -->
+  <div id="main" class="p-4">
+    <h4 class="mb-4">Issue a Certificate</h4>
+
+    <div class="mb-3">
+      <label for="caSelect" class="form-label">Certification Authority</label>
+      <select id="caSelect" class="form-select"></select>
+    </div>
+
+    <div class="mb-3">
+      <label for="templateSelect" class="form-label">Certificate Template</label>
+      <select id="templateSelect" class="form-select"></select>
+    </div>
+
+    <div class="mb-3">
+      <label for="csrInput" class="form-label">CSR (PEM)</label>
+      <textarea id="csrInput" class="form-control font-monospace" placeholder="-----BEGIN CERTIFICATE REQUEST-----" rows="7"></textarea>
+    </div>
+
+    <div class="form-check mb-4">
+      <input type="checkbox" class="form-check-input" id="returnPem" />
+      <label class="form-check-label" for="returnPem">Return certificate PEM (uncheck to return ID only)</label>
+    </div>
+
+    <button class="btn btn-success" onclick="issueCertificate()">
+      <i class="bi bi-send me-1"></i>Issue Certificate
+    </button>
+
+    <div id="resultSection" class="mt-4 d-none">
+
+      <div id="certIdSection" class="d-none">
+        <div class="alert alert-success d-flex justify-content-between align-items-center">
+          <div>
+            Certificate issued. ID: <strong id="certIdValue"></strong>
+          </div>
+          <div class="d-flex gap-2">
+            <a id="viewCertLink" href="#" class="btn btn-sm btn-outline-primary">
+              <i class="bi bi-eye"></i> View
+            </a>
+            <a id="downloadCertLink" href="#" class="btn btn-sm btn-outline-secondary" target="_blank">
+              <i class="bi bi-download"></i> Download PEM
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <div id="certPemSection" class="d-none">
+        <label class="form-label fw-semibold">Certificate PEM</label>
+        <textarea class="form-control font-monospace" id="certPemArea" rows="10" readonly></textarea>
+        <button class="btn btn-outline-secondary btn-sm mt-2" onclick="copyPem()">
+          <i class="bi bi-clipboard"></i> Copy
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    const apiBase = 'http://127.0.0.1:8080/api';
+
+    async function loadDropdowns() {
+      try {
+        const [caRes, templateRes] = await Promise.all([
+          fetch(`${apiBase}/ca`),
+          fetch(`${apiBase}/template`)
+        ]);
+        const [cas, templates] = await Promise.all([caRes.json(), templateRes.json()]);
+
+        const caSelect = document.getElementById('caSelect');
+        cas.forEach(ca => {
+          const opt = document.createElement('option');
+          opt.value = ca.id;
+          opt.textContent = ca.name;
+          caSelect.appendChild(opt);
+        });
+
+        const templateSelect = document.getElementById('templateSelect');
+        templates.forEach(tpl => {
+          const opt = document.createElement('option');
+          opt.value = tpl.id;
+          opt.textContent = tpl.name;
+          templateSelect.appendChild(opt);
+        });
+      } catch (err) {
+        alert('Error loading dropdowns: ' + err);
+      }
+    }
+
+    async function issueCertificate() {
+      const caId = document.getElementById('caSelect').value;
+      const templateId = document.getElementById('templateSelect').value;
+      const csr = document.getElementById('csrInput').value.trim();
+      const returnCert = document.getElementById('returnPem').checked;
+
+      if (!csr) { alert('Please enter a CSR.'); return; }
+
+      document.getElementById('resultSection').classList.remove('d-none');
+      document.getElementById('certIdSection').classList.add('d-none');
+      document.getElementById('certPemSection').classList.add('d-none');
+
+      try {
+        const res = await fetch(`${apiBase}/certificate/issue`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ca_id: parseInt(caId),
+            template_id: parseInt(templateId),
+            csr: csr,
+            return_certificate: returnCert
+          })
+        });
+
+        const data = await res.json();
+
+        if (returnCert && data.certificate_pem) {
+          document.getElementById('certPemSection').classList.remove('d-none');
+          document.getElementById('certPemArea').value = data.certificate_pem;
+        } else if (!returnCert && data.certificate_id) {
+          const id = data.certificate_id;
+          document.getElementById('certIdSection').classList.remove('d-none');
+          document.getElementById('certIdValue').textContent = id;
+          document.getElementById('viewCertLink').href = `certificate_details.html?id=${id}`;
+          document.getElementById('downloadCertLink').href = `${apiBase}/certificate/pem/${id}`;
+        } else {
+          alert('Unexpected response from server.');
+        }
+      } catch (err) {
+        alert('Error issuing certificate: ' + err);
+      }
+    }
+
+    function copyPem() {
+      const pem = document.getElementById('certPemArea').value;
+      navigator.clipboard.writeText(pem).then(() => alert('Copied to clipboard.'));
+    }
+
+    loadDropdowns();
+  </script>
+</body>
+</html>

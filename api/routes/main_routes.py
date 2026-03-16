@@ -51,6 +51,31 @@ def get_ca_details(ca_id):
     result = api_adapters.convert_to_serializable(ca_details)
     return jsonify(result)
 
+
+@bp.route('/certificate', methods=['GET'])
+def list_certificates():
+    try:
+        # Get query parameters
+        ca_id = request.args.get('ca_id', type=int)
+        template_id = request.args.get('template_id', type=int)
+        page = request.args.get('page', default=1, type=int)
+        per_page = request.args.get('per_page', default=10, type=int)
+
+        offset = (page - 1) * per_page
+
+        total, results = api_adapters.get_certificate_list(ca_id, template_id, page, per_page, offset)
+
+        return jsonify({
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "certificates": results
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @bp.route('/certificate/<int:cert_id>', methods=['GET'])
 def get_certificate_details(cert_id):
     logger.info("API - GET Certificate Details")
@@ -191,13 +216,47 @@ def get_certificate_templates_list():
     if not result:
         abort(404, description="Certificate Template list not found")
 
-    # Only include ID and NAME in the response
     filtered_result = [
         {
             "id": row["id"],
-            "name": row["name"]
+            "name": row["name"],
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at")
         }
         for row in result
     ]
 
-    return jsonify(filtered_result), 200
+    return jsonify(api_adapters.convert_to_serializable(filtered_result)), 200
+
+
+@bp.route('/template/<int:template_id>', methods=['GET'])
+def get_template_details(template_id):
+    logger.info(f"API - GET Template Details {template_id}")
+    result = api_adapters.get_template_details(template_id)
+    if not result:
+        abort(404, description="Template not found")
+    return jsonify(result), 200
+
+
+@bp.route('/template/<int:template_id>', methods=['PUT'])
+def update_template(template_id):
+    logger.info(f"API - PUT Update Template {template_id}")
+    data = request.get_json()
+    if not data or 'template_name' not in data:
+        abort(400, description="Missing 'template_name' in request body")
+    success = api_adapters.update_template(template_id, data)
+    if not success:
+        abort(404, description="Template not found or update failed")
+    return jsonify({"message": "Template updated successfully", "template_id": template_id}), 200
+
+
+@bp.route('/template', methods=['POST'])
+def create_template():
+    logger.info("API - POST Create Template")
+    data = request.get_json()
+    if not data or 'template_name' not in data:
+        abort(400, description="Missing 'template_name' in request body")
+    template_id = api_adapters.create_template(data)
+    if template_id is None:
+        abort(500, description="Failed to create template")
+    return jsonify({"message": "Template created successfully", "template_id": template_id}), 201

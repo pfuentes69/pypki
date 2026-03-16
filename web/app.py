@@ -4,7 +4,7 @@ import requests
 
 app = Flask(__name__)
 
-EST_SERVER = 'http://127.0.0.1:5000/.well-known/est'
+EST_SERVER = 'http://127.0.0.1:8080/.well-known/est'
 
 @app.route('/')
 def index():
@@ -75,4 +75,4 @@ def api_select_value():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, port=8080)
+    app.run(debug=True, port=5000)

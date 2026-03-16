@@ -1,5 +1,6 @@
 import base64
 import datetime
+import json
 
 from cryptography.hazmat.primitives import serialization
 
@@ -38,11 +39,9 @@ def get_ca_details(ca_id):
     return ca_details
 
 def get_est_aliases():
-    db:PKIDataBase = pki.get_db()
-    db.connect_to_db()
-    est_aliases = db.get_estaliases_collection()
-    db.close_db()
-
+    db: PKIDataBase = pki.get_db()
+    with db.connection():
+        est_aliases = db.get_estaliases_collection()
     return est_aliases
 
 def get_ca_name(ca_id):
@@ -51,6 +50,12 @@ def get_ca_name(ca_id):
         return ca_details["name"]
     else:
         return None
+
+def get_certificate_list(ca_id, template_id, page, per_page, offset):
+    db: PKIDataBase = pki.get_db()
+    with db.connection():
+        total, results = db.get_certificate_list(ca_id, template_id, page, per_page, offset)
+    return total, results
 
 
 def get_certificate_details_json(cert_id):
@@ -83,44 +88,20 @@ def get_ca_certificate(est_config, data):
 
 
 def get_ca_and_template_id_by_alias_name(name):
-    """
-    Retrieve ca_id and template_id from ESTAliases by name.
-
-    Args:
-        db_config (dict): A dictionary containing database connection parameters.
-        name (str): The name to look up in the ESTAliases table.
-
-    Returns:
-        tuple or None: A tuple (ca_id, template_id) if found, otherwise None.
-    """
     db = pki.get_db()
-    db.connect_to_db()
-    result = db.get_ca_and_template_id_by_alias_name(name)
-    db.close_db()
-
+    with db.connection():
+        result = db.get_ca_and_template_id_by_alias_name(name)
     return result if result else None
 
 
 def get_certificate_status(cert_id:int = None, ca_id:int = None, ca_ski:str = None, serial_number:str = None):
-    """
-    Retrieve ca_id and template_id from ESTAliases by name.
-
-    Args:
-        db_config (dict): A dictionary containing database connection parameters.
-        name (str): The name to look up in the ESTAliases table.
-
-    Returns:
-        tuple or None: A tuple (ca_id, template_id) if found, otherwise None.
-    """
     db = pki.get_db()
-    db.connect_to_db()
-    if ca_ski is not None:
-        ca_id = db.get_ca_id_by_ski(ca_ski=ca_ski)
-        if ca_id is None:
-            return None
-    result = db.get_certificate_status(certificate_id=cert_id, ca_id=ca_id, serial_number=serial_number)
-    db.close_db()
-
+    with db.connection():
+        if ca_ski is not None:
+            ca_id = db.get_ca_id_by_ski(ca_ski=ca_ski)
+            if ca_id is None:
+                return None
+        result = db.get_certificate_status(certificate_id=cert_id, ca_id=ca_id, serial_number=serial_number)
     return result if result else None
 
 
@@ -138,3 +119,33 @@ def get_ocsp_responder_by_issuer_ski(issuer_ski):
 def get_template_collection():
     template_list = pki.get_template_collection()
     return template_list
+
+
+def get_template_details(template_id):
+    db = pki.get_db()
+    with db.connection():
+        record = db.get_cert_template_record_by_id(template_id)
+    if not record:
+        return None
+    definition = record.get("definition")
+    if isinstance(definition, str):
+        return json.loads(definition)
+    return definition
+
+
+def update_template(template_id, template_dict):
+    db = pki.get_db()
+    with db.connection():
+        success = db.update_cert_template(template_id, template_dict)
+    if success:
+        pki.load_template_collection()
+    return success
+
+
+def create_template(template_dict):
+    db = pki.get_db()
+    with db.connection():
+        template_id = db.insert_cert_template(template_dict)
+    if template_id:
+        pki.load_template_collection()
+    return template_id

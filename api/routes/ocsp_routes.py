@@ -35,6 +35,7 @@ def ocsp_responder():
         logger.info(f"OCSP Request - Hash Algorithm: {ocsp_request.hash_algorithm.name}")
         #logger.info(f"OCSP Request - Issuer Name Hash: {ocsp_request.issuer_name_hash.hex()}")
         logger.info(f"OCSP Request - Issuer Key Hash: {issuer_ski}")
+        nonce = None
         for ext in ocsp_request.extensions:
             if ext.oid == OCSP_NONCE_OID:
                 nonce = ext.value  # This is an OCSPNonce object

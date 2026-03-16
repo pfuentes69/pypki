@@ -34,7 +34,7 @@ class OCSPResponder:
         # Get general details
         self.__name  = self.__config["name"]
         self.__issuer_ski = self.__config["issuer_ski"]
-        if self.__config["issuer_certificate"] is not "":
+        if self.__config["issuer_certificate"] != "":
             self.__issuer_certificate = x509.load_pem_x509_certificate(self.__config["issuer_certificate"].encode("utf-8"))
         self.__response_validity = self.__config["response_validity"]
         # Get private key and certificate
