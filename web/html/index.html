@@ -20,6 +20,8 @@
     .metric-card .metric-value { font-size: 2rem; font-weight: 700; line-height: 1; }
     .metric-card .metric-label { font-size: 0.8rem; color: #6c757d; margin-top: 0.25rem; }
     .metric-card .metric-icon { font-size: 2rem; opacity: 0.15; }
+    a.metric-card-link { text-decoration: none; color: inherit; display: block; }
+    a.metric-card-link:hover .metric-card { box-shadow: 0 0 0 2px #0d6efd44 !important; cursor: pointer; }
 
     /* Health indicators */
     .health-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
@@ -48,14 +50,16 @@
       <li class="nav-item">
         <a href="index.html" class="nav-link active"><i class="bi bi-speedometer2 me-2"></i>Dashboard</a>
       </li>
+      <div class="nav-section">Certificates</div>
       <li class="nav-item">
         <a href="certificate_list.html" class="nav-link"><i class="bi bi-card-list me-2"></i>Certificates</a>
       </li>
       <li class="nav-item">
         <a href="certificate_request.html" class="nav-link"><i class="bi bi-file-earmark-plus me-2"></i>Request</a>
       </li>
+      <div class="nav-section">Certification Authorities</div>
       <li class="nav-item">
-        <a href="ca_certificate.html" class="nav-link"><i class="bi bi-patch-check me-2"></i>CA Certificate</a>
+        <a href="cas_and_crls.html" class="nav-link"><i class="bi bi-building me-2"></i>CAs & CRL</a>
       </li>
       <li class="nav-item">
         <a href="template_list.html" class="nav-link"><i class="bi bi-file-earmark-code me-2"></i>Templates</a>
@@ -77,48 +81,56 @@
     <!-- ── Metric cards ─────────────────────────────────────────── -->
     <div class="row g-3 mb-4">
       <div class="col-sm-6 col-xl-3">
-        <div class="card metric-card shadow-sm h-100">
-          <div class="card-body d-flex justify-content-between align-items-start">
-            <div>
-              <div class="metric-value text-primary" id="metricActive">–</div>
-              <div class="metric-label">Active Certificates</div>
+        <a href="certificate_list.html?status=Active" class="metric-card-link">
+          <div class="card metric-card shadow-sm h-100">
+            <div class="card-body d-flex justify-content-between align-items-start">
+              <div>
+                <div class="metric-value text-primary" id="metricActive">–</div>
+                <div class="metric-label">Active Certificates</div>
+              </div>
+              <i class="bi bi-patch-check metric-icon text-primary"></i>
             </div>
-            <i class="bi bi-patch-check metric-icon text-primary"></i>
           </div>
-        </div>
+        </a>
       </div>
       <div class="col-sm-6 col-xl-3">
-        <div class="card metric-card shadow-sm h-100">
-          <div class="card-body d-flex justify-content-between align-items-start">
-            <div>
-              <div class="metric-value text-danger" id="metricRevoked">–</div>
-              <div class="metric-label">Revoked Certificates</div>
+        <a href="certificate_list.html?status=Revoked" class="metric-card-link">
+          <div class="card metric-card shadow-sm h-100">
+            <div class="card-body d-flex justify-content-between align-items-start">
+              <div>
+                <div class="metric-value text-danger" id="metricRevoked">–</div>
+                <div class="metric-label">Revoked Certificates</div>
+              </div>
+              <i class="bi bi-x-circle metric-icon text-danger"></i>
             </div>
-            <i class="bi bi-x-circle metric-icon text-danger"></i>
           </div>
-        </div>
+        </a>
       </div>
       <div class="col-sm-6 col-xl-3">
-        <div class="card metric-card shadow-sm h-100">
-          <div class="card-body d-flex justify-content-between align-items-start">
-            <div>
-              <div class="metric-value text-warning" id="metricExpiringSoon">–</div>
-              <div class="metric-label">Expiring in 30 days</div>
+        <a href="certificate_list.html?expiring_soon=true" class="metric-card-link">
+          <div class="card metric-card shadow-sm h-100">
+            <div class="card-body d-flex justify-content-between align-items-start">
+              <div>
+                <div class="metric-value text-warning" id="metricExpiringSoon">–</div>
+                <div class="metric-label">Expiring in 30 days</div>
+              </div>
+              <i class="bi bi-clock-history metric-icon text-warning"></i>
             </div>
-            <i class="bi bi-clock-history metric-icon text-warning"></i>
           </div>
-        </div>
+        </a>
       </div>
       <div class="col-sm-6 col-xl-3">
-        <div class="card metric-card shadow-sm h-100">
-          <div class="card-body d-flex justify-content-between align-items-start">
-            <div>
-              <div class="metric-value text-success" id="metricCAs">–</div>
-              <div class="metric-label">Certification Authorities</div>
+        <a href="cas_and_crls.html" class="metric-card-link">
+          <div class="card metric-card shadow-sm h-100">
+            <div class="card-body d-flex justify-content-between align-items-start">
+              <div>
+                <div class="metric-value text-success" id="metricCAs">–</div>
+                <div class="metric-label">Certification Authorities</div>
+              </div>
+              <i class="bi bi-building metric-icon text-success"></i>
             </div>
-            <i class="bi bi-building metric-icon text-success"></i>
           </div>
-        </div>
+        </a>
       </div>
     </div>
 
@@ -177,90 +189,64 @@
   <script>
     const apiBase = 'http://127.0.0.1:8080/api';
 
-    // ── Dummy data (replace with real API calls when endpoints exist) ──
-    const DUMMY = {
-      metrics: {
-        active: 142,
-        revoked: 17,
-        expiringSoon: 5,
-        cas: 3
-      },
-      health: [
-        { name: 'API',            status: 'ok',   label: 'Operational' },
-        { name: 'Database',       status: 'ok',   label: 'Operational' },
-        { name: 'OCSP Responder', status: 'ok',   label: 'Operational' },
-        { name: 'CRL Service',    status: 'warn',  label: 'CRL overdue' },
-        { name: 'EST Service',    status: 'ok',   label: 'Operational' }
-      ],
-      caOverview: [
-        { name: 'Root CA',          issued: 3,   revoked: 0 },
-        { name: 'Issuing CA',       issued: 124, revoked: 15 },
-        { name: 'IoT Root CA',      issued: 32,  revoked: 2 }
-      ],
-      activity: [
-        { icon: 'bi-patch-check', color: 'bg-success text-white', text: 'Certificate issued for <strong>api.example.com</strong>', time: '2 min ago' },
-        { icon: 'bi-x-circle',    color: 'bg-danger text-white',  text: 'Certificate revoked (keyCompromise)', time: '18 min ago' },
-        { icon: 'bi-patch-check', color: 'bg-success text-white', text: 'Certificate issued for <strong>device-0042</strong>', time: '1 h ago' },
-        { icon: 'bi-file-earmark-code', color: 'bg-secondary text-white', text: 'Template <strong>Server Authentication</strong> updated', time: '3 h ago' },
-        { icon: 'bi-patch-check', color: 'bg-success text-white', text: 'Certificate issued for <strong>smtp.example.com</strong>', time: '5 h ago' }
-      ]
-    };
-
-    function renderMetrics(m) {
-      document.getElementById('metricActive').textContent       = m.active;
-      document.getElementById('metricRevoked').textContent      = m.revoked;
-      document.getElementById('metricExpiringSoon').textContent = m.expiringSoon;
-      document.getElementById('metricCAs').textContent          = m.cas;
+    function renderMetrics(s) {
+      document.getElementById('metricActive').textContent       = s.active;
+      document.getElementById('metricRevoked').textContent      = s.revoked;
+      document.getElementById('metricExpiringSoon').textContent = s.expiring_soon;
+      document.getElementById('metricCAs').textContent          = s.cas;
     }
 
-    function renderHealth(items) {
-      document.getElementById('healthList').innerHTML = items.map(h => `
+    function renderHealth(apiOk) {
+      document.getElementById('healthList').innerHTML = `
         <div class="health-row">
-          <span class="health-dot ${h.status}"></span>
-          <span class="health-name">${h.name}</span>
-          <span class="health-status">${h.label}</span>
-        </div>`).join('');
+          <span class="health-dot ${apiOk ? 'ok' : 'err'}"></span>
+          <span class="health-name">API</span>
+          <span class="health-status">${apiOk ? 'Operational' : 'Unreachable'}</span>
+        </div>
+        <div class="health-row">
+          <span class="health-dot ${apiOk ? 'ok' : 'err'}"></span>
+          <span class="health-name">Database</span>
+          <span class="health-status">${apiOk ? 'Operational' : 'Unknown'}</span>
+        </div>`;
     }
 
     function renderCaOverview(rows) {
+      if (!rows.length) {
+        document.getElementById('caOverviewBody').innerHTML =
+          '<tr><td colspan="3" class="text-muted small p-3">No CAs found.</td></tr>';
+        return;
+      }
       document.getElementById('caOverviewBody').innerHTML = rows.map(r => `
         <tr>
-          <td class="small">${r.name}</td>
+          <td class="small"><a href="ca_details.html?id=${r.id}" class="text-decoration-none">${r.name}</a></td>
           <td class="text-end small">${r.issued}</td>
           <td class="text-end small text-danger">${r.revoked}</td>
         </tr>`).join('');
     }
 
-    function renderActivity(items) {
-      document.getElementById('activityList').innerHTML = items.map(a => `
-        <div class="activity-item">
-          <div class="activity-icon ${a.color}"><i class="bi ${a.icon}"></i></div>
-          <div>
-            <div class="activity-text">${a.text}</div>
-            <div class="activity-time">${a.time}</div>
-          </div>
-        </div>`).join('');
-    }
-
     async function loadDashboard() {
-      // Timestamp
       document.getElementById('lastRefresh').textContent =
         'Last updated: ' + new Date().toLocaleTimeString();
 
-      // Try to load live CA list for CA count; fall back to dummy on error
       try {
-        const res = await fetch(`${apiBase}/ca`);
-        if (res.ok) {
-          const cas = await res.json();
-          DUMMY.metrics.cas = cas.length;
-          DUMMY.caOverview = cas.map(ca => ({ name: ca.name, issued: '–', revoked: '–' }));
-        }
-      } catch (_) { /* API unreachable – use dummy data */ }
+        const res = await fetch(`${apiBase}/dashboard/stats`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const stats = await res.json();
+        renderMetrics(stats);
+        renderCaOverview(stats.ca_overview);
+        renderHealth(true);
+      } catch (_) {
+        renderHealth(false);
+        document.getElementById('metricActive').textContent       = '–';
+        document.getElementById('metricRevoked').textContent      = '–';
+        document.getElementById('metricExpiringSoon').textContent = '–';
+        document.getElementById('metricCAs').textContent          = '–';
+        document.getElementById('caOverviewBody').innerHTML =
+          '<tr><td colspan="3" class="text-muted small p-3">Could not reach API.</td></tr>';
+      }
 
-      renderMetrics(DUMMY.metrics);
-      renderHealth(DUMMY.health);
-      renderCaOverview(DUMMY.caOverview);
-      renderActivity(DUMMY.activity);
+      document.getElementById('activityList').innerHTML =
+        '<div class="text-muted small">Not yet implemented.</div>';
     }
 
     window.onload = loadDashboard;

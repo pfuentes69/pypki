@@ -394,4 +394,15 @@ class PyPKI:
             real_signature=real_signature,
             is_ecdsa=is_ecdsa
         )
-        return x509.load_der_x509_crl(final_der)
+        crl = x509.load_der_x509_crl(final_der)
+
+        crl_pem = crl.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+        with self.__db.connection():
+            self.__db.upsert_crl(
+                ca_id=self.__ca_id,
+                crl_pem=crl_pem,
+                issue_date=crl.last_update_utc.replace(tzinfo=None),
+                next_update=crl.next_update_utc.replace(tzinfo=None)
+            )
+
+        return crl

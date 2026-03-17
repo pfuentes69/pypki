@@ -592,49 +592,43 @@ class PKIDataBase:
 
         return new_id
 
-    def get_certificate_list(self, ca_id, template_id, page, per_page, offset):
+    def get_certificate_list(self, ca_id, template_id, page, per_page, offset,
+                              status=None, expiring_soon=False):
         try:
-            # Build SQL query dynamically
-            query = """
-                SELECT id, ca_id, template_id, serial_number, subject_name,
-                        not_before, not_after, status
-                FROM Certificates
-                WHERE 1=1
-            """
+            base_where = "WHERE 1=1"
             params = []
 
             if ca_id is not None:
-                query += " AND ca_id = %s"
+                base_where += " AND ca_id = %s"
                 params.append(ca_id)
 
             if template_id is not None:
-                query += " AND template_id = %s"
+                base_where += " AND template_id = %s"
                 params.append(template_id)
 
-            query += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
-            params.extend([per_page, offset])
+            if expiring_soon:
+                base_where += (
+                    " AND status = 'Active'"
+                    " AND not_after BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 30 DAY)"
+                )
+            elif status is not None:
+                base_where += " AND status = %s"
+                params.append(status)
 
-            # Execute query
             db_name = self.__config["database"]
             cursor = self.__db_connection.cursor(buffered=True, dictionary=True)
             cursor.execute(f"USE {db_name}")
 
-            cursor.execute(query, params)
+            query = (
+                "SELECT id, ca_id, template_id, serial_number, subject_name,"
+                " not_before, not_after, status"
+                f" FROM Certificates {base_where}"
+                " ORDER BY created_at DESC LIMIT %s OFFSET %s"
+            )
+            cursor.execute(query, params + [per_page, offset])
             results = cursor.fetchall()
 
-            # Get total count for pagination
-            count_query = "SELECT COUNT(*) FROM Certificates WHERE 1=1"
-            count_params = []
-
-            if ca_id is not None:
-                count_query += " AND ca_id = %s"
-                count_params.append(ca_id)
-
-            if template_id is not None:
-                count_query += " AND template_id = %s"
-                count_params.append(template_id)
-
-            cursor.execute(count_query, count_params)
+            cursor.execute(f"SELECT COUNT(*) FROM Certificates {base_where}", params)
             total = cursor.fetchone()['COUNT(*)']
 
         except mysql.connector.Error as err:
@@ -894,6 +888,117 @@ class PKIDataBase:
         cursor.close()
         
         return revoked_certificates
+
+
+    def get_dashboard_stats(self):
+        """
+        Returns certificate and CA counts for the dashboard in a single round-trip.
+
+        Returns:
+            dict with keys: active, revoked, expiring_soon, cas, ca_overview (list of dicts).
+        """
+        db_name = self.__config["database"]
+        cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+        cursor.execute(f"USE {db_name}")
+
+        cursor.execute("""
+            SELECT
+                SUM(status = 'Active')  AS active,
+                SUM(status = 'Revoked') AS revoked,
+                SUM(status = 'Active'
+                    AND not_after BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 30 DAY)
+                ) AS expiring_soon
+            FROM Certificates
+        """)
+        cert_row = cursor.fetchone()
+
+        cursor.execute("SELECT COUNT(*) AS cas FROM CertificationAuthorities")
+        ca_row = cursor.fetchone()
+
+        cursor.execute("""
+            SELECT
+                ca.id,
+                ca.name,
+                COUNT(c.id)          AS issued,
+                SUM(c.status = 'Revoked') AS revoked
+            FROM CertificationAuthorities ca
+            LEFT JOIN Certificates c ON c.ca_id = ca.id
+            GROUP BY ca.id, ca.name
+            ORDER BY ca.name
+        """)
+        ca_overview = cursor.fetchall()
+        cursor.close()
+
+        return {
+            "active":        int(cert_row["active"]        or 0),
+            "revoked":       int(cert_row["revoked"]       or 0),
+            "expiring_soon": int(cert_row["expiring_soon"] or 0),
+            "cas":           int(ca_row["cas"]             or 0),
+            "ca_overview": [
+                {
+                    "id":      row["id"],
+                    "name":    row["name"],
+                    "issued":  int(row["issued"]  or 0),
+                    "revoked": int(row["revoked"] or 0),
+                }
+                for row in ca_overview
+            ],
+        }
+
+
+    def get_crl(self, ca_id):
+        """
+        Retrieve the latest CRL record for a given CA.
+
+        Parameters:
+            ca_id (int): The CA ID.
+
+        Returns:
+            dict: CRL record (ca_id, crl_data, issue_date, next_update) or None.
+        """
+        db_name = self.__config["database"]
+        cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+        cursor.execute(f"USE {db_name}")
+        cursor.execute(
+            "SELECT * FROM CertificateRevocationLists WHERE ca_id = %s",
+            (ca_id,)
+        )
+        result = cursor.fetchone()
+        cursor.close()
+        return result
+
+
+    def upsert_crl(self, ca_id, crl_pem: str, issue_date, next_update):
+        """
+        Insert or update the CRL for a given CA in CertificateRevocationLists,
+        keeping only one row per CA (the latest CRL).
+
+        Parameters:
+            ca_id (int): The CA ID.
+            crl_pem (str): PEM-encoded CRL data.
+            issue_date (datetime): The CRL issue date (last_update field).
+            next_update (datetime): The CRL next_update date.
+        """
+        db_name = self.__config["database"]
+        cursor = self.__db_connection.cursor(buffered=True)
+        cursor.execute(f"USE {db_name}")
+        cursor.execute("SELECT id FROM CertificateRevocationLists WHERE ca_id = %s", (ca_id,))
+        row = cursor.fetchone()
+        if row:
+            cursor.execute(
+                """UPDATE CertificateRevocationLists
+                      SET crl_data = %s, issue_date = %s, next_update = %s
+                    WHERE ca_id = %s""",
+                (crl_pem, issue_date, next_update, ca_id)
+            )
+        else:
+            cursor.execute(
+                """INSERT INTO CertificateRevocationLists (ca_id, crl_data, issue_date, next_update)
+                   VALUES (%s, %s, %s, %s)""",
+                (ca_id, crl_pem, issue_date, next_update)
+            )
+        self.__db_connection.commit()
+        cursor.close()
 
 
     def get_estaliases_collection(self):

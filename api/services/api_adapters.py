@@ -2,6 +2,7 @@ import base64
 import datetime
 import json
 
+from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
 from pypki import PKITools, PKIDataBase
@@ -38,6 +39,61 @@ def get_ca_details(ca_id):
     ca_details = pki.get_ca_by_id(ca_id)
     return ca_details
 
+
+def get_dashboard_stats():
+    db: PKIDataBase = pki.get_db()
+    with db.connection():
+        return db.get_dashboard_stats()
+
+
+def get_ca_full_details(ca_id):
+    """Returns CA record enriched with parsed certificate fields and latest CRL info."""
+    ca_record = pki.get_ca_by_id(ca_id)
+    if not ca_record:
+        return None
+
+    cert_pem = ca_record.get("certificate")
+    if cert_pem:
+        cert_bytes = cert_pem.encode("utf-8") if isinstance(cert_pem, str) else cert_pem
+        try:
+            cert = x509.load_pem_x509_certificate(cert_bytes)
+            ca_record["subject_dn"] = cert.subject.rfc4514_string()
+            ca_record["issuer_dn"] = cert.issuer.rfc4514_string()
+            ca_record["not_before"] = cert.not_valid_before_utc
+            ca_record["not_after"] = cert.not_valid_after_utc
+            ca_record["cert_serial"] = format(cert.serial_number, "X")
+        except Exception:
+            ca_record["subject_dn"] = None
+            ca_record["issuer_dn"] = None
+            ca_record["not_before"] = None
+            ca_record["not_after"] = None
+            ca_record["cert_serial"] = None
+
+    db: PKIDataBase = pki.get_db()
+    with db.connection():
+        crl_record = db.get_crl(ca_id)
+
+    if crl_record:
+        ca_record["crl_issue_date"] = crl_record.get("issue_date")
+        ca_record["crl_next_update"] = crl_record.get("next_update")
+    else:
+        ca_record["crl_issue_date"] = None
+        ca_record["crl_next_update"] = None
+
+    return ca_record
+
+
+def generate_crl(ca_id):
+    """Select the given CA and generate a fresh CRL. Returns (issue_date, next_update) or None."""
+    pki.select_ca_by_id(ca_id)
+    crl = pki.generate_crl()
+    if crl is None:
+        return None
+    return {
+        "issue_date": crl.last_update_utc,
+        "next_update": crl.next_update_utc,
+    }
+
 def get_est_aliases():
     db: PKIDataBase = pki.get_db()
     with db.connection():
@@ -51,10 +107,14 @@ def get_ca_name(ca_id):
     else:
         return None
 
-def get_certificate_list(ca_id, template_id, page, per_page, offset):
+def get_certificate_list(ca_id, template_id, page, per_page, offset,
+                          status=None, expiring_soon=False):
     db: PKIDataBase = pki.get_db()
     with db.connection():
-        total, results = db.get_certificate_list(ca_id, template_id, page, per_page, offset)
+        total, results = db.get_certificate_list(
+            ca_id, template_id, page, per_page, offset,
+            status=status, expiring_soon=expiring_soon
+        )
     return total, results
 
 

@@ -25,6 +25,13 @@ def process():
     result = api_adapters.process_input(data)
     return jsonify(result)
 
+@bp.route('/dashboard/stats', methods=['GET'])
+def get_dashboard_stats():
+    logger.info("API - GET Dashboard Stats")
+    stats = api_adapters.get_dashboard_stats()
+    return jsonify(stats), 200
+
+
 @bp.route('/ca', methods=['GET'])
 def get_certification_authorities():
     logger.info("API - GET CA List")
@@ -33,11 +40,13 @@ def get_certification_authorities():
     if not result:
         abort(404, description="Certification Authority not found")
 
-    # Only include ID and NAME in the response
     filtered_result = [
         {
             "id": row["id"],
-            "name": row["name"]
+            "name": row["name"],
+            "max_validity": row.get("max_validity"),
+            "crl_validity": row.get("crl_validity"),
+            "serial_number_length": row.get("serial_number_length"),
         }
         for row in result
     ]
@@ -55,18 +64,83 @@ def get_ca_details(ca_id):
     return jsonify(result)
 
 
+@bp.route('/ca/<int:ca_id>/full', methods=['GET'])
+def get_ca_full_details(ca_id):
+    logger.info("API - GET CA Full Details")
+    ca_details = api_adapters.get_ca_full_details(ca_id)
+    if not ca_details:
+        abort(404, description="Certification Authority not found")
+    result = api_adapters.convert_to_serializable(ca_details)
+    return jsonify(result)
+
+
+@bp.route('/ca/<int:ca_id>/cert', methods=['GET'])
+def download_ca_cert(ca_id):
+    logger.info(f"API - GET CA Certificate PEM for CA ID {ca_id}")
+    ca_details = api_adapters.get_ca_details(ca_id)
+    if not ca_details:
+        abort(404, description="Certification Authority not found")
+    cert_pem = ca_details.get("certificate")
+    if not cert_pem:
+        abort(404, description="Certificate not available")
+    if isinstance(cert_pem, bytes):
+        cert_pem = cert_pem.decode("utf-8")
+    ca_name = ca_details.get("name", f"ca_{ca_id}").replace(" ", "_")
+    response = Response(cert_pem, content_type="application/x-pem-file")
+    response.headers["Content-Disposition"] = f'attachment; filename="{ca_name}.pem"'
+    return response
+
+
+@bp.route('/ca/<int:ca_id>/crl', methods=['GET'])
+def get_ca_crl(ca_id):
+    logger.info(f"API - GET CRL from DB for CA ID {ca_id}")
+    ca_details = api_adapters.get_ca_details(ca_id)
+    if not ca_details:
+        abort(404, description="Certification Authority not found")
+    db = api_adapters.pki.get_db()
+    with db.connection():
+        crl_record = db.get_crl(ca_id)
+    if not crl_record or not crl_record.get("crl_data"):
+        abort(404, description="No CRL found for this CA")
+    ca_name = ca_details.get("name", f"ca_{ca_id}").replace(" ", "_")
+    response = Response(crl_record["crl_data"], content_type="application/pkix-crl")
+    response.headers["Content-Disposition"] = f'attachment; filename="{ca_name}.crl"'
+    return response
+
+
+@bp.route('/ca/<int:ca_id>/crl', methods=['POST'])
+def issue_crl(ca_id):
+    logger.info(f"API - POST Generate CRL for CA ID {ca_id}")
+    ca_details = api_adapters.get_ca_details(ca_id)
+    if not ca_details:
+        abort(404, description="Certification Authority not found")
+    result = api_adapters.generate_crl(ca_id)
+    if not result:
+        abort(500, description="CRL generation failed")
+    return jsonify(api_adapters.convert_to_serializable({
+        "message": "CRL generated successfully",
+        "issue_date": result["issue_date"],
+        "next_update": result["next_update"],
+    })), 200
+
+
 @bp.route('/certificate', methods=['GET'])
 def list_certificates():
     try:
         # Get query parameters
         ca_id = request.args.get('ca_id', type=int)
         template_id = request.args.get('template_id', type=int)
+        status = request.args.get('status', default=None)
+        expiring_soon = request.args.get('expiring_soon', default='false').lower() == 'true'
         page = request.args.get('page', default=1, type=int)
         per_page = request.args.get('per_page', default=10, type=int)
 
         offset = (page - 1) * per_page
 
-        total, results = api_adapters.get_certificate_list(ca_id, template_id, page, per_page, offset)
+        total, results = api_adapters.get_certificate_list(
+            ca_id, template_id, page, per_page, offset,
+            status=status, expiring_soon=expiring_soon
+        )
 
         return jsonify({
             "page": page,

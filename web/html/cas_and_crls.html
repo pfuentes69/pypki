@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>CAs & CRL</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" rel="stylesheet">
+  <style>
+    body { display: flex; min-height: 100vh; }
+    #sidebar {
+      width: 220px;
+      min-height: 100vh;
+      background-color: #212529;
+      flex-shrink: 0;
+    }
+    #sidebar .nav-link {
+      color: #adb5bd;
+      border-radius: 0.375rem;
+    }
+    #sidebar .nav-link:hover { color: #fff; background-color: #343a40; }
+    #sidebar .nav-link.active { color: #fff; background-color: #0d6efd; }
+    #sidebar .sidebar-brand {
+      color: #fff;
+      font-size: 1.1rem;
+      font-weight: 600;
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid #343a40;
+    }
+    #sidebar .nav-section { color: #6c757d; font-size: 0.7rem; text-transform: uppercase; letter-spacing: .08em; padding: 1rem 1.25rem 0.25rem; }
+    #main { flex: 1; min-width: 0; overflow-y: auto; }
+  </style>
+</head>
+<body>
+
+  <!-- Sidebar -->
+  <div id="sidebar" class="d-flex flex-column p-3">
+    <div class="sidebar-brand mb-3">
+      <i class="bi bi-shield-lock me-2"></i>PyPKI
+    </div>
+    <ul class="nav flex-column gap-1">
+      <li class="nav-item">
+        <a href="index.html" class="nav-link">
+          <i class="bi bi-speedometer2 me-2"></i>Dashboard
+        </a>
+      </li>
+      <div class="nav-section">Certificates</div>
+      <li class="nav-item">
+        <a href="certificate_list.html" class="nav-link">
+          <i class="bi bi-card-list me-2"></i>Certificates
+        </a>
+      </li>
+      <li class="nav-item">
+        <a href="certificate_request.html" class="nav-link">
+          <i class="bi bi-file-earmark-plus me-2"></i>Request
+        </a>
+      </li>
+      <div class="nav-section">Certification Authorities</div>
+      <li class="nav-item">
+        <a href="cas_and_crls.html" class="nav-link active">
+          <i class="bi bi-building me-2"></i>CAs & CRL
+        </a>
+      </li>
+      <li class="nav-item">
+        <a href="template_list.html" class="nav-link">
+          <i class="bi bi-file-earmark-code me-2"></i>Templates
+        </a>
+      </li>
+      <div class="nav-section">KMS</div>
+      <li class="nav-item">
+        <a href="kms_keygen.html" class="nav-link"><i class="bi bi-key me-2"></i>Key Generation</a>
+      </li>
+    </ul>
+  </div>
+
+  <!-- Main content -->
+  <div id="main" class="p-4">
+    <h4 class="mb-4">Certification Authorities</h4>
+
+    <div id="caTableWrapper">
+      <div class="table-responsive">
+        <table class="table table-bordered table-hover table-striped align-middle w-100">
+          <thead class="table-dark">
+            <tr>
+              <th style="width:5%">ID</th>
+              <th>Name</th>
+              <th style="width:14%">Max Cert Validity</th>
+              <th style="width:12%">CRL Validity</th>
+              <th style="width:8%"></th>
+            </tr>
+          </thead>
+          <tbody id="caTableBody">
+            <tr><td colspan="5" class="text-muted text-center">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function loadCAs() {
+      fetch('http://127.0.0.1:8080/api/ca')
+        .then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        })
+        .then(cas => {
+          const tbody = document.getElementById('caTableBody');
+          if (!cas.length) {
+            tbody.innerHTML = '<tr><td colspan="5" class="text-muted text-center">No Certification Authorities found.</td></tr>';
+            return;
+          }
+          tbody.innerHTML = cas.map(ca => `
+            <tr>
+              <td>${ca.id}</td>
+              <td>${ca.name}</td>
+              <td>${ca.max_validity != null ? ca.max_validity + ' days' : '—'}</td>
+              <td>${ca.crl_validity != null ? ca.crl_validity + ' days' : '—'}</td>
+              <td><a class="btn btn-sm btn-outline-primary" href="ca_details.html?id=${ca.id}">Details</a></td>
+            </tr>
+          `).join('');
+        })
+        .catch(err => {
+          document.getElementById('caTableBody').innerHTML =
+            `<tr><td colspan="5"><div class="alert alert-danger mb-0">Failed to load CAs: ${err.message}</div></td></tr>`;
+        });
+    }
+
+    window.onload = loadCAs;
+  </script>
+</body>
+</html>
