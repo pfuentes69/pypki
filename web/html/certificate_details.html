@@ -74,11 +74,13 @@
 
   <!-- Main content -->
   <div id="main" class="p-4">
-    <div class="mb-3">
-      <a href="certificate_list.html" class="btn btn-outline-secondary btn-sm">
-        <i class="bi bi-chevron-left"></i> Back to list
-      </a>
-    </div>
+    <nav aria-label="breadcrumb" class="mb-2">
+      <ol class="breadcrumb small">
+        <li class="breadcrumb-item"><a href="index.html">Dashboard</a></li>
+        <li class="breadcrumb-item"><a href="certificate_list.html">Certificates</a></li>
+        <li class="breadcrumb-item active" id="breadcrumbCurrent">Details</li>
+      </ol>
+    </nav>
     <h4 class="mb-4">Certificate Details</h4>
     <div id="certDetails">
       <div class="text-muted">Loading...</div>
@@ -233,12 +235,13 @@
         })
         .then(() => {
           bootstrap.Modal.getInstance(document.getElementById('revokeModal')).hide();
+          showToast('Certificate revoked successfully.');
           loadCertificate();
         })
         .catch(err => {
           btn.disabled = false;
           btn.innerHTML = '<i class="bi bi-x-circle me-1"></i>Revoke';
-          alert(`Revocation failed: ${err.message}`);
+          showToast(`Revocation failed: ${err.message}`, 'danger');
         });
     }
 
@@ -253,7 +256,11 @@
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json();
         })
-        .then(renderCertificate)
+        .then(cert => {
+          const label = cert.subject_name || `#${cert.id}`;
+          document.getElementById('breadcrumbCurrent').textContent = label;
+          renderCertificate(cert);
+        })
         .catch(err => {
           document.getElementById('certDetails').innerHTML = `<div class="alert alert-danger">Failed to load certificate: ${err.message}</div>`;
         });
@@ -261,5 +268,6 @@
 
     window.onload = loadCertificate;
   </script>
+  <script src="pypki_ui.js"></script>
 </body>
 </html>

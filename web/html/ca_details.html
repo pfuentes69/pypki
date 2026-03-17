@@ -74,11 +74,13 @@
 
   <!-- Main content -->
   <div id="main" class="p-4">
-    <div class="mb-3">
-      <a href="cas_and_crls.html" class="btn btn-outline-secondary btn-sm">
-        <i class="bi bi-chevron-left"></i> Back to list
-      </a>
-    </div>
+    <nav aria-label="breadcrumb" class="mb-2">
+      <ol class="breadcrumb small">
+        <li class="breadcrumb-item"><a href="index.html">Dashboard</a></li>
+        <li class="breadcrumb-item"><a href="cas_and_crls.html">CAs & CRL</a></li>
+        <li class="breadcrumb-item active" id="breadcrumbCurrent">Details</li>
+      </ol>
+    </nav>
     <h4 class="mb-4">CA Details</h4>
     <div id="caDetails">
       <div class="text-muted">Loading…</div>
@@ -180,7 +182,13 @@
         row('CRL Validity', window._crlValidity != null ? window._crlValidity + ' days' : null);
     }
 
-    function issueCrl(caId) {
+    async function issueCrl(caId) {
+      const ok = await confirmAction(
+        'Generate a new CRL for this CA? The previous CRL will be replaced.',
+        { title: 'Issue Fresh CRL', okLabel: 'Generate', okClass: 'btn-primary' }
+      );
+      if (!ok) return;
+
       const btn = document.getElementById('issueCrlBtn');
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Generating…';
@@ -194,11 +202,12 @@
           btn.disabled = false;
           btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Issue Fresh CRL';
           updateCrlRows(data.issue_date, data.next_update);
+          showToast('CRL generated successfully.');
         })
         .catch(err => {
           btn.disabled = false;
           btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Issue Fresh CRL';
-          alert(`CRL generation failed: ${err.message}`);
+          showToast(`CRL generation failed: ${err.message}`, 'danger');
         });
     }
 
@@ -215,6 +224,7 @@
         })
         .then(ca => {
           window._crlValidity = ca.crl_validity;
+          document.getElementById('breadcrumbCurrent').textContent = ca.name || 'CA Details';
           renderCA(ca);
         })
         .catch(err => {
@@ -225,5 +235,6 @@
 
     window.onload = loadCA;
   </script>
+  <script src="pypki_ui.js"></script>
 </body>
 </html>
