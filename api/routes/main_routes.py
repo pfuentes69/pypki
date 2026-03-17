@@ -275,14 +275,82 @@ def get_est_aliases(label=None):
     """Returns the CA certificate in PKCS#7 format, based on the label."""
     logger.info("API - GET EST Aliases")
     est_aliases = api_adapters.get_est_aliases()
-    
+
     if not est_aliases:
         return Response("No EST Aliases found", status=404)
-    
+
     # Prepare headers and send response
     #response = Response(est_aliases, content_type='application/json')
 
     return jsonify(est_aliases)
+
+
+# ── EST alias management (admin REST API) ──────────────────────────────────
+
+@bp.route('/est', methods=['GET'])
+def list_est_aliases():
+    logger.info("API - GET EST Alias List")
+    aliases = api_adapters.get_est_aliases()
+    return jsonify(api_adapters.convert_to_serializable(aliases)), 200
+
+
+@bp.route('/est', methods=['POST'])
+def create_est_alias():
+    logger.info("API - POST Create EST Alias")
+    data = request.get_json()
+    if not data:
+        abort(400, description="Missing JSON body")
+    for field in ("name", "ca_id", "template_id", "username", "password"):
+        if not data.get(field):
+            abort(400, description=f"Missing required field: {field}")
+
+    result = api_adapters.create_est_alias(data)
+    if not result:
+        abort(500, description="Failed to create EST alias")
+    return jsonify(result), 201
+
+
+@bp.route('/est/<int:alias_id>', methods=['GET'])
+def get_est_alias(alias_id):
+    logger.info(f"API - GET EST Alias {alias_id}")
+    alias = api_adapters.get_est_alias(alias_id)
+    if not alias:
+        abort(404, description="EST alias not found")
+    return jsonify(api_adapters.convert_to_serializable(alias)), 200
+
+
+@bp.route('/est/<int:alias_id>', methods=['PUT'])
+def update_est_alias(alias_id):
+    logger.info(f"API - PUT Update EST Alias {alias_id}")
+    data = request.get_json()
+    if not data:
+        abort(400, description="Missing JSON body")
+    for field in ("name", "ca_id", "template_id", "username"):
+        if not data.get(field):
+            abort(400, description=f"Missing required field: {field}")
+
+    ok = api_adapters.update_est_alias(alias_id, data)
+    if not ok:
+        abort(404, description="EST alias not found or update failed")
+    return jsonify({"message": "EST alias updated successfully"}), 200
+
+
+@bp.route('/est/<int:alias_id>', methods=['DELETE'])
+def delete_est_alias(alias_id):
+    logger.info(f"API - DELETE EST Alias {alias_id}")
+    ok = api_adapters.delete_est_alias(alias_id)
+    if not ok:
+        abort(404, description="EST alias not found")
+    return jsonify({"message": "EST alias deleted successfully"}), 200
+
+
+@bp.route('/est/<int:alias_id>/set-default', methods=['POST'])
+def set_default_est_alias(alias_id):
+    logger.info(f"API - POST Set Default EST Alias {alias_id}")
+    ok = api_adapters.set_default_est_alias(alias_id)
+    if not ok:
+        abort(500, description="Failed to set default EST alias")
+    return jsonify({"message": "Default EST alias updated"}), 200
 
 
 @bp.route('/template', methods=['GET'])

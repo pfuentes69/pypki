@@ -481,14 +481,16 @@ class PKIDataBase:
 
     def get_ca_and_template_id_by_alias_name(self, alias_name = None):
         """
-        Retrieve ca_id and template_id from ESTAliases by name.
+        Retrieve EST alias config (ca_id, template_id, username, password_hash)
+        by alias name, or the default alias when no name is provided.
 
         Args:
-            db_config (dict): A dictionary containing database connection parameters.
-            name (str): The name to look up in the ESTAliases table.
+            alias_name (str): The alias name to look up. If None, returns the
+                              alias with is_default = TRUE.
 
         Returns:
-            tuple or None: A tuple (ca_id, template_id) if found, otherwise None.
+            dict or None: Row with ca_id, template_id, username, password_hash;
+                          or None if not found.
         """
         try:
             db_name = self.__config["database"]
@@ -496,15 +498,15 @@ class PKIDataBase:
             cursor.execute(f"USE {db_name}")
             if alias_name:
                 query = """
-                    SELECT ca_id, template_id
+                    SELECT ca_id, template_id, username, password_hash
                     FROM ESTAliases
                     WHERE name = %s
                 """
                 cursor.execute(query, (alias_name,))
             else:
                 query = """
-                    SELECT ca_id, template_id 
-                    FROM ESTAliases 
+                    SELECT ca_id, template_id, username, password_hash
+                    FROM ESTAliases
                     WHERE is_default = TRUE LIMIT 1;
                 """
                 cursor.execute(query)
@@ -1003,9 +1005,15 @@ class PKIDataBase:
 
     def get_estaliases_collection(self):
         """
-        Retrieves a collection of EST aliaes from ESTAliases table.
-        
-        :return: List of dictionaries with 'id' and 'name'.
+        Retrieves all EST aliases from the ESTAliases table.
+
+        Note: password_hash is included in the raw row; callers that expose data
+        to the web UI should omit that field.
+
+        Returns:
+            list[dict]: Each dict contains id, name, ca_id, template_id,
+                        is_default, username, password_hash, cert_fingerprint,
+                        created_at, updated_at. Empty list on error.
         """
         try:
             db_name = self.__config["database"]
@@ -1026,6 +1034,172 @@ class PKIDataBase:
             if 'cursor' in locals():
                 cursor.close()
 
+
+    def get_est_alias(self, alias_id: int):
+        """
+        Retrieve a single EST alias by primary key.
+
+        Args:
+            alias_id (int): The alias ID.
+
+        Returns:
+            dict or None: Row with all ESTAliases columns, or None if not found.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute("SELECT * FROM ESTAliases WHERE id = %s", (alias_id,))
+            result = cursor.fetchone()
+            return result
+        except mysql.connector.Error as err:
+            logger.error(f"Database error: {err}")
+            return None
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+
+
+    def create_est_alias(self, name: str, ca_id: int, template_id: int,
+                         username: str, password_hash: str,
+                         cert_fingerprint: str = None):
+        """
+        Insert a new EST alias into ESTAliases.
+
+        Args:
+            name (str): Unique label used as the EST URL path segment.
+            ca_id (int): FK to CertificationAuthorities.
+            template_id (int): FK to CertificateTemplates.
+            username (str): Username for Basic Authentication.
+            password_hash (str): Hashed password (werkzeug PBKDF2).
+            cert_fingerprint (str): Certificate fingerprint for future mTLS use.
+
+        Returns:
+            int: The new alias ID, or None on error.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self.__db_connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute(
+                """INSERT INTO ESTAliases
+                       (name, ca_id, template_id, username, password_hash, cert_fingerprint)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (name, ca_id, template_id, username, password_hash, cert_fingerprint)
+            )
+            self.__db_connection.commit()
+            return cursor.lastrowid
+        except mysql.connector.Error as err:
+            logger.error(f"Database error: {err}")
+            return None
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+
+
+    def update_est_alias(self, alias_id: int, name: str, ca_id: int,
+                         template_id: int, username: str,
+                         password_hash: str = None,
+                         cert_fingerprint: str = None):
+        """
+        Update an existing EST alias.
+
+        If password_hash is None the stored hash is left unchanged.
+
+        Args:
+            alias_id (int): The alias to update.
+            name (str): New alias name.
+            ca_id (int): New CA FK.
+            template_id (int): New template FK.
+            username (str): New username for Basic Authentication.
+            password_hash (str | None): New hashed password, or None to keep existing.
+            cert_fingerprint (str | None): New certificate fingerprint.
+
+        Returns:
+            bool: True if a row was updated, False otherwise.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self.__db_connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+            if password_hash is not None:
+                cursor.execute(
+                    """UPDATE ESTAliases
+                          SET name = %s, ca_id = %s, template_id = %s,
+                              username = %s, password_hash = %s, cert_fingerprint = %s
+                        WHERE id = %s""",
+                    (name, ca_id, template_id, username, password_hash, cert_fingerprint, alias_id)
+                )
+            else:
+                cursor.execute(
+                    """UPDATE ESTAliases
+                          SET name = %s, ca_id = %s, template_id = %s,
+                              username = %s, cert_fingerprint = %s
+                        WHERE id = %s""",
+                    (name, ca_id, template_id, username, cert_fingerprint, alias_id)
+                )
+            self.__db_connection.commit()
+            return cursor.rowcount > 0
+        except mysql.connector.Error as err:
+            logger.error(f"Database error: {err}")
+            return False
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+
+
+    def delete_est_alias(self, alias_id: int):
+        """
+        Delete an EST alias by primary key.
+
+        Args:
+            alias_id (int): The alias ID to delete.
+
+        Returns:
+            bool: True if a row was deleted, False otherwise.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self.__db_connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute("DELETE FROM ESTAliases WHERE id = %s", (alias_id,))
+            self.__db_connection.commit()
+            return cursor.rowcount > 0
+        except mysql.connector.Error as err:
+            logger.error(f"Database error: {err}")
+            return False
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+
+
+    def set_default_est_alias(self, alias_id: int):
+        """
+        Mark one alias as the default, clearing the flag on all others.
+
+        Executed as two sequential statements in the same transaction so the
+        table always has at most one default row.
+
+        Args:
+            alias_id (int): The alias that should become the new default.
+
+        Returns:
+            bool: True on success, False on database error.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self.__db_connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute("UPDATE ESTAliases SET is_default = FALSE")
+            cursor.execute("UPDATE ESTAliases SET is_default = TRUE WHERE id = %s", (alias_id,))
+            self.__db_connection.commit()
+            return True
+        except mysql.connector.Error as err:
+            logger.error(f"Database error: {err}")
+            return False
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
 
 
     def create_database(self):
@@ -1124,6 +1298,9 @@ class PKIDataBase:
                         ca_id INT,
                         template_id INT,
                         is_default BOOLEAN DEFAULT FALSE,
+                        username VARCHAR(255),
+                        password_hash VARCHAR(255),
+                        cert_fingerprint VARCHAR(255),
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                     );

@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>EST Enrollment</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" rel="stylesheet">
+  <style>
+    body { display: flex; min-height: 100vh; }
+    #sidebar { width: 220px; min-height: 100vh; background-color: #212529; flex-shrink: 0; }
+    #sidebar .nav-link { color: #adb5bd; border-radius: 0.375rem; }
+    #sidebar .nav-link:hover { color: #fff; background-color: #343a40; }
+    #sidebar .nav-link.active { color: #fff; background-color: #0d6efd; }
+    #sidebar .sidebar-brand { color: #fff; font-size: 1.1rem; font-weight: 600; padding: 1rem 1.25rem; border-bottom: 1px solid #343a40; }
+    #sidebar .nav-section { color: #6c757d; font-size: 0.7rem; text-transform: uppercase; letter-spacing: .08em; padding: 1rem 1.25rem 0.25rem; }
+    #main { flex: 1; min-width: 0; overflow-y: auto; }
+  </style>
+</head>
+<body>
+
+  <!-- Sidebar -->
+  <div id="sidebar" class="d-flex flex-column p-3">
+    <div class="sidebar-brand mb-3"><i class="bi bi-shield-lock me-2"></i>PyPKI</div>
+    <ul class="nav flex-column gap-1">
+      <li class="nav-item"><a href="index.html" class="nav-link"><i class="bi bi-speedometer2 me-2"></i>Dashboard</a></li>
+      <div class="nav-section">Certificates</div>
+      <li class="nav-item"><a href="certificate_list.html" class="nav-link"><i class="bi bi-card-list me-2"></i>Certificates</a></li>
+      <li class="nav-item"><a href="certificate_request.html" class="nav-link"><i class="bi bi-file-earmark-plus me-2"></i>Request</a></li>
+      <div class="nav-section">Certification Authorities</div>
+      <li class="nav-item"><a href="cas_and_crls.html" class="nav-link"><i class="bi bi-building me-2"></i>CAs & CRL</a></li>
+      <li class="nav-item"><a href="est_list.html" class="nav-link active"><i class="bi bi-person-badge me-2"></i>EST Enrollment</a></li>
+      <li class="nav-item"><a href="template_list.html" class="nav-link"><i class="bi bi-file-earmark-code me-2"></i>Templates</a></li>
+      <div class="nav-section">KMS</div>
+      <li class="nav-item"><a href="kms_keygen.html" class="nav-link"><i class="bi bi-key me-2"></i>Key Generation</a></li>
+    </ul>
+  </div>
+
+  <!-- Main content -->
+  <div id="main" class="p-4">
+    <nav aria-label="breadcrumb" class="mb-2">
+      <ol class="breadcrumb small">
+        <li class="breadcrumb-item"><a href="index.html">Dashboard</a></li>
+        <li class="breadcrumb-item active">EST Enrollment</li>
+      </ol>
+    </nav>
+
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <h4 class="mb-0">EST Enrollment Endpoints</h4>
+      <a href="est_editor.html" class="btn btn-primary btn-sm">
+        <i class="bi bi-plus-circle me-1"></i>New Endpoint
+      </a>
+    </div>
+
+    <div class="table-responsive">
+      <table class="table table-bordered table-hover table-striped align-middle">
+        <thead class="table-dark">
+          <tr>
+            <th style="width:5%">Default</th>
+            <th style="width:4%">ID</th>
+            <th>Name</th>
+            <th>CA</th>
+            <th>Template</th>
+            <th>Username</th>
+            <th style="width:14%">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="aliasTableBody">
+          <tr><td colspan="7" class="text-center text-muted">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div id="emptyState" class="d-none text-center py-5 text-muted">
+      <i class="bi bi-person-badge" style="font-size:3rem;"></i>
+      <p class="mt-3">No EST endpoints defined yet.</p>
+      <a href="est_editor.html" class="btn btn-primary">
+        <i class="bi bi-plus-circle me-1"></i>Create First Endpoint
+      </a>
+    </div>
+  </div>
+
+  <script>
+    const apiBase = 'http://127.0.0.1:8080/api';
+
+    async function loadAliases() {
+      const tbody = document.getElementById('aliasTableBody');
+      try {
+        const res = await fetch(`${apiBase}/est`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const aliases = await res.json();
+
+        if (!aliases.length) {
+          tbody.innerHTML = '';
+          document.getElementById('emptyState').classList.remove('d-none');
+          return;
+        }
+
+        tbody.innerHTML = aliases.map(a => `
+          <tr>
+            <td class="text-center">
+              <input type="radio" class="form-check-input" name="defaultAlias"
+                     ${a.is_default ? 'checked' : ''}
+                     onchange="setDefault(${a.id})"
+                     title="Set as default">
+            </td>
+            <td>${a.id}</td>
+            <td>
+              <span class="font-monospace">${escHtml(a.name)}</span>
+              ${a.is_default ? '<span class="badge bg-primary ms-2">default</span>' : ''}
+            </td>
+            <td>${a.ca_id ?? '—'}</td>
+            <td>${a.template_id ?? '—'}</td>
+            <td>${escHtml(a.username ?? '—')}</td>
+            <td>
+              <div class="d-flex gap-1">
+                <a href="est_editor.html?id=${a.id}" class="btn btn-sm btn-outline-primary">
+                  <i class="bi bi-pencil"></i>
+                </a>
+                <button class="btn btn-sm btn-outline-danger" onclick="deleteAlias(${a.id}, '${escHtml(a.name)}')">
+                  <i class="bi bi-trash"></i>
+                </button>
+              </div>
+            </td>
+          </tr>
+        `).join('');
+      } catch (err) {
+        tbody.innerHTML = `<tr><td colspan="7"><div class="alert alert-danger mb-0">Failed to load EST endpoints: ${escHtml(err.message)}</div></td></tr>`;
+      }
+    }
+
+    async function setDefault(aliasId) {
+      try {
+        const res = await fetch(`${apiBase}/est/${aliasId}/set-default`, { method: 'POST' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        showToast('Default EST endpoint updated.');
+        loadAliases();
+      } catch (err) {
+        showToast('Failed to set default: ' + err.message, 'danger');
+        loadAliases(); // revert radio state
+      }
+    }
+
+    async function deleteAlias(aliasId, name) {
+      const ok = await confirmAction(
+        `Delete EST endpoint <strong>${name}</strong>? This cannot be undone.`,
+        { title: 'Delete EST Endpoint', okLabel: 'Delete', okClass: 'btn-danger' }
+      );
+      if (!ok) return;
+      try {
+        const res = await fetch(`${apiBase}/est/${aliasId}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const d = await res.json();
+          throw new Error(d.description || `HTTP ${res.status}`);
+        }
+        showToast(`EST endpoint <strong>${name}</strong> deleted.`);
+        loadAliases();
+      } catch (err) {
+        showToast('Delete failed: ' + err.message, 'danger');
+      }
+    }
+
+    function escHtml(str) {
+      if (str == null) return '';
+      return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    window.onload = loadAliases;
+  </script>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="pypki_ui.js"></script>
+</body>
+</html>

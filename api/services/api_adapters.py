@@ -4,6 +4,7 @@ import json
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
+from werkzeug.security import generate_password_hash
 
 from pypki import PKITools, PKIDataBase
 
@@ -95,10 +96,89 @@ def generate_crl(ca_id):
     }
 
 def get_est_aliases():
+    """Return all EST aliases without exposing password_hash to callers."""
     db: PKIDataBase = pki.get_db()
     with db.connection():
-        est_aliases = db.get_estaliases_collection()
-    return est_aliases
+        rows = db.get_estaliases_collection()
+    return [_strip_password(r) for r in rows]
+
+
+def get_est_alias(alias_id: int):
+    """Return a single EST alias by ID, without password_hash."""
+    db: PKIDataBase = pki.get_db()
+    with db.connection():
+        row = db.get_est_alias(alias_id)
+    return _strip_password(row) if row else None
+
+
+def create_est_alias(data: dict):
+    """
+    Create a new EST alias.
+
+    Required keys in data: name, ca_id, template_id, username, password.
+    Optional: cert_fingerprint.
+
+    Returns:
+        dict with the new alias_id, or None on failure.
+    """
+    password_hash = generate_password_hash(data["password"])
+    db: PKIDataBase = pki.get_db()
+    with db.connection():
+        new_id = db.create_est_alias(
+            name=data["name"],
+            ca_id=int(data["ca_id"]),
+            template_id=int(data["template_id"]),
+            username=data["username"],
+            password_hash=password_hash,
+            cert_fingerprint=data.get("cert_fingerprint"),
+        )
+    return {"alias_id": new_id} if new_id else None
+
+
+def update_est_alias(alias_id: int, data: dict):
+    """
+    Update an existing EST alias.
+
+    If 'password' key is present (and non-empty) the password is re-hashed;
+    otherwise the stored hash is left unchanged.
+
+    Returns:
+        bool: True on success.
+    """
+    password = data.get("password") or ""
+    password_hash = generate_password_hash(password) if password else None
+    db: PKIDataBase = pki.get_db()
+    with db.connection():
+        return db.update_est_alias(
+            alias_id=alias_id,
+            name=data["name"],
+            ca_id=int(data["ca_id"]),
+            template_id=int(data["template_id"]),
+            username=data["username"],
+            password_hash=password_hash,
+            cert_fingerprint=data.get("cert_fingerprint"),
+        )
+
+
+def delete_est_alias(alias_id: int):
+    """Delete an EST alias. Returns True on success."""
+    db: PKIDataBase = pki.get_db()
+    with db.connection():
+        return db.delete_est_alias(alias_id)
+
+
+def set_default_est_alias(alias_id: int):
+    """Set the given alias as the default. Returns True on success."""
+    db: PKIDataBase = pki.get_db()
+    with db.connection():
+        return db.set_default_est_alias(alias_id)
+
+
+def _strip_password(row: dict):
+    """Remove password_hash from a row dict before sending to the web UI."""
+    if row is None:
+        return None
+    return {k: v for k, v in row.items() if k != "password_hash"}
 
 def get_ca_name(ca_id):
     ca_details = pki.get_ca_by_id(ca_id)
