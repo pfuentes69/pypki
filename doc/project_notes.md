@@ -92,7 +92,7 @@ Tables:
 | `Certificates` | Issued certificates with status (Active / Revoked / Expired) |
 | `CertificateTemplates` | JSON-encoded certificate templates |
 | `OCSPResponders` | OCSP responder configs |
-| `PrivateKeyStorage` | Encrypted/plain/HSM private keys |
+| `KeyStorage` | Asymmetric and symmetric keys (plain/encrypted/HSM) |
 | `ESTAliases` | EST protocol alias → CA + template mapping |
 | `CertificateLogs` | Certificate lifecycle audit log |
 | `CertificateRevocationLists` | Stored CRL records |

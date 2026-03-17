@@ -148,6 +148,11 @@ def update_template(template_id, template_dict):
     return success
 
 
+def kms_generate_key(algorithm: str, persist: bool, **kwargs):
+    kms = pki.get_kms()
+    return kms.generate_key(algorithm=algorithm, persist=persist, **kwargs)
+
+
 def create_template(template_dict):
     db = pki.get_db()
     with db.connection():

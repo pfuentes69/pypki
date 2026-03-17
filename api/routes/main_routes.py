@@ -269,6 +269,21 @@ def update_template(template_id):
     return jsonify({"message": "Template updated successfully", "template_id": template_id}), 200
 
 
+@bp.route('/kms/generate-key', methods=['POST'])
+def kms_generate_key():
+    logger.info("API - POST KMS Generate Key")
+    data = request.get_json()
+    if not data or 'algorithm' not in data:
+        abort(400, description="Missing 'algorithm' in request body")
+    algorithm = data.pop('algorithm')
+    persist = data.pop('persist', True)
+    try:
+        result = api_adapters.kms_generate_key(algorithm=algorithm, persist=persist, **data)
+    except ValueError as e:
+        abort(400, description=str(e))
+    return jsonify(result), 200
+
+
 @bp.route('/template', methods=['POST'])
 def create_template():
     logger.info("API - POST Create Template")

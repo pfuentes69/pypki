@@ -7,7 +7,7 @@ PyPKI uses MySQL as its backend. The schema is created by `PKIDataBase.create_da
 ## Entity Relationship Overview
 
 ```
-PrivateKeyStorage ◄─── CertificationAuthorities
+KeyStorage ◄─── CertificationAuthorities
                                │
                     ┌──────────┤
                     │          │
@@ -24,15 +24,17 @@ PrivateKeyStorage ◄─── CertificationAuthorities
 
 ## Tables
 
-### PrivateKeyStorage
+### KeyStorage
 
-Stores private keys, either in plain text, encrypted, or as a reference to an HSM slot.
+Stores cryptographic keys, either in plain text, encrypted, or as a reference to an HSM slot. Both asymmetric key pairs and symmetric keys are stored here.
 
 | Column | Type | Constraints | Description |
 |---|---|---|---|
 | `id` | INT | PK, AUTO_INCREMENT | |
 | `certificate_id` | INT | | Reference to the associated certificate (informational) |
-| `private_key` | TEXT | | PEM-encoded private key (plain or encrypted) |
+| `key_type` | VARCHAR(64) | | Algorithm and parameter string, e.g. `RSA-3072`, `ECDSA-P-256`, `Ed25519`, `AES-256` |
+| `private_key` | TEXT | | PEM-encoded private key (asymmetric) or base64-encoded raw bytes (symmetric) |
+| `public_key` | TEXT | | PEM-encoded SubjectPublicKeyInfo (asymmetric keys only; NULL for symmetric) |
 | `storage_type` | ENUM | NOT NULL | `Encrypted`, `Plain`, or `HSM` |
 | `hsm_slot` | INT | | PKCS#11 slot number (HSM only) |
 | `hsm_token_id` | VARCHAR(255) | | HSM token identifier (HSM only) |
@@ -54,7 +56,7 @@ One row per Certification Authority loaded into the system.
 | `public_key` | TEXT | | PEM-encoded CA public key |
 | `ski` | VARCHAR(64) | | Subject Key Identifier (hex SHA-1 of public key) |
 | `private_key` | TEXT | | PEM-encoded private key (null when using HSM) |
-| `private_key_reference` | INT | FK → PrivateKeyStorage | Used when the key is stored in PrivateKeyStorage |
+| `private_key_reference` | INT | FK → KeyStorage | Used when the key is stored in KeyStorage |
 | `certificate_chain` | TEXT | | PEM bundle of the full chain up to the root |
 | `token_slot` | INT | | PKCS#11 slot number |
 | `token_key_id` | VARCHAR(64) | | PKCS#11 key ID |
@@ -68,7 +70,7 @@ One row per Certification Authority loaded into the system.
 | `updated_at` | TIMESTAMP | ON UPDATE NOW | |
 
 **Foreign keys**
-- `private_key_reference` → `PrivateKeyStorage(id)`
+- `private_key_reference` → `KeyStorage(id)`
 
 ---
 
@@ -102,7 +104,7 @@ Every certificate issued by the system, regardless of CA or template.
 | `not_before` | DATETIME | | Certificate validity start |
 | `not_after` | DATETIME | | Certificate validity end |
 | `public_key` | TEXT | | PEM-encoded public key |
-| `private_key_reference` | INT | FK → PrivateKeyStorage | Set when the system generated the key pair |
+| `private_key_reference` | INT | FK → KeyStorage | Set when the system generated the key pair |
 | `status` | ENUM | NOT NULL, DEFAULT `Active` | `Active`, `Revoked`, or `Expired` |
 | `revoked_at` | TIMESTAMP | | Timestamp of revocation (null if not revoked) |
 | `revocation_reason` | INT | | RFC 5280 reason code (null if not revoked) |
@@ -114,7 +116,7 @@ Every certificate issued by the system, regardless of CA or template.
 **Foreign keys**
 - `ca_id` → `CertificationAuthorities(id)`
 - `template_id` → `CertificateTemplates(id)`
-- `private_key_reference` → `PrivateKeyStorage(id)`
+- `private_key_reference` → `KeyStorage(id)`
 
 **Revocation reason codes** (RFC 5280)
 
@@ -165,7 +167,7 @@ Configuration for OCSP responder instances. Each responder is tied to a specific
 | `not_after` | DATETIME | | Expiry of the OCSP responder certificate |
 | `response_validity` | INT | DEFAULT 1 | How many days an OCSP response remains valid |
 | `private_key` | TEXT | | PEM-encoded OCSP responder private key |
-| `private_key_reference` | INT | | Reference to PrivateKeyStorage (when applicable) |
+| `private_key_reference` | INT | | Reference to KeyStorage (when applicable) |
 | `certificate` | TEXT | | PEM-encoded OCSP responder certificate |
 | `token_slot` | INT | | PKCS#11 slot number |
 | `token_key_id` | VARCHAR(64) | | PKCS#11 key ID |
@@ -232,10 +234,10 @@ General-purpose audit log for system-level actions (not tied to a specific certi
 
 | Table | Column | References |
 |---|---|---|
-| CertificationAuthorities | private_key_reference | PrivateKeyStorage(id) |
+| CertificationAuthorities | private_key_reference | KeyStorage(id) |
 | Certificates | ca_id | CertificationAuthorities(id) |
 | Certificates | template_id | CertificateTemplates(id) |
-| Certificates | private_key_reference | PrivateKeyStorage(id) |
+| Certificates | private_key_reference | KeyStorage(id) |
 | ESTAliases | ca_id | CertificationAuthorities(id) |
 | ESTAliases | template_id | CertificateTemplates(id) |
 | OCSPResponders | ca_id | CertificationAuthorities(id) |

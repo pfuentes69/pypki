@@ -9,10 +9,13 @@ from cryptography.x509 import (
 )
 from datetime import datetime, timezone, timedelta
 
+from cryptography.hazmat.primitives.asymmetric import rsa, ec
+
 from .db import PKIDataBase
 from .certificate_tools import CertificateTools
 from .pki_tools import PKITools
 from .key_tools import KeyTools
+from .kms import KeyManagementService
 from .ca import CertificationAuthority
 from .ocsp_responder import OCSPResponder
 from .log import logger
@@ -22,6 +25,7 @@ class PyPKI:
         """Initialize the PKI Utilities class."""
         self.__config = {}
         self.__db = PKIDataBase()
+        self.__kms = KeyManagementService(self.__db)
         self.__ca_active = CertificationAuthority()
         self.__cert_tool = CertificateTools()
         self.__ca_id = 0
@@ -63,6 +67,9 @@ class PyPKI:
 
     def get_db(self):
         return self.__db
+
+    def get_kms(self) -> KeyManagementService:
+        return self.__kms
 
 
     def create_ca_from_config_json(self, config_json: str):
@@ -117,15 +124,13 @@ class PyPKI:
                         "extensions": json.loads(ca_item.get("extensions", "{}")),
                         "crypto": {
                             "certificate": ca_item.get("certificate"),
-                            "private_key": ca_item.get("private_key"),
                             "certificate_chain": ca_item.get("certificate_chain"),
-                            "token_slot": ca_item.get("token_slot"),
-                            "token_key_id": ca_item.get("token_key_id"),
-                            "token_password": ca_item.get("token_password")
+                            "kms_key_id": ca_item.get("private_key_reference"),
                         }
                     }
                     ca_config_json = json.dumps(ca_config, indent=2)
                     self.__ca_active.load_config_json(ca_config_json)
+                    self.__ca_active.set_kms(self.__kms)
                     with self.__db.connection():
                         self.__ca_active.load_serials(self.__db.fetch_used_serials())
                     break
@@ -143,6 +148,8 @@ class PyPKI:
     def load_ocsp_responders(self):
         with self.__db.connection():
             self.__ocsp_responders = self.__db.get_ocsp_responders_collection()
+        for responder in self.__ocsp_responders:
+            responder.set_kms(self.__kms)
 
 
     def get_ocsp_responder_by_issuer_ski(self, issuer_ski):
@@ -361,6 +368,30 @@ class PyPKI:
             revoked_cert = revoked_cert.build()
             crl_builder = crl_builder.add_revoked_certificate(revoked_cert)
 
-        crl = crl_builder.sign(private_key=self.__ca_active.get_private_key(), algorithm=hashes.SHA256())
+        # Sign with a dummy key matching the CA's algorithm so the
+        # signatureAlgorithm field in the TBS bytes is correct.
+        ca_pub_key = self.__ca_active.get_certificate().public_key()
+        if isinstance(ca_pub_key, ec.EllipticCurvePublicKey):
+            dummy_key = ec.generate_private_key(ca_pub_key.curve)
+            is_ecdsa = True
+        else:
+            dummy_key = rsa.generate_private_key(
+                public_exponent=65537,
+                key_size=ca_pub_key.key_size
+            )
+            is_ecdsa = False
 
-        return crl
+        pre_crl = crl_builder.sign(private_key=dummy_key, algorithm=hashes.SHA256())
+
+        digest = hashes.Hash(hashes.SHA256())
+        digest.update(pre_crl.tbs_certlist_bytes)
+        tbs_digest = digest.finalize()
+
+        real_signature = self.__ca_active.sign_tbs_digest(tbs_digest)
+
+        final_der = CertificateTools().patch_crl_signature(
+            pre_crl_der=pre_crl.public_bytes(serialization.Encoding.DER),
+            real_signature=real_signature,
+            is_ecdsa=is_ecdsa
+        )
+        return x509.load_der_x509_crl(final_der)

@@ -6,7 +6,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature, decode_dss_signature
 from cryptography.x509 import NameOID, Name, NameAttribute, CertificateBuilder
 from cryptography.x509.oid import ObjectIdentifier
-from asn1crypto import x509 as asn1_x509
+from asn1crypto import x509 as asn1_x509, crl as asn1_crl
 from asn1crypto.core import OctetBitString
 from ipaddress import ip_address
 from datetime import datetime, timedelta, timezone
@@ -388,6 +388,29 @@ class CertificateTools:
         return cert.dump()
 
 
+    def patch_crl_signature(
+        self,
+        pre_crl_der: bytes,
+        real_signature: bytes,
+        is_ecdsa: bool = False
+    ) -> bytes:
+        """
+        Replace the dummy signature in a DER-encoded CRL with the real one.
+
+        Used by core.py when signing CRLs via the KMS.
+        """
+        crl = asn1_crl.CertificateList.load(pre_crl_der)
+
+        if is_ecdsa:
+            r, s = decode_dss_signature(real_signature)
+            der_sig = encode_dss_signature(r, s)
+        else:
+            der_sig = real_signature
+
+        crl['signature'] = OctetBitString(der_sig)
+        return crl.dump()
+
+
     def generate_certificate_from_csr(
         self, 
         csr_pem: bytes,
@@ -422,14 +445,12 @@ class CertificateTools:
             raise ValueError("Missing signing key information")
 
         if issuing_ca is None:
-            signing_private_key = certificate_key
-            issuer = subject 
+            # Self-signed: the certificate's own key is used directly.
+            issuer = subject
             serial_number = x509.random_serial_number()
         else:
-            signing_private_key = issuing_ca.get_signing_key()
             issuer = issuing_ca.get_certificate().subject
             serial_number = issuing_ca.generate_unique_serial()
-            # Check if the validity surpasses the CA
             ca_validity = issuing_ca.get_certificate().not_valid_after_utc
             if not_valid_after > ca_validity:
                 not_valid_after = ca_validity
@@ -448,34 +469,41 @@ class CertificateTools:
         for ext in csr.extensions:
             cert_builder = cert_builder.add_extension(ext.value, ext.critical)
 
-        if signing_private_key.is_hsm():
-            # PKCS#11 path: the token only signs pre-computed digests (CKM_RSA_PKCS),
-            # so we must sign with a dummy key first, extract the TBS bytes, hash them,
-            # sign the hash via the HSM, then patch the signature in the DER.
-            dummy_private_key = rsa.generate_private_key(
-                public_exponent=65537,
-                key_size=2048,
-                backend=None
-            )
-            pre_cert = cert_builder.sign(private_key=dummy_private_key, algorithm=hashes.SHA256(), backend=None)
-
-            digest = hashes.Hash(hashes.SHA256(), backend=None)
-            digest.update(pre_cert.tbs_certificate_bytes)
-            tbs_digest = digest.finalize()
-
-            signature = signing_private_key.sign_digest(tbs_digest)
-            final_der = self.patch_certificate_signature(
-                pre_cert_der=pre_cert.public_bytes(serialization.Encoding.DER),
-                real_signature=signature,
-                is_ecdsa=False
-            )
-            return x509.load_der_x509_certificate(final_der)
-        else:
-            # Software key: sign directly — simple and correct for both RSA and ECDSA
+        if issuing_ca is None:
+            # Self-signed: sign directly with the certificate's own key.
             return cert_builder.sign(
-                private_key=signing_private_key.get_private_key(),
+                private_key=certificate_key.get_private_key(),
                 algorithm=hashes.SHA256()
             )
+
+        # CA-signed: use the dummy-key + KMS patch approach.
+        # A dummy key matching the CA's algorithm is used so that the
+        # signatureAlgorithm field in the TBS bytes is correct before we hash them.
+        ca_pub_key = issuing_ca.get_certificate().public_key()
+        if isinstance(ca_pub_key, ec.EllipticCurvePublicKey):
+            dummy_key = ec.generate_private_key(ca_pub_key.curve)
+            is_ecdsa = True
+        else:
+            dummy_key = rsa.generate_private_key(
+                public_exponent=65537,
+                key_size=ca_pub_key.key_size
+            )
+            is_ecdsa = False
+
+        pre_cert = cert_builder.sign(private_key=dummy_key, algorithm=hashes.SHA256())
+
+        digest = hashes.Hash(hashes.SHA256())
+        digest.update(pre_cert.tbs_certificate_bytes)
+        tbs_digest = digest.finalize()
+
+        real_signature = issuing_ca.sign_tbs_digest(tbs_digest)
+
+        final_der = self.patch_certificate_signature(
+            pre_cert_der=pre_cert.public_bytes(serialization.Encoding.DER),
+            real_signature=real_signature,
+            is_ecdsa=is_ecdsa
+        )
+        return x509.load_der_x509_certificate(final_der)
 
     
     def generate_certificate_pem_from_csr(

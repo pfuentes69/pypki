@@ -78,15 +78,17 @@ pypki/
 │   ├── parse_csr_to_json.py
 │   └── pkcs11_test.py
 │
-├── request_examples/               # Sample certificate request files
-│   ├── ca_cert_request.json
-│   ├── client_cert_request.json
-│   ├── server_cert_request.json
-│   ├── iot_device_cert_request.json
-│   ├── iot_rootca_cert_request.json
-│   ├── csr.conf
-│   ├── example.csr
-│   └── example.key
+├── doc/
+│   ├── request_examples/           # Sample certificate request files
+│   │   ├── ca_cert_request.json
+│   │   ├── client_cert_request.json
+│   │   ├── server_cert_request.json
+│   │   ├── iot_device_cert_request.json
+│   │   ├── iot_rootca_cert_request.json
+│   │   ├── csr.conf
+│   │   ├── example.csr
+│   │   ├── example.key
+│   │   └── README.md
 │
 ├── tests/                          # Test suite
 │   └── __main__.py

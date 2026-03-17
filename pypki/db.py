@@ -71,6 +71,48 @@ class PKIDataBase:
         finally:
             self.close_db()
 
+    def get_key_record(self, key_id: int):
+        """
+        Retrieve a row from KeyStorage by ID.
+        Returns a dict or None if not found.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute("SELECT * FROM KeyStorage WHERE id = %s", (key_id,))
+            result = cursor.fetchone()
+            cursor.close()
+            return result if result else None
+        except mysql.connector.Error as err:
+            logger.error(f"Error retrieving KeyStorage record: {err}")
+            return None
+
+
+    def insert_key(self, private_key: str, storage_type: str = "Plain",
+                   public_key: str = None, key_type: str = None) -> int:
+        """
+        Insert a row into KeyStorage.
+        Returns the new row id.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self.__db_connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute(
+                "INSERT INTO KeyStorage (private_key, storage_type, public_key, key_type) VALUES (%s, %s, %s, %s)",
+                (private_key, storage_type, public_key, key_type)
+            )
+            self.__db_connection.commit()
+            new_id = cursor.lastrowid
+            cursor.close()
+            logger.info(f"Inserted KeyStorage id={new_id}")
+            return new_id
+        except mysql.connector.Error as err:
+            logger.error(f"Error inserting KeyStorage record: {err}")
+            return None
+
+
     def insert_ca(self, ca: CertificationAuthority):
         """
         Method to insert a Certification Authority object into the database.
@@ -282,7 +324,7 @@ class PKIDataBase:
                     issuer_certificate=row['issuer_certificate'],
                     response_validity=row['response_validity'],
                     certificate_pem=row['certificate'],
-                    private_key_pem=row['private_key']
+                    kms_key_id=row.get('private_key_reference')
                 )
                 ocsp_responders.append(responder)
 
@@ -902,11 +944,13 @@ class PKIDataBase:
 
             # SQL for creating the tables without foreign keys
             tables_without_fk = {
-                "PrivateKeyStorage": """
-                    CREATE TABLE IF NOT EXISTS PrivateKeyStorage (
+                "KeyStorage": """
+                    CREATE TABLE IF NOT EXISTS KeyStorage (
                         id INT PRIMARY KEY AUTO_INCREMENT,
                         certificate_id INT,
+                        key_type VARCHAR(64),
                         private_key TEXT,
+                        public_key TEXT,
                         storage_type ENUM('Encrypted', 'Plain', 'HSM') NOT NULL,
                         hsm_slot INT,
                         hsm_token_id VARCHAR(255),
@@ -1041,7 +1085,7 @@ class PKIDataBase:
                 """
                 ALTER TABLE CertificationAuthorities
                 ADD CONSTRAINT fk_cert_authority_private_key_reference
-                FOREIGN KEY (private_key_reference) REFERENCES PrivateKeyStorage(id);
+                FOREIGN KEY (private_key_reference) REFERENCES KeyStorage(id);
                 """,
                 """
                 ALTER TABLE Certificates
@@ -1056,7 +1100,7 @@ class PKIDataBase:
                 """
                 ALTER TABLE Certificates
                 ADD CONSTRAINT fk_cert_private_key_reference
-                FOREIGN KEY (private_key_reference) REFERENCES PrivateKeyStorage(id);
+                FOREIGN KEY (private_key_reference) REFERENCES KeyStorage(id);
                 """,
                 """
                 ALTER TABLE ESTAliases
