@@ -1,6 +1,8 @@
 import json
+import threading
 from contextlib import contextmanager
 import mysql.connector
+import mysql.connector.pooling
 from mysql.connector import OperationalError
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -14,14 +16,16 @@ from .log import logger
 
 
 class PKIDataBase:
+    # Default pool size. Override via db_config key "pool_size" if needed.
+    _DEFAULT_POOL_SIZE = 5
+
     def __init__(self, config_json = None):
-        """Initialize the PKI Utilities class."""
+        """Initialize the PKI Database class."""
         self.__config = {}
-        self.__db_connection = None
-        self.__connected = False
+        self._pool = None           # MySQLConnectionPool; created lazily on first use
+        self._local = threading.local()  # thread-local storage for the active connection
         if config_json:
             self.load_config(config_json)
-        pass
 
 
     # Load database configuration from JSON dict
@@ -34,42 +38,62 @@ class PKIDataBase:
         self.__config = json.loads(config_json)
 
 
-    # Connect to MySQL server and drop database if it exists, then create it
     def connect_to_db(self):
-        if not self.__connected:
-            try:
-                self.__db_connection = mysql.connector.connect(
-                    host=self.__config["host"],
-                    port=self.__config["port"],
-                    user=self.__config["user"],
-                    password=self.__config["password"]
-                )
-                self.__connected = True
-            except OperationalError as e:
-                logger.error(f"Error connecting to MySQL: {e}")
-        pass
+        """Create the connection pool if it does not exist yet (idempotent)."""
+        if self._pool is not None:
+            return
+        try:
+            pool_size = self.__config.get("pool_size", self._DEFAULT_POOL_SIZE)
+            self._pool = mysql.connector.pooling.MySQLConnectionPool(
+                pool_name="pypki",
+                pool_size=pool_size,
+                pool_reset_session=True,
+                host=self.__config["host"],
+                port=self.__config["port"],
+                user=self.__config["user"],
+                password=self.__config["password"],
+            )
+            logger.info(f"DB connection pool created (size={pool_size})")
+        except mysql.connector.Error as e:
+            logger.error(f"Error creating connection pool: {e}")
+            raise
 
 
     def close_db(self):
-        if self.__connected:
-            # Close the connection
-            self.__db_connection.close()
-            self.__connected = False
-        pass
+        """Return the thread-local connection to the pool (no-op if none checked out)."""
+        conn = getattr(self._local, 'connection', None)
+        if conn is not None:
+            try:
+                conn.close()   # returns to pool; does not close the underlying socket
+            except Exception:
+                pass
+            self._local.connection = None
+
 
     def get_connection(self):
-        if self.__connected:
-            return self.__db_connection
-        else:
-            return None
+        """Return the connection currently checked out for this thread, or None."""
+        return getattr(self._local, 'connection', None)
+
 
     @contextmanager
     def connection(self):
+        """Check out a connection from the pool for the duration of the block.
+
+        The connection is stored in thread-local storage so all DB methods called
+        within the same block share the same connection and transaction context.
+        The connection is automatically returned to the pool when the block exits.
+        """
         self.connect_to_db()
+        conn = self._pool.get_connection()
+        self._local.connection = conn
         try:
             yield self
         finally:
-            self.close_db()
+            try:
+                conn.close()   # returns to pool
+            except Exception:
+                pass
+            self._local.connection = None
 
     def get_key_record(self, key_id: int):
         """
@@ -78,7 +102,7 @@ class PKIDataBase:
         """
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
             cursor.execute(f"USE {db_name}")
             cursor.execute("SELECT * FROM KeyStorage WHERE id = %s", (key_id,))
             result = cursor.fetchone()
@@ -97,13 +121,13 @@ class PKIDataBase:
         """
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(buffered=True)
+            cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
             cursor.execute(
                 "INSERT INTO KeyStorage (private_key, storage_type, public_key, key_type) VALUES (%s, %s, %s, %s)",
                 (private_key, storage_type, public_key, key_type)
             )
-            self.__db_connection.commit()
+            self._local.connection.commit()
             new_id = cursor.lastrowid
             cursor.close()
             logger.info(f"Inserted KeyStorage id={new_id}")
@@ -119,7 +143,7 @@ class PKIDataBase:
         """
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(buffered=True)
+            cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
             
             insert_query = """
@@ -171,7 +195,7 @@ class PKIDataBase:
             )
 
             cursor.execute(insert_query, data)
-            self.__db_connection.commit()
+            self._local.connection.commit()
             logger.info("Certification Authority inserted successfully!")
 
         except mysql.connector.Error as err:
@@ -183,7 +207,7 @@ class PKIDataBase:
     def get_ca_id_by_name(self, ca_name: str):
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(buffered=True)
+            cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
             query = """
                 SELECT id FROM CertificationAuthorities WHERE name = %s
@@ -200,7 +224,7 @@ class PKIDataBase:
     def get_ca_id_by_ski(self, ca_ski: str):
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(buffered=True)
+            cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
             query = """
                 SELECT id FROM CertificationAuthorities WHERE ski = %s
@@ -225,7 +249,7 @@ class PKIDataBase:
         """
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
             cursor.execute(f"USE {db_name}")
             query = """
                 SELECT * FROM CertificationAuthorities WHERE id = %s
@@ -248,7 +272,7 @@ class PKIDataBase:
         """
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
             cursor.execute(f"USE {db_name}")
 
             query = "SELECT * FROM CertificationAuthorities"
@@ -272,7 +296,7 @@ class PKIDataBase:
         """
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(buffered=True)
+            cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
             
             insert_query = """
@@ -292,7 +316,7 @@ class PKIDataBase:
             )
 
             cursor.execute(insert_query, data)
-            self.__db_connection.commit()
+            self._local.connection.commit()
             logger.info("OCSP Responder inserted successfully!")
 
         except mysql.connector.Error as err:
@@ -309,7 +333,7 @@ class PKIDataBase:
         """
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
             cursor.execute(f"USE {db_name}")
 
             query = "SELECT * FROM OCSPResponders"
@@ -347,7 +371,7 @@ class PKIDataBase:
         """
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
             cursor.execute(f"USE {db_name}")
 
             query = "SELECT * FROM CertificateTemplates"
@@ -370,7 +394,7 @@ class PKIDataBase:
         """
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(buffered=True)
+            cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
             
             insert_query = """
@@ -384,7 +408,7 @@ class PKIDataBase:
             )
 
             cursor.execute(insert_query, data)
-            self.__db_connection.commit()
+            self._local.connection.commit()
             logger.info("Certificate Template inserted successfully!")
 
             new_id = cursor.lastrowid
@@ -401,7 +425,7 @@ class PKIDataBase:
         """Update an existing Certificate Template."""
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(buffered=True)
+            cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
 
             update_query = """
@@ -416,7 +440,7 @@ class PKIDataBase:
             )
 
             cursor.execute(update_query, data)
-            self.__db_connection.commit()
+            self._local.connection.commit()
             return cursor.rowcount > 0
 
         except mysql.connector.Error as err:
@@ -429,7 +453,7 @@ class PKIDataBase:
     def get_cert_template_id_by_name(self, cert_template_name: str):
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(buffered=True)
+            cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
             query = """
                 SELECT id FROM CertificateTemplates WHERE name = %s
@@ -450,7 +474,7 @@ class PKIDataBase:
         """
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
             cursor.execute(f"USE {db_name}")
             query = """
                 SELECT * FROM CertificateTemplates WHERE id = %s
@@ -494,7 +518,7 @@ class PKIDataBase:
         """
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
             cursor.execute(f"USE {db_name}")
             if alias_name:
                 query = """
@@ -552,7 +576,7 @@ class PKIDataBase:
 
             # Establish database connection
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(buffered=True)
+            cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
 
             # Insert query
@@ -581,7 +605,7 @@ class PKIDataBase:
             # Get the generated ID
             new_id = cursor.lastrowid
             # Commit the transaction
-            self.__db_connection.commit()
+            self._local.connection.commit()
             logger.info(f"Certificate inserted successfully! New ID: {new_id}")
 
         except mysql.connector.Error as err:
@@ -618,7 +642,7 @@ class PKIDataBase:
                 params.append(status)
 
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(buffered=True, dictionary=True)
+            cursor = self._local.connection.cursor(buffered=True, dictionary=True)
             cursor.execute(f"USE {db_name}")
 
             query = (
@@ -671,7 +695,7 @@ class PKIDataBase:
             raise ValueError("At least one valid search criteria must be provided.")
 
         db_name = self.__config["database"]
-        cursor = self.__db_connection.cursor(buffered=True)
+        cursor = self._local.connection.cursor(buffered=True)
         cursor.execute(f"USE {db_name}")
         cursor.execute(query, params)
         result = cursor.fetchone()  # Fetch one matching record
@@ -712,7 +736,7 @@ class PKIDataBase:
         
         # Establish database connection
         db_name = self.__config["database"]
-        cursor = self.__db_connection.cursor(buffered=True, dictionary=True)
+        cursor = self._local.connection.cursor(buffered=True, dictionary=True)
         cursor.execute(f"USE {db_name}")
         cursor.execute(query, params)
         result = cursor.fetchone()  # Retrieve one matching record
@@ -794,10 +818,10 @@ class PKIDataBase:
 
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(buffered=True)
+            cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
             cursor.execute(query, params)
-            self.__db_connection.commit()  # Commit the changes to the database
+            self._local.connection.commit()  # Commit the changes to the database
 
             if cursor.rowcount > 0:  # Check if any row was affected (i.e., the certificate was updated)
                 cursor.close()
@@ -824,7 +848,7 @@ class PKIDataBase:
         
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(buffered=True)
+            cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
 
             # Query to fetch all serial numbers
@@ -856,7 +880,7 @@ class PKIDataBase:
         """
         # Connect to the database
         db_name = self.__config["database"]
-        cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+        cursor = self._local.connection.cursor(dictionary=True, buffered=True)
         cursor.execute(f"USE {db_name}")
         
         # SQL query to fetch revoked certificates for the given ca_id
@@ -900,7 +924,7 @@ class PKIDataBase:
             dict with keys: active, revoked, expiring_soon, cas, ca_overview (list of dicts).
         """
         db_name = self.__config["database"]
-        cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+        cursor = self._local.connection.cursor(dictionary=True, buffered=True)
         cursor.execute(f"USE {db_name}")
 
         cursor.execute("""
@@ -959,7 +983,7 @@ class PKIDataBase:
             dict: CRL record (ca_id, crl_data, issue_date, next_update) or None.
         """
         db_name = self.__config["database"]
-        cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+        cursor = self._local.connection.cursor(dictionary=True, buffered=True)
         cursor.execute(f"USE {db_name}")
         cursor.execute(
             "SELECT * FROM CertificateRevocationLists WHERE ca_id = %s",
@@ -982,7 +1006,7 @@ class PKIDataBase:
             next_update (datetime): The CRL next_update date.
         """
         db_name = self.__config["database"]
-        cursor = self.__db_connection.cursor(buffered=True)
+        cursor = self._local.connection.cursor(buffered=True)
         cursor.execute(f"USE {db_name}")
         cursor.execute("SELECT id FROM CertificateRevocationLists WHERE ca_id = %s", (ca_id,))
         row = cursor.fetchone()
@@ -999,7 +1023,7 @@ class PKIDataBase:
                    VALUES (%s, %s, %s, %s)""",
                 (ca_id, crl_pem, issue_date, next_update)
             )
-        self.__db_connection.commit()
+        self._local.connection.commit()
         cursor.close()
 
 
@@ -1017,7 +1041,7 @@ class PKIDataBase:
         """
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
             cursor.execute(f"USE {db_name}")
 
             query = "SELECT * FROM ESTAliases"
@@ -1047,7 +1071,7 @@ class PKIDataBase:
         """
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(dictionary=True, buffered=True)
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
             cursor.execute(f"USE {db_name}")
             cursor.execute("SELECT * FROM ESTAliases WHERE id = %s", (alias_id,))
             result = cursor.fetchone()
@@ -1079,7 +1103,7 @@ class PKIDataBase:
         """
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(buffered=True)
+            cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
             cursor.execute(
                 """INSERT INTO ESTAliases
@@ -1087,7 +1111,7 @@ class PKIDataBase:
                    VALUES (%s, %s, %s, %s, %s, %s)""",
                 (name, ca_id, template_id, username, password_hash, cert_fingerprint)
             )
-            self.__db_connection.commit()
+            self._local.connection.commit()
             return cursor.lastrowid
         except mysql.connector.Error as err:
             logger.error(f"Database error: {err}")
@@ -1120,7 +1144,7 @@ class PKIDataBase:
         """
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(buffered=True)
+            cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
             if password_hash is not None:
                 cursor.execute(
@@ -1138,7 +1162,7 @@ class PKIDataBase:
                         WHERE id = %s""",
                     (name, ca_id, template_id, username, cert_fingerprint, alias_id)
                 )
-            self.__db_connection.commit()
+            self._local.connection.commit()
             return cursor.rowcount > 0
         except mysql.connector.Error as err:
             logger.error(f"Database error: {err}")
@@ -1160,10 +1184,10 @@ class PKIDataBase:
         """
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(buffered=True)
+            cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
             cursor.execute("DELETE FROM ESTAliases WHERE id = %s", (alias_id,))
-            self.__db_connection.commit()
+            self._local.connection.commit()
             return cursor.rowcount > 0
         except mysql.connector.Error as err:
             logger.error(f"Database error: {err}")
@@ -1188,11 +1212,11 @@ class PKIDataBase:
         """
         try:
             db_name = self.__config["database"]
-            cursor = self.__db_connection.cursor(buffered=True)
+            cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
             cursor.execute("UPDATE ESTAliases SET is_default = FALSE")
             cursor.execute("UPDATE ESTAliases SET is_default = TRUE WHERE id = %s", (alias_id,))
-            self.__db_connection.commit()
+            self._local.connection.commit()
             return True
         except mysql.connector.Error as err:
             logger.error(f"Database error: {err}")
@@ -1205,8 +1229,8 @@ class PKIDataBase:
     def create_database(self):
         db_name = self.__config["database"]
 
-        if self.__db_connection:
-            cursor = self.__db_connection.cursor()
+        if self._local.connection:
+            cursor = self._local.connection.cursor()
 
             cursor.execute(f"GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' IDENTIFIED BY 'Password1$' WITH GRANT OPTION")
             cursor.execute(f"FLUSH PRIVILEGES;")
@@ -1214,7 +1238,7 @@ class PKIDataBase:
             cursor.execute(f"CREATE DATABASE {db_name}")         # Create the database
 
             # Now connect to the actual database
-            self.__db_connection.database = db_name
+            self._local.connection.database = db_name
 
             # STEP 1: Create the tables without foreign keys
 
