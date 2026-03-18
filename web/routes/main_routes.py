@@ -33,13 +33,21 @@ def require_auth():
     g.current_user = user
 
 
+def _require_role(*roles):
+    user = getattr(g, 'current_user', None)
+    if not user or user.get('role') not in roles:
+        return jsonify({"error": "Forbidden"}), 403
+    return None
+
+
 @bp.route("/status", methods=["GET"])
 def status():
     return jsonify({"status": "API is up!"})
 
 @bp.route("/process", methods=["POST"])
 def process():
-    data = request.json
+    err = _require_role('superadmin', 'admin')
+    if err: return err
     data = request.json
     result = api_adapters.process_input(data)
     return jsonify(result)
@@ -130,6 +138,8 @@ def get_ca_crl(ca_id):
 @bp.route('/ca/<int:ca_id>/crl', methods=['POST'])
 def issue_crl(ca_id):
     logger.info(f"API - POST Generate CRL for CA ID {ca_id}")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
     ca_details = api_adapters.get_ca_details(ca_id)
     if not ca_details:
         abort(404, description="Certification Authority not found")
@@ -210,6 +220,8 @@ def get_certificate_status(cert_id):
 @bp.route('/certificate/revoke/<int:cert_id>', methods=['POST'])
 def revoke_certificate(cert_id):
     logger.info("API - POST Revoke Certificate")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
 
     # Parse JSON body
     data = request.get_json()
@@ -231,6 +243,8 @@ def revoke_certificate(cert_id):
 @bp.route('/certificate/issue', methods=['POST'])
 def issue_certificate_from_csr():
     logger.info("API - POST Issue Certificate from CSR")
+    err = _require_role('superadmin', 'admin', 'user')
+    if err: return err
 
     data = request.get_json()
     if not data:
@@ -316,6 +330,8 @@ def list_est_aliases():
 @bp.route('/est', methods=['POST'])
 def create_est_alias():
     logger.info("API - POST Create EST Alias")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
     data = request.get_json()
     if not data:
         abort(400, description="Missing JSON body")
@@ -341,6 +357,8 @@ def get_est_alias(alias_id):
 @bp.route('/est/<int:alias_id>', methods=['PUT'])
 def update_est_alias(alias_id):
     logger.info(f"API - PUT Update EST Alias {alias_id}")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
     data = request.get_json()
     if not data:
         abort(400, description="Missing JSON body")
@@ -357,6 +375,8 @@ def update_est_alias(alias_id):
 @bp.route('/est/<int:alias_id>', methods=['DELETE'])
 def delete_est_alias(alias_id):
     logger.info(f"API - DELETE EST Alias {alias_id}")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
     ok = api_adapters.delete_est_alias(alias_id)
     if not ok:
         abort(404, description="EST alias not found")
@@ -366,6 +386,8 @@ def delete_est_alias(alias_id):
 @bp.route('/est/<int:alias_id>/set-default', methods=['POST'])
 def set_default_est_alias(alias_id):
     logger.info(f"API - POST Set Default EST Alias {alias_id}")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
     ok = api_adapters.set_default_est_alias(alias_id)
     if not ok:
         abort(500, description="Failed to set default EST alias")
@@ -421,6 +443,8 @@ def export_template(template_id):
 @bp.route('/template/<int:template_id>', methods=['PUT'])
 def update_template(template_id):
     logger.info(f"API - PUT Update Template {template_id}")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
     data = request.get_json()
     if not data or 'template_name' not in data:
         abort(400, description="Missing 'template_name' in request body")
@@ -433,6 +457,8 @@ def update_template(template_id):
 @bp.route('/kms/generate-key', methods=['POST'])
 def kms_generate_key():
     logger.info("API - POST KMS Generate Key")
+    err = _require_role('superadmin', 'admin', 'user')
+    if err: return err
     data = request.get_json()
     if not data or 'algorithm' not in data:
         abort(400, description="Missing 'algorithm' in request body")
@@ -448,13 +474,6 @@ def kms_generate_key():
 # ── User management ──────────────────────────────────────────────────────────
 
 BUILTIN_SUPERADMIN = 'superadmin'
-
-
-def _require_role(*roles):
-    user = getattr(g, 'current_user', None)
-    if not user or user.get('role') not in roles:
-        return jsonify({"error": "Forbidden"}), 403
-    return None
 
 
 @bp.route('/users', methods=['GET'])
@@ -577,6 +596,8 @@ def delete_user(user_id):
 @bp.route('/template', methods=['POST'])
 def create_template():
     logger.info("API - POST Create Template")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
     data = request.get_json()
     if not data or 'template_name' not in data:
         abort(400, description="Missing 'template_name' in request body")

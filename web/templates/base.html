@@ -17,6 +17,17 @@
   </style>
   {% block head_extra %}{% endblock %}
   <script src="/static/auth.js"></script>
+  <script>
+    // Role flags — available to all page scripts before DOMContentLoaded
+    const _authRole     = (window._auth.getCurrentUser() || {}).role || '';
+    window._isAdmin     = _authRole === 'superadmin' || _authRole === 'admin';
+    window._isOperator  = window._isAdmin || _authRole === 'user';  // admin + user; not auditor
+
+    document.addEventListener('DOMContentLoaded', function () {
+      if (!window._isAdmin)    document.querySelectorAll('[data-admin-only]').forEach(el => el.remove());
+      if (!window._isOperator) document.querySelectorAll('[data-operator-only]').forEach(el => el.remove());
+    });
+  </script>
 </head>
 <body>
 
@@ -35,7 +46,7 @@
           <i class="bi bi-card-list me-2"></i>Certificates
         </a>
       </li>
-      <li class="nav-item">
+      <li class="nav-item" data-operator-only>
         <a href="/certificate_request.html" class="nav-link {% if active_nav == 'certificate_request' %}active{% endif %}">
           <i class="bi bi-file-earmark-plus me-2"></i>Request
         </a>
@@ -68,13 +79,13 @@
         </a>
       </li>
       <div class="nav-section">KMS</div>
-      <li class="nav-item">
+      <li class="nav-item" data-operator-only>
         <a href="/kms_keygen.html" class="nav-link {% if active_nav == 'kms_keygen' %}active{% endif %}">
           <i class="bi bi-key me-2"></i>Key Generation
         </a>
       </li>
       <div class="nav-section">Administration</div>
-      <li class="nav-item">
+      <li class="nav-item" data-admin-only>
         <a href="/users_list.html" class="nav-link {% if active_nav == 'users_list' %}active{% endif %}">
           <i class="bi bi-people me-2"></i>Users
         </a>

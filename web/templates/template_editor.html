@@ -594,6 +594,11 @@
   }
 
   window.onload = async () => {
+    if (!window._isAdmin) {
+      document.getElementById('main').innerHTML =
+        '<div class="alert alert-warning"><i class="bi bi-shield-exclamation me-2"></i>You do not have permission to manage templates.</div>';
+      return;
+    }
     buildStaticForm();
     const params = new URLSearchParams(window.location.search);
     const idParam = params.get('id');

@@ -74,7 +74,7 @@
         : '—')}
     ` : '';
 
-    const revokeButton = cert.status === 'Active' ? `
+    const revokeButton = (cert.status === 'Active' && window._isAdmin) ? `
       <button class="btn btn-sm btn-danger ms-2" data-bs-toggle="modal" data-bs-target="#revokeModal">
         <i class="bi bi-x-circle me-1"></i>Revoke
       </button>` : '';

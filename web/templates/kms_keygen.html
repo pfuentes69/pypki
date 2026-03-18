@@ -142,5 +142,10 @@
     a.href = URL.createObjectURL(blob); a.download = filename; a.click();
     URL.revokeObjectURL(a.href);
   }
+
+  if (!window._isOperator) {
+    document.getElementById('main').innerHTML =
+      '<div class="alert alert-warning"><i class="bi bi-shield-exclamation me-2"></i>You do not have permission to generate keys.</div>';
+  }
 </script>
 {% endblock %}
