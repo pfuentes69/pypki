@@ -33,9 +33,8 @@ def generate_crls():
     ca_collection = pki.get_ca_collection()
 
     for ca_item in ca_collection:
-        pki.select_ca_by_id(ca_item["id"])
-        # Generate the CRL
-        crl = pki.generate_crl()
+        # Generate the CRL (ca_id passed directly — no shared selection state)
+        crl = pki.generate_crl(ca_item["id"])
         # To save the CRL to a file
         ca_name = ca_item["name"].replace(' ', '_')
         crl_name = f"out/crl/{ca_name}.crl"

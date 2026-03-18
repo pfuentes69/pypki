@@ -5,7 +5,7 @@ from cryptography.hazmat.primitives.serialization import pkcs12
 from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature, decode_dss_signature
 from cryptography.x509 import NameOID, Name, NameAttribute, CertificateBuilder
-from cryptography.x509.oid import ObjectIdentifier
+from cryptography.x509.oid import ObjectIdentifier, ExtendedKeyUsageOID, ExtensionOID
 from asn1crypto import x509 as asn1_x509, crl as asn1_crl
 from asn1crypto.core import OctetBitString
 from ipaddress import ip_address
@@ -19,6 +19,93 @@ from .ca import CertificationAuthority
 # Certificate Tools Class
 #
 class CertificateTools:
+
+    OID_MAPPING = {
+        # Subject Name Attributes
+        "commonName": NameOID.COMMON_NAME,
+        "organizationName": NameOID.ORGANIZATION_NAME,
+        "organizationalUnitName": NameOID.ORGANIZATIONAL_UNIT_NAME,
+        "countryName": NameOID.COUNTRY_NAME,
+        "stateOrProvinceName": NameOID.STATE_OR_PROVINCE_NAME,
+        "localityName": NameOID.LOCALITY_NAME,
+        "emailAddress": NameOID.EMAIL_ADDRESS,
+        "serialNumber": NameOID.SERIAL_NUMBER,
+        "givenName": NameOID.GIVEN_NAME,
+        "surname": NameOID.SURNAME,
+        "title": NameOID.TITLE,
+        "businessCategory": NameOID.BUSINESS_CATEGORY,
+        "postalCode": NameOID.POSTAL_CODE,
+        "streetAddress": NameOID.STREET_ADDRESS,
+
+        # Key Usage OIDs (2.5.29.15)
+        "digitalSignature": ObjectIdentifier("2.5.29.15.0"),
+        "nonRepudiation": ObjectIdentifier("2.5.29.15.1"),
+        "keyEncipherment": ObjectIdentifier("2.5.29.15.2"),
+        "dataEncipherment": ObjectIdentifier("2.5.29.15.3"),
+        "keyAgreement": ObjectIdentifier("2.5.29.15.4"),
+        "keyCertSign": ObjectIdentifier("2.5.29.15.5"),
+        "cRLSign": ObjectIdentifier("2.5.29.15.6"),
+        "encipherOnly": ObjectIdentifier("2.5.29.15.7"),
+        "decipherOnly": ObjectIdentifier("2.5.29.15.8"),
+
+        # Extended Key Usage OIDs (2.5.29.37)
+        "serverAuth": ExtendedKeyUsageOID.SERVER_AUTH,
+        "clientAuth": ExtendedKeyUsageOID.CLIENT_AUTH,
+        "codeSigning": ExtendedKeyUsageOID.CODE_SIGNING,
+        "emailProtection": ExtendedKeyUsageOID.EMAIL_PROTECTION,
+        "timeStamping": ExtendedKeyUsageOID.TIME_STAMPING,
+        "ocspSigning": ExtendedKeyUsageOID.OCSP_SIGNING,
+        "smartCardLogon": ObjectIdentifier("1.3.6.1.4.1.311.20.2.2"),
+        "documentSigning": ObjectIdentifier("1.3.6.1.4.1.311.10.3.12"),
+        "anyExtendedKeyUsage": ObjectIdentifier("2.5.29.37.0"),
+
+        # Other OIDs
+        "OCSPNoCheck": ObjectIdentifier("1.3.6.1.5.5.7.48.1.5"),
+    }
+
+    @classmethod
+    def get_oid_name(cls, oid: ObjectIdentifier) -> str:
+        for name, known_oid in cls.OID_MAPPING.items():
+            if oid == known_oid:
+                return name
+        return oid.dotted_string
+
+    @classmethod
+    def parse_csr_to_json(cls, csr) -> dict:
+        subject = {}
+        for attr in csr.subject:
+            key = cls.get_oid_name(attr.oid)
+            subject[key] = attr.value
+
+        san = {}
+        try:
+            san_ext = csr.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+            san_value = san_ext.value
+
+            dns_names = san_value.get_values_for_type(x509.DNSName)
+            if dns_names:
+                san["dnsNames"] = dns_names
+
+            ip_addresses = san_value.get_values_for_type(x509.IPAddress)
+            if ip_addresses:
+                san["ipAddresses"] = [str(ip) for ip in ip_addresses]
+
+            email_addresses = san_value.get_values_for_type(x509.RFC822Name)
+            if email_addresses:
+                san["emailAddresses"] = email_addresses
+
+            uris = san_value.get_values_for_type(x509.UniformResourceIdentifier)
+            if uris:
+                san["uniformResourceIdentifiers"] = [str(uri) for uri in uris]
+
+        except x509.ExtensionNotFound:
+            pass
+
+        return {
+            "subject_name": subject,
+            "subjectAltName": san
+        }
+
     def __init__(self):
         """Initialize the PKI Utilities class."""
         self.__request__ = {}
@@ -44,7 +131,7 @@ class CertificateTools:
             if details.get("mandatory", False) and not value:
                 raise ValueError(f"Missing mandatory field: {field}")
             if value:
-                subject_attrs.append(x509.NameAttribute(PKITools.OID_MAPPING[field], value))
+                subject_attrs.append(x509.NameAttribute(self.OID_MAPPING[field], value))
         return x509.Name(subject_attrs)
 
 
@@ -130,12 +217,6 @@ class CertificateTools:
             ocsp_nocheck_present = False
             # OCSP No-Chech Extension
             if "OCSPNoCheck" in self.__template__["extensions"]  and self.__template__["extensions"]["OCSPNoCheck"]["include"]:
-                """
-                builder = builder.add_extension(
-                    x509.UnrecognizedExtension(PKITools.OID_MAPPING["OCSPNoCheck"], b''),
-                    critical=False
-                )
-                """
                 OCSP_NO_CHECK_OID = ObjectIdentifier("1.3.6.1.5.5.7.48.1.5")
                 ASN1_NULL_DER = b'\x05\x00'  # DER encoding for ASN.1 NULL
 
@@ -221,7 +302,7 @@ class CertificateTools:
             # Extended Key Usage
             if "extendedKeyUsage" in self.__template__["extensions"]:
                 eku_values = self.__template__["extensions"]["extendedKeyUsage"]["allowed"]
-                eku_list = [PKITools.OID_MAPPING[usage] for usage in eku_values if usage in PKITools.OID_MAPPING]
+                eku_list = [self.OID_MAPPING[usage] for usage in eku_values if usage in self.OID_MAPPING]
                 if eku_list:
                     builder = builder.add_extension(x509.ExtendedKeyUsage(eku_list), critical=self.__template__["extensions"]["extendedKeyUsage"]["critical"])
 
@@ -303,7 +384,7 @@ class CertificateTools:
 
         # The request will override was comes in the CSR
         if request_json is None:
-            request_json = json.dumps(PKITools.parse_csr_to_json(original_csr))
+            request_json = json.dumps(self.parse_csr_to_json(original_csr))
 
         #csr_key = KeyTools().set_public_key(csr.public_key())
         csr_public_key = original_csr.public_key()

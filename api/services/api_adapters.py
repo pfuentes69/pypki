@@ -85,9 +85,8 @@ def get_ca_full_details(ca_id):
 
 
 def generate_crl(ca_id):
-    """Select the given CA and generate a fresh CRL. Returns (issue_date, next_update) or None."""
-    pki.select_ca_by_id(ca_id)
-    crl = pki.generate_crl()
+    """Generate a fresh CRL for the given CA. Returns issue/next-update dates or None."""
+    crl = pki.generate_crl(ca_id)
     if crl is None:
         return None
     return {
@@ -204,26 +203,21 @@ def get_certificate_details_json(cert_id):
 
 
 def generate_certificate_from_csr(ca_template_config, csr_pem: bytes, return_certificate:bool = True):
-    pki.select_ca_by_id(ca_template_config["ca_id"])
-    pki.select_cert_template_by_id(ca_template_config["template_id"])
-
-    # Generate a ca-signed certificate
     certificate_der = pki.generate_certificate_from_csr(
         csr_pem=csr_pem,
+        ca_id=ca_template_config["ca_id"],
+        template_id=ca_template_config["template_id"],
         request_json=None,
-        use_active_ca=True,
-        validity_days=PKITools.INFINITE_VALIDITY, 
+        validity_days=PKITools.INFINITE_VALIDITY,
         enforce_template=True,
         return_certificate=return_certificate
     )
-    
     return certificate_der
 
 def get_ca_certificate(est_config, data):
-    
-    pki.select_ca_by_id(est_config["ca_id"])
-    ca_certificate = pki.get_ca_certificate()
-
+    ca_certificate = pki.get_ca_certificate(ca_id=est_config["ca_id"])
+    if ca_certificate is None:
+        return None
     return ca_certificate.public_bytes(serialization.Encoding.PEM)
 
 

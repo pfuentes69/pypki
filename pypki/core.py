@@ -107,34 +107,59 @@ class PyPKI:
         return None
 
 
+    def _build_ca(self, ca_id: int) -> CertificationAuthority:
+        """Build and return a local CertificationAuthority for *ca_id*.
+
+        Does NOT mutate any shared instance state, so it is safe to call
+        concurrently from multiple request threads.
+        """
+        for ca_item in self.__ca_collection:
+            if ca_item.get("id") == ca_id:
+                ca = CertificationAuthority()
+                ca_config = {
+                    "ca_name": ca_item.get("name"),
+                    "max_validity": ca_item.get("max_validity"),
+                    "serial_number_length": ca_item.get("serial_number_length"),
+                    "crl_validity": ca_item.get("crl_validity"),
+                    "extensions": json.loads(ca_item.get("extensions", "{}")),
+                    "crypto": {
+                        "certificate": ca_item.get("certificate"),
+                        "certificate_chain": ca_item.get("certificate_chain"),
+                        "kms_key_id": ca_item.get("private_key_reference"),
+                    }
+                }
+                ca.load_config_json(json.dumps(ca_config, indent=2))
+                ca.set_kms(self.__kms)
+                with self.__db.connection():
+                    ca.load_serials(self.__db.fetch_used_serials())
+                return ca
+        return None
+
+    def _build_cert_tool(self, template_id: int) -> CertificateTools:
+        """Build and return a local CertificateTools for *template_id*.
+
+        Does NOT mutate any shared instance state.
+        """
+        for template in self.__template_collection:
+            if template.get("id") == template_id:
+                cert_tool = CertificateTools()
+                cert_tool.load_certificate_template(template.get("definition"))
+                return cert_tool
+        return None
+
     def select_ca_by_id(self, ca_id: int) -> CertificationAuthority:
+        """Select a CA by ID, storing it as the active CA (single-threaded / legacy use only).
+
+        Web-API code should call the operation methods with an explicit *ca_id*
+        instead of relying on this shared selection.
+        """
         logger.info(f"Select CA ID = {ca_id}")
         self.__ca_id = 0
         self.__ca_active = None
-        if self.__ca_collection:
-            for ca_item in self.__ca_collection:
-                if ca_item.get("id") == ca_id:
-                    self.__ca_id = ca_id
-                    self.__ca_active = CertificationAuthority()
-                    ca_config = {
-                        "ca_name": ca_item.get("name"),
-                        "max_validity": ca_item.get("max_validity"),
-                        "serial_number_length": ca_item.get("serial_number_length"),
-                        "crl_validity": ca_item.get("crl_validity"),
-                        "extensions": json.loads(ca_item.get("extensions", "{}")),
-                        "crypto": {
-                            "certificate": ca_item.get("certificate"),
-                            "certificate_chain": ca_item.get("certificate_chain"),
-                            "kms_key_id": ca_item.get("private_key_reference"),
-                        }
-                    }
-                    ca_config_json = json.dumps(ca_config, indent=2)
-                    self.__ca_active.load_config_json(ca_config_json)
-                    self.__ca_active.set_kms(self.__kms)
-                    with self.__db.connection():
-                        self.__ca_active.load_serials(self.__db.fetch_used_serials())
-                    break
-
+        ca = self._build_ca(ca_id)
+        if ca is not None:
+            self.__ca_id = ca_id
+            self.__ca_active = ca
         return self.__ca_active
 
 
@@ -188,23 +213,25 @@ class PyPKI:
 
 
     def select_cert_template_by_id(self, cert_template_id: int) -> CertificateTools:
+        """Select a template by ID, storing it as the active template (single-threaded / legacy use only).
+
+        Web-API code should call the operation methods with an explicit *template_id*
+        instead of relying on this shared selection.
+        """
         logger.info(f"Select Template ID = {cert_template_id}")
         self.__cert_template_id = 0
         self.__cert_tool = None
-        if self.__template_collection:
-            for template in self.__template_collection:
-                if template.get("id") == cert_template_id:
-                    self.__cert_template_id = cert_template_id
-                    self.__cert_tool = CertificateTools()
-                    cert_template_json = template.get("definition")
-                    self.__cert_tool.load_certificate_template(cert_template_json)
-                    break
-
+        cert_tool = self._build_cert_tool(cert_template_id)
+        if cert_tool is not None:
+            self.__cert_template_id = cert_template_id
+            self.__cert_tool = cert_tool
         return self.__cert_tool
 
 
     def generate_certificate_and_key(self,
         request_json:str,
+        ca_id: int = None,
+        template_id: int = None,
         use_active_ca=True,
         validity_days=PKITools.INFINITE_VALIDITY,
         key_algorithm="RSA",
@@ -214,28 +241,35 @@ class PyPKI:
         certificate_key = KeyTools()
         certificate_key.generate_private_key(algorithm=key_algorithm, key_type=key_type)
 
-        if use_active_ca:
-            ca_id = self.__ca_id
-            new_cert_pem = self.__cert_tool.generate_certificate_pem(
-                request_json=request_json,
-                issuing_ca=self.__ca_active,
-                certificate_key=certificate_key,
-                validity_days=validity_days,
-                enforce_template=True
-            )
+        # Resolve CA and template: prefer explicit IDs (thread-safe); fall back to
+        # stored active selection for single-threaded utility-script callers.
+        if ca_id is not None:
+            issuing_ca = self._build_ca(ca_id)
+            cert_tool = self._build_cert_tool(template_id)
+            used_ca_id = ca_id
+            used_template_id = template_id
+        elif use_active_ca:
+            issuing_ca = self.__ca_active
+            cert_tool = self.__cert_tool
+            used_ca_id = self.__ca_id
+            used_template_id = self.__cert_template_id
         else:
-            ca_id = None
-            new_cert_pem = self.__cert_tool.generate_certificate_pem(
-                request_json=request_json,
-                issuing_ca=None,
-                certificate_key=certificate_key,
-                validity_days=validity_days,
-                enforce_template=True
-            )
+            issuing_ca = None
+            cert_tool = self.__cert_tool
+            used_ca_id = None
+            used_template_id = self.__cert_template_id
+
+        new_cert_pem = cert_tool.generate_certificate_pem(
+            request_json=request_json,
+            issuing_ca=issuing_ca,
+            certificate_key=certificate_key,
+            validity_days=validity_days,
+            enforce_template=True
+        )
 
         if new_cert_pem:
             with self.__db.connection():
-                new_cert_id = self.__db.insert_certificate(new_cert_pem, ca_id, self.__cert_template_id, private_key_reference=None)
+                new_cert_id = self.__db.insert_certificate(new_cert_pem, used_ca_id, used_template_id, private_key_reference=None)
         else:
             logger.error("Problem generating new certificate")
             return None
@@ -249,34 +283,43 @@ class PyPKI:
     def generate_certificate_from_csr(
             self,
             csr_pem: bytes,
+            ca_id: int = None,
+            template_id: int = None,
             request_json: str = None,
             use_active_ca: bool = True,
             validity_days=PKITools.INFINITE_VALIDITY,
             enforce_template: bool = False,
             return_certificate = True
         ):
-
-        if use_active_ca:
-            ca_id = self.__ca_id
-            new_cert = self.__cert_tool.generate_certificate_from_csr(
-                csr_pem=csr_pem,
-                request_json=request_json,
-                issuing_ca=self.__ca_active,
-                validity_days=validity_days,
-                enforce_template=enforce_template)
+        # Resolve CA and template: prefer explicit IDs (thread-safe); fall back to
+        # stored active selection for single-threaded utility-script callers.
+        if ca_id is not None:
+            issuing_ca = self._build_ca(ca_id)
+            cert_tool = self._build_cert_tool(template_id)
+            used_ca_id = ca_id
+            used_template_id = template_id
+        elif use_active_ca:
+            issuing_ca = self.__ca_active
+            cert_tool = self.__cert_tool
+            used_ca_id = self.__ca_id
+            used_template_id = self.__cert_template_id
         else:
-            ca_id = None
-            new_cert = self.__cert_tool.generate_certificate_from_csr(
-                csr_pem=csr_pem,
-                request_json=request_json,
-                issuing_ca=None,
-                validity_days=validity_days,
-                enforce_template=enforce_template)
+            issuing_ca = None
+            cert_tool = self.__cert_tool
+            used_ca_id = None
+            used_template_id = self.__cert_template_id
+
+        new_cert = cert_tool.generate_certificate_from_csr(
+            csr_pem=csr_pem,
+            request_json=request_json,
+            issuing_ca=issuing_ca,
+            validity_days=validity_days,
+            enforce_template=enforce_template)
 
         if new_cert:
             new_cert_pem = new_cert.public_bytes(serialization.Encoding.PEM)
             with self.__db.connection():
-                new_cert_id = self.__db.insert_certificate(new_cert_pem, ca_id, self.__cert_template_id, private_key_reference=None)
+                new_cert_id = self.__db.insert_certificate(new_cert_pem, used_ca_id, used_template_id, private_key_reference=None)
         else:
             logger.error("Problem generating new certificate")
             return None
@@ -290,6 +333,8 @@ class PyPKI:
     def generate_certificate_pem_from_csr(
             self,
             csr_pem: bytes,
+            ca_id: int = None,
+            template_id: int = None,
             request_json: str = None,
             use_active_ca: bool = True,
             validity_days=PKITools.INFINITE_VALIDITY,
@@ -298,6 +343,8 @@ class PyPKI:
 
         new_cert = self.generate_certificate_from_csr(
             csr_pem=csr_pem,
+            ca_id=ca_id,
+            template_id=template_id,
             request_json=request_json,
             use_active_ca=use_active_ca,
             validity_days=validity_days,
@@ -311,25 +358,28 @@ class PyPKI:
         return new_cert.public_bytes(serialization.Encoding.PEM)
 
 
-    def get_ca_certificate(self):
+    def get_ca_certificate(self, ca_id: int = None):
+        if ca_id is not None:
+            ca = self._build_ca(ca_id)
+            return ca.get_certificate() if ca else None
         return self.__ca_active.get_certificate()
 
 
-    def get_certificate_id(self, serial_number=None, fingerprint=None):
+    def get_certificate_id(self, serial_number=None, fingerprint=None, ca_id=None):
         with self.__db.connection():
-            id = self.__db.get_certificate_id(serial_number=serial_number, ca_id=self.__ca_id, fingerprint=fingerprint)
+            id = self.__db.get_certificate_id(serial_number=serial_number, ca_id=ca_id, fingerprint=fingerprint)
         return id
 
 
-    def get_certificate_details(self, certificate_id=None, serial_number=None, fingerprint=None):
+    def get_certificate_details(self, certificate_id=None, serial_number=None, fingerprint=None, ca_id=None):
         with self.__db.connection():
-            cert_details = self.__db.get_certificate_record(certificate_id=certificate_id, serial_number=serial_number, ca_id=self.__ca_id, fingerprint=fingerprint)
+            cert_details = self.__db.get_certificate_record(certificate_id=certificate_id, serial_number=serial_number, ca_id=ca_id, fingerprint=fingerprint)
         return cert_details
 
 
-    def get_certificate_pem(self, certificate_id=None, serial_number=None, fingerprint=None):
+    def get_certificate_pem(self, certificate_id=None, serial_number=None, fingerprint=None, ca_id=None):
         with self.__db.connection():
-            cert_details = self.__db.get_certificate_record(certificate_id=certificate_id, serial_number=serial_number, ca_id=self.__ca_id, fingerprint=fingerprint)
+            cert_details = self.__db.get_certificate_record(certificate_id=certificate_id, serial_number=serial_number, ca_id=ca_id, fingerprint=fingerprint)
 
         if cert_details:
             return cert_details["certificate_data"]
@@ -343,19 +393,28 @@ class PyPKI:
         return status
 
 
-    def generate_crl(self):
-        logger.info(f"Generating CRL for {self.__ca_active.get_config()['ca_name']}")
+    def generate_crl(self, ca_id: int = None):
+        # Resolve CA: prefer explicit ca_id (thread-safe); fall back to stored
+        # active selection for single-threaded utility-script callers.
+        if ca_id is not None:
+            ca = self._build_ca(ca_id)
+            used_ca_id = ca_id
+        else:
+            ca = self.__ca_active
+            used_ca_id = self.__ca_id
 
-        if self.__ca_id == None:
+        if ca is None or used_ca_id is None:
             return None
 
+        logger.info(f"Generating CRL for {ca.get_config()['ca_name']}")
+
         crl_builder = CertificateRevocationListBuilder()
-        crl_builder = crl_builder.issuer_name(self.__ca_active.get_certificate().subject)
+        crl_builder = crl_builder.issuer_name(ca.get_certificate().subject)
         crl_builder = crl_builder.last_update(datetime.now(timezone.utc))
-        crl_builder = crl_builder.next_update(datetime.now(timezone.utc) + timedelta(days=self.__ca_active.get_config()["crl_validity"]))
+        crl_builder = crl_builder.next_update(datetime.now(timezone.utc) + timedelta(days=ca.get_config()["crl_validity"]))
 
         with self.__db.connection():
-            revoked_certificates = self.__db.get_revoked_certificates(self.__ca_id)
+            revoked_certificates = self.__db.get_revoked_certificates(used_ca_id)
 
         for serial_number, revocation_time, reason_code in revoked_certificates:
             try:
@@ -370,7 +429,7 @@ class PyPKI:
 
         # Sign with a dummy key matching the CA's algorithm so the
         # signatureAlgorithm field in the TBS bytes is correct.
-        ca_pub_key = self.__ca_active.get_certificate().public_key()
+        ca_pub_key = ca.get_certificate().public_key()
         if isinstance(ca_pub_key, ec.EllipticCurvePublicKey):
             dummy_key = ec.generate_private_key(ca_pub_key.curve)
             is_ecdsa = True
@@ -387,7 +446,7 @@ class PyPKI:
         digest.update(pre_crl.tbs_certlist_bytes)
         tbs_digest = digest.finalize()
 
-        real_signature = self.__ca_active.sign_tbs_digest(tbs_digest)
+        real_signature = ca.sign_tbs_digest(tbs_digest)
 
         final_der = CertificateTools().patch_crl_signature(
             pre_crl_der=pre_crl.public_bytes(serialization.Encoding.DER),
@@ -399,7 +458,7 @@ class PyPKI:
         crl_pem = crl.public_bytes(serialization.Encoding.PEM).decode("utf-8")
         with self.__db.connection():
             self.__db.upsert_crl(
-                ca_id=self.__ca_id,
+                ca_id=used_ca_id,
                 crl_pem=crl_pem,
                 issue_date=crl.last_update_utc.replace(tzinfo=None),
                 next_update=crl.next_update_utc.replace(tzinfo=None)
