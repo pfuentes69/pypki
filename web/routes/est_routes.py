@@ -33,12 +33,17 @@ def _check_basic_auth(est_config) -> bool:
 
 
 def _unauthorized():
-    """Returns a 401 response with WWW-Authenticate header (RFC 7235)."""
-    return Response(
-        "Unauthorized",
-        status=401,
-        headers={"WWW-Authenticate": 'Basic realm="EST"'},
-    )
+    """Returns a 401 response.
+
+    The WWW-Authenticate challenge is only included when the request carried
+    no Authorization header (prompting the client to provide credentials).
+    When credentials were already sent but were wrong we omit the header so
+    that browsers don't pop up their native Basic-Auth dialog.
+    """
+    headers = {}
+    if not request.headers.get("Authorization"):
+        headers["WWW-Authenticate"] = 'Basic realm="EST"'
+    return Response("Unauthorized", status=401, headers=headers)
 
 @bp.route('/est/<path:label>/cacerts', methods=['GET'])
 @bp.route('/est/cacerts', methods=['GET'])

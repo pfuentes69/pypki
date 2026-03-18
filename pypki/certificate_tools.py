@@ -492,8 +492,73 @@ class CertificateTools:
         return crl.dump()
 
 
+    def validate_key_algorithm(self, public_key) -> None:
+        """Raise ValueError if public_key violates the template's allowed_cryptography constraints."""
+        from cryptography.hazmat.primitives.asymmetric import rsa, ec, ed25519, ed448
+
+        allowed_list = (
+            self.__template__
+            .get("allowed_cryptography", {})
+            .get("keyAlgorithms")
+        )
+        if not allowed_list:
+            return  # no constraints — anything is accepted
+
+        allowed = {alg["name"]: alg for alg in allowed_list}
+
+        if isinstance(public_key, rsa.RSAPublicKey):
+            if "RSA" not in allowed:
+                raise ValueError("RSA keys are not permitted by this template")
+            cfg      = allowed["RSA"]
+            key_size = public_key.key_size
+            min_size = cfg.get("min_size", 0)
+            max_size = cfg.get("max_size", 2 ** 31)
+            if key_size < min_size:
+                raise ValueError(
+                    f"RSA key size {key_size} bits is below the minimum "
+                    f"{min_size} bits required by this template"
+                )
+            if key_size > max_size:
+                raise ValueError(
+                    f"RSA key size {key_size} bits exceeds the maximum "
+                    f"{max_size} bits allowed by this template"
+                )
+
+        elif isinstance(public_key, ec.EllipticCurvePublicKey):
+            if "ECDSA" not in allowed:
+                raise ValueError("ECDSA keys are not permitted by this template")
+            allowed_curves = allowed["ECDSA"].get("curves", [])
+            if allowed_curves:
+                # cryptography library uses names like "secp256r1"; map to "P-256" etc.
+                _CURVE_MAP = {
+                    "secp256r1":  "P-256",
+                    "prime256v1": "P-256",
+                    "secp384r1":  "P-384",
+                    "secp521r1":  "P-521",
+                }
+                curve_name  = public_key.curve.name
+                mapped_name = _CURVE_MAP.get(curve_name, curve_name)
+                if mapped_name not in allowed_curves:
+                    raise ValueError(
+                        f"ECDSA curve {mapped_name} is not permitted by this template "
+                        f"(allowed: {', '.join(allowed_curves)})"
+                    )
+
+        elif isinstance(public_key, ed25519.Ed25519PublicKey):
+            if "Ed25519" not in allowed:
+                raise ValueError("Ed25519 keys are not permitted by this template")
+
+        elif isinstance(public_key, ed448.Ed448PublicKey):
+            if "Ed448" not in allowed:
+                raise ValueError("Ed448 keys are not permitted by this template")
+
+        else:
+            raise ValueError(
+                f"Key type {type(public_key).__name__} is not supported by this template"
+            )
+
     def generate_certificate_from_csr(
-        self, 
+        self,
         csr_pem: bytes,
         request_json: str = None,
         issuing_ca: CertificationAuthority = None,
@@ -504,6 +569,11 @@ class CertificateTools:
         logger.info("Generate certificate from CSR")
 
         csr = x509.load_pem_x509_csr(csr_pem)
+        # Save the original public key before patching; patch_csr signs the
+        # rebuilt CSR with a throw-away dummy key, so csr.public_key() after
+        # patching would be that dummy key rather than the user/server key.
+        original_public_key = csr.public_key()
+        self.validate_key_algorithm(original_public_key)
 
         if enforce_template is True:
             # Patch CSR with template and CA details
@@ -540,7 +610,7 @@ class CertificateTools:
             x509.CertificateBuilder()
             .subject_name(subject)
             .issuer_name(issuer)
-            .public_key(csr.public_key())
+            .public_key(original_public_key)
             .serial_number(serial_number)
             .not_valid_before(not_valid_before)
             .not_valid_after(not_valid_after)
@@ -659,17 +729,21 @@ class CertificateTools:
         friendly_name: bytes = b"MyCert",
         key_algorithm: str = "RSA",
         key_type: str = "2048",
-        enforce_template: bool = "False"
+        enforce_template: bool = False
     ) -> bytes:
-        
+
         if issuing_ca is None:
             ca_certs = None
         else:
             ca_certs_pem = issuing_ca.get_certificate_chain_pem()
-            ca_certs = self.load_ca_certificates(pem_data=ca_certs_pem)
+            loaded = self.load_ca_certificates(pem_data=ca_certs_pem) if ca_certs_pem else []
+            ca_certs = loaded if loaded else None
 
-        certificate_key = KeyTools()
-        private_key = certificate_key.generate_private_key(key_algorithm, key_type)
+        if certificate_key is None:
+            certificate_key = KeyTools()
+            certificate_key.generate_private_key(key_algorithm, key_type)
+
+        self.validate_key_algorithm(certificate_key.get_public_key())
 
         certificate = self.generate_certificate(
             request_json=request_json,
@@ -679,49 +753,17 @@ class CertificateTools:
             enforce_template=enforce_template
         )
 
-        # DEBUG
-        """        
-        print("START DEBUG")
-
-        # Subject and issuer are the same for self-signed cert
-        subjectdebug = issuerdebug = Name([
-            NameAttribute(NameOID.COUNTRY_NAME, u"US"),
-            NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"California"),
-            NameAttribute(NameOID.LOCALITY_NAME, u"San Francisco"),
-            NameAttribute(NameOID.ORGANIZATION_NAME, u"Example Org"),
-            NameAttribute(NameOID.COMMON_NAME, u"example.com"),
-        ])
-
-        # Create certificate
-        certdebug = (
-            x509.CertificateBuilder()
-            .subject_name(subjectdebug)
-            .issuer_name(issuerdebug)
-            .public_key(certificate_key.get_public_key())
-            .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.now(timezone.utc))
-            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
-            .sign(certificate_key.get_private_key(), hashes.SHA256())
+        encryption = (
+            serialization.BestAvailableEncryption(pfx_password)
+            if pfx_password
+            else serialization.NoEncryption()
         )
-
-        # Create PKCS#12
-        passworddebug = b"mypassword"
-        p12debug = pkcs12.serialize_key_and_certificates(
-            name=b"example.com",
-            key=private_key,
-            cert=certdebug,
-            cas=None,
-            encryption_algorithm=serialization.BestAvailableEncryption(passworddebug)
-        )
-        print("END DEBUG")
-        """
-
         p12 = pkcs12.serialize_key_and_certificates(
             name=friendly_name,
             key=certificate_key.get_private_key(),
             cert=certificate,
             cas=ca_certs,
-            encryption_algorithm=serialization.BestAvailableEncryption(pfx_password)
+            encryption_algorithm=encryption
         )
         return p12
 

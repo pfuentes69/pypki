@@ -65,6 +65,47 @@ class PyPKI:
             self.create_ocsp_from_config_json(ocsp_config_json)
 
 
+    def restore_backup(self, backup_file: str):
+        """Restore the database from a SQL backup file produced by backup_database().
+
+        The SQL file already contains DROP TABLE / CREATE TABLE / INSERT
+        statements with FOREIGN_KEY_CHECKS disabled, so it handles its own
+        cleanup.  After the restore the in-memory collections are reloaded.
+        """
+        import mysql.connector
+
+        db_cfg = self.__config["db_config"]
+        conn = mysql.connector.connect(
+            host=db_cfg.get("host", "localhost"),
+            port=int(db_cfg.get("port", 3306)),
+            user=db_cfg.get("user", "root"),
+            password=db_cfg.get("password", ""),
+            database=db_cfg.get("database", ""),
+        )
+        try:
+            cursor = conn.cursor()
+            with open(backup_file, "r", encoding="utf-8") as f:
+                sql = f.read()
+
+            # Split on ";\n" — each statement in the backup ends that way.
+            # Strip comment lines from each chunk before executing so that a
+            # chunk that starts with comments but contains real SQL is not skipped.
+            for chunk in sql.split(";\n"):
+                lines = [l for l in chunk.splitlines() if not l.strip().startswith("--")]
+                stmt = "\n".join(lines).strip()
+                if not stmt:
+                    continue
+                cursor.execute(stmt)
+            conn.commit()
+            cursor.close()
+        finally:
+            conn.close()
+
+        # Reload in-memory state to reflect the restored data
+        self.load_template_collection()
+        self.load_ca_collection()
+        self.load_ocsp_responders()
+
     def get_db(self):
         return self.__db
 
@@ -331,6 +372,177 @@ class PyPKI:
             return new_cert
         else:
             return new_cert_id
+
+
+    def generate_pkcs12(
+            self,
+            request_json: str,
+            ca_id: int = None,
+            template_id: int = None,
+            key_algorithm: str = "RSA",
+            key_type: str = "2048",
+            pfx_password: bytes = b"",
+            friendly_name: bytes = b"MyCert",
+            validity_days=PKITools.INFINITE_VALIDITY,
+            store_key: bool = False,
+        ):
+        """Generate a certificate with a server-side key, store the private key in
+        KeyStorage, insert the certificate with private_key_reference, and return
+        (pkcs12_bytes, cert_id)."""
+        from cryptography.hazmat.primitives.serialization import pkcs12 as _pkcs12
+
+        if ca_id is not None:
+            issuing_ca = self._build_ca(ca_id)
+            cert_tool = self._build_cert_tool(template_id)
+            used_ca_id = ca_id
+            used_template_id = template_id
+        else:
+            issuing_ca = self.__ca_active
+            cert_tool = self.__cert_tool
+            used_ca_id = self.__ca_id
+            used_template_id = self.__cert_template_id
+
+        # Generate the key
+        certificate_key = KeyTools()
+        certificate_key.generate_private_key(key_algorithm, key_type)
+
+        # Validate against template constraints
+        cert_tool.validate_key_algorithm(certificate_key.get_public_key())
+
+        # Generate the certificate object (not PEM yet)
+        new_cert = cert_tool.generate_certificate(
+            request_json=request_json,
+            issuing_ca=issuing_ca,
+            certificate_key=certificate_key,
+            validity_days=validity_days,
+            enforce_template=True,
+        )
+        if not new_cert:
+            raise ValueError("Certificate generation failed")
+
+        new_cert_pem = new_cert.public_bytes(serialization.Encoding.PEM)
+
+        # Optionally store the private key in KeyStorage
+        key_id = None
+        if store_key:
+            public_key_pem = certificate_key.get_public_key_pem().decode()
+            key_type_label = f"{key_algorithm}-{key_type}"
+            if pfx_password:
+                # Encrypt the stored key with the same passphrase as the PKCS12
+                stored_key_pem = certificate_key.get_private_key_pem(password=pfx_password).decode()
+                stored_storage_type = "Encrypted"
+            else:
+                stored_key_pem = certificate_key.get_private_key_pem().decode()
+                stored_storage_type = "Plain"
+            with self.__db.connection():
+                key_id = self.__db.insert_key(
+                    private_key=stored_key_pem,
+                    storage_type=stored_storage_type,
+                    public_key=public_key_pem,
+                    key_type=key_type_label,
+                )
+
+        with self.__db.connection():
+            cert_id = self.__db.insert_certificate(
+                new_cert_pem, used_ca_id, used_template_id,
+                private_key_reference=key_id,
+            )
+
+        # Build the CA chain for the PKCS12 bag
+        ca_certs = None
+        if issuing_ca is not None:
+            ca_certs_pem = issuing_ca.get_certificate_chain_pem()
+            if ca_certs_pem:
+                if isinstance(ca_certs_pem, str):
+                    ca_certs_pem = ca_certs_pem.encode()
+                loaded = cert_tool.load_ca_certificates(pem_data=ca_certs_pem)
+                ca_certs = loaded if loaded else None
+
+        enc_algo = (serialization.BestAvailableEncryption(pfx_password)
+                    if pfx_password else serialization.NoEncryption())
+        p12_bytes = _pkcs12.serialize_key_and_certificates(
+            name=friendly_name,
+            key=certificate_key.get_private_key(),
+            cert=new_cert,
+            cas=ca_certs,
+            encryption_algorithm=enc_algo,
+        )
+
+        return p12_bytes, cert_id
+
+
+    def get_certificate_private_key_pem(self, certificate_id: int):
+        """Return (private_key_pem, storage_type) for a certificate that has a
+        private_key_reference, or (None, None) if not found."""
+        with self.__db.connection():
+            cert = self.__db.get_certificate_record(certificate_id=certificate_id)
+        if not cert or not cert.get("private_key_reference"):
+            return None, None
+        key_id = cert["private_key_reference"]
+        with self.__db.connection():
+            key_record = self.__db.get_key_record(key_id)
+        if not key_record:
+            return None, None
+        return key_record.get("private_key"), key_record.get("storage_type")
+
+
+    def build_pkcs12_for_certificate(self, certificate_id: int, pfx_password: bytes = b""):
+        """Re-assemble a PKCS12 for a certificate that has a stored private key."""
+        from cryptography.hazmat.primitives.serialization import pkcs12 as _pkcs12
+
+        with self.__db.connection():
+            cert_record = self.__db.get_certificate_record(certificate_id=certificate_id)
+        if not cert_record or not cert_record.get("private_key_reference"):
+            return None
+
+        key_id = cert_record["private_key_reference"]
+        with self.__db.connection():
+            key_record = self.__db.get_key_record(key_id)
+        if not key_record or not key_record.get("private_key"):
+            return None
+
+        cert_pem = cert_record["certificate_data"]
+        if isinstance(cert_pem, str):
+            cert_pem = cert_pem.encode()
+
+        from cryptography.x509 import load_pem_x509_certificate
+        from cryptography.hazmat.backends import default_backend
+        cert_obj = load_pem_x509_certificate(cert_pem, default_backend())
+
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+        priv_pem = key_record["private_key"]
+        if isinstance(priv_pem, str):
+            priv_pem = priv_pem.encode()
+        storage_type = key_record.get("storage_type", "Plain")
+        key_password = pfx_password if storage_type == "Encrypted" else None
+        private_key = load_pem_private_key(priv_pem, password=key_password)
+
+        # Try to get the CA chain for context
+        ca_certs = None
+        ca_id = cert_record.get("ca_id")
+        if ca_id:
+            try:
+                issuing_ca   = self._build_ca(ca_id)
+                cert_tool    = CertificateTools()
+                ca_certs_pem = issuing_ca.get_certificate_chain_pem()
+                if ca_certs_pem:
+                    if isinstance(ca_certs_pem, str):
+                        ca_certs_pem = ca_certs_pem.encode()
+                    loaded = cert_tool.load_ca_certificates(pem_data=ca_certs_pem)
+                    ca_certs = loaded if loaded else None
+            except Exception:
+                ca_certs = None
+
+        enc_algo = (serialization.BestAvailableEncryption(pfx_password)
+                    if pfx_password else serialization.NoEncryption())
+        p12_bytes = _pkcs12.serialize_key_and_certificates(
+            name=None,
+            key=private_key,
+            cert=cert_obj,
+            cas=ca_certs,
+            encryption_algorithm=enc_algo,
+        )
+        return p12_bytes
 
 
     def generate_certificate_pem_from_csr(

@@ -20,6 +20,7 @@ _PAGES = {
     'kms_keygen.html':          ('kms_keygen',          'KMS Key Generation'),
     'users_list.html':          ('users_list',          'Users'),
     'user_editor.html':         ('users_list',          'User Editor'),
+    'tools.html':               ('tools',               'Tools'),
     'login.html':               (None,                  'PyPKI – Sign In'),
 }
 

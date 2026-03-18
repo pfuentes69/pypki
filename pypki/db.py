@@ -10,6 +10,7 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from cryptography.hazmat.primitives.asymmetric import ec
 from datetime import datetime
+from werkzeug.security import generate_password_hash
 from .ca import CertificationAuthority
 from .ocsp_responder import OCSPResponder
 from .log import logger
@@ -139,50 +140,62 @@ class PKIDataBase:
 
     def insert_ca(self, ca: CertificationAuthority):
         """
-        Method to insert a Certification Authority object into the database.
+        Insert a Certification Authority into the database.
+        The private key (if software-based) is stored in KeyStorage and
+        referenced via private_key_reference.
         """
         try:
             db_name = self.__config["database"]
             cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
-            
-            insert_query = """
-                INSERT INTO CertificationAuthorities (
-                    name, certificate, ski, private_key, certificate_chain,
-                    token_slot, token_key_id, token_password, 
-                    max_validity, serial_number_length, 
-                    crl_validity, extensions
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """
 
-            # Load cert and extract public key
+            # Load cert, calculate SKI, and derive key metadata
             cert = x509.load_pem_x509_certificate(ca.get_config()["crypto"]["certificate"].encode("utf-8"))
             public_key = cert.public_key()
 
             if isinstance(public_key, ec.EllipticCurvePublicKey):
-                # Get raw public key bytes (uncompressed point format)
                 public_bytes = public_key.public_bytes(
                     encoding=serialization.Encoding.X962,
                     format=serialization.PublicFormat.UncompressedPoint
                 )
-
                 digest = hashes.Hash(hashes.SHA1())
                 digest.update(public_bytes)
                 ski = digest.finalize().hex()
+                key_type = f"ECDSA-{public_key.curve.name}"
             else:
-                # DER-encode the public key (SPKI format)
                 spki_der = public_key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
-
-                # SHA-1 hash of the DER-encoded SPKI = SKI
                 digest = hashes.Hash(hashes.SHA1())
                 digest.update(spki_der)
                 ski = digest.finalize().hex()
+                key_type = f"RSA-{public_key.key_size}"
+
+            # Insert private key into KeyStorage; store the returned id as
+            # private_key_reference so the KMS can load it at runtime.
+            private_key_reference = None
+            private_key_pem = ca.get_config()["crypto"].get("private_key")
+            if private_key_pem:
+                pub_key_pem = public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+                cursor.execute(
+                    "INSERT INTO KeyStorage (private_key, storage_type, public_key, key_type) VALUES (%s, %s, %s, %s)",
+                    (private_key_pem, "Plain", pub_key_pem, key_type)
+                )
+                private_key_reference = cursor.lastrowid
+                logger.info(f"CA private key stored in KeyStorage id={private_key_reference}")
+
+            insert_query = """
+                INSERT INTO CertificationAuthorities (
+                    name, certificate, ski, private_key_reference, certificate_chain,
+                    token_slot, token_key_id, token_password,
+                    max_validity, serial_number_length,
+                    crl_validity, extensions
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
 
             data = (
                 ca.get_config()["ca_name"],
                 ca.get_config()["crypto"]["certificate"],
                 ski,
-                ca.get_config()["crypto"]["private_key"],
+                private_key_reference,
                 ca.get_config()["crypto"]["certificate_chain"],
                 ca.get_config()["crypto"]["token_slot"],
                 ca.get_config()["crypto"]["token_key_id"],
@@ -190,7 +203,6 @@ class PKIDataBase:
                 ca.get_config()["max_validity"],
                 ca.get_config()["serial_number_length"],
                 ca.get_config()["crl_validity"],
-#                ca.get_config()["extensions"]
                 json.dumps(ca.get_config()["extensions"])
             )
 
@@ -292,17 +304,41 @@ class PKIDataBase:
 
     def insert_ocsp_responder(self, ocsp_resp: OCSPResponder):
         """
-        Method to insert an OCSP Responder object into the database.
+        Insert an OCSP Responder into the database.
+        The private key (if software-based) is stored in KeyStorage and
+        referenced via private_key_reference.
         """
         try:
             db_name = self.__config["database"]
             cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
-            
+
+            # Insert private key into KeyStorage
+            private_key_reference = None
+            private_key_pem = ocsp_resp.get_config()["crypto"].get("private_key")
+            if private_key_pem:
+                cert_pem = ocsp_resp.get_config()["crypto"].get("certificate")
+                pub_key_pem = None
+                key_type = None
+                if cert_pem:
+                    cert = x509.load_pem_x509_certificate(cert_pem.encode("utf-8"))
+                    public_key = cert.public_key()
+                    pub_key_pem = public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+                    if isinstance(public_key, ec.EllipticCurvePublicKey):
+                        key_type = f"ECDSA-{public_key.curve.name}"
+                    else:
+                        key_type = f"RSA-{public_key.key_size}"
+                cursor.execute(
+                    "INSERT INTO KeyStorage (private_key, storage_type, public_key, key_type) VALUES (%s, %s, %s, %s)",
+                    (private_key_pem, "Plain", pub_key_pem, key_type)
+                )
+                private_key_reference = cursor.lastrowid
+                logger.info(f"OCSP responder private key stored in KeyStorage id={private_key_reference}")
+
             insert_query = """
                 INSERT INTO OCSPResponders (
-                    name, issuer_ski, issuer_certificate, 
-                    private_key, certificate, response_validity
+                    name, issuer_ski, issuer_certificate,
+                    private_key_reference, certificate, response_validity
                 ) VALUES (%s, %s, %s, %s, %s, %s)
             """
 
@@ -310,7 +346,7 @@ class PKIDataBase:
                 ocsp_resp.get_config()["name"],
                 ocsp_resp.get_config()["issuer_ski"],
                 ocsp_resp.get_config()["issuer_certificate"],
-                ocsp_resp.get_config()["crypto"]["private_key"],
+                private_key_reference,
                 ocsp_resp.get_config()["crypto"]["certificate"],
                 ocsp_resp.get_config()["response_validity"]
             )
@@ -320,7 +356,7 @@ class PKIDataBase:
             logger.info("OCSP Responder inserted successfully!")
 
         except mysql.connector.Error as err:
-            logger.error(f"Error inserting OCSP Respoder: {err}")
+            logger.error(f"Error inserting OCSP Responder: {err}")
         finally:
             cursor.close()
 
@@ -1587,6 +1623,14 @@ class PKIDataBase:
             for fk_statement in foreign_keys:
                 logger.info(f"Adding foreign key: {fk_statement}")
                 cursor.execute(fk_statement)
+
+            # Seed default superadmin account (password must be changed after first login)
+            logger.info("Seeding default superadmin user")
+            cursor.execute(
+                "INSERT INTO Users (username, password_hash, role) VALUES (%s, %s, 'superadmin')",
+                ('superadmin', generate_password_hash('password'))
+            )
+            self._local.connection.commit()
 
             cursor.close()
             logger.info("New PKI DB created successfully!")

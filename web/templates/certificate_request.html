@@ -1,5 +1,14 @@
 {% extends "base.html" %}
 
+{% block head_extra %}
+<style>
+  .field-ok    { border-color: #198754 !important; }
+  .field-error { border-color: #dc3545 !important; }
+  .san-row { display:flex; gap:.35rem; margin-bottom:.3rem; }
+  .san-row input { flex:1; }
+</style>
+{% endblock %}
+
 {% block content %}
 <nav aria-label="breadcrumb" class="mb-2">
   <ol class="breadcrumb small">
@@ -10,100 +19,717 @@
 </nav>
 <h4 class="mb-4">Issue a Certificate</h4>
 
-<div class="mb-3">
-  <label for="caSelect" class="form-label">Certification Authority</label>
-  <select id="caSelect" class="form-select"></select>
+<div id="accessDenied" class="alert alert-warning d-none">
+  <i class="bi bi-shield-exclamation me-2"></i>You do not have permission to issue certificates.
 </div>
-<div class="mb-3">
-  <label for="templateSelect" class="form-label">Certificate Template</label>
-  <select id="templateSelect" class="form-select"></select>
-</div>
-<div class="mb-3">
-  <label for="csrInput" class="form-label">CSR (PEM)</label>
-  <textarea id="csrInput" class="form-control font-monospace" placeholder="-----BEGIN CERTIFICATE REQUEST-----" rows="7"></textarea>
-</div>
-<div class="form-check mb-4">
-  <input type="checkbox" class="form-check-input" id="returnPem" />
-  <label class="form-check-label" for="returnPem">Return certificate PEM (uncheck to return ID only)</label>
-</div>
-<button class="btn btn-success" onclick="issueCertificate()">
-  <i class="bi bi-send me-1"></i>Issue Certificate
-</button>
 
-<div id="resultSection" class="mt-4 d-none">
-  <div id="certIdSection" class="d-none">
-    <div class="alert alert-success d-flex justify-content-between align-items-center">
-      <div>Certificate issued. ID: <strong id="certIdValue"></strong></div>
-      <div class="d-flex gap-2">
-        <a id="viewCertLink" href="#" class="btn btn-sm btn-outline-primary"><i class="bi bi-eye"></i> View</a>
-        <a id="downloadCertLink" href="#" class="btn btn-sm btn-outline-secondary" target="_blank"><i class="bi bi-download"></i> Download PEM</a>
+<div id="mainContent" class="d-none">
+
+  <!-- CA + Template -->
+  <div class="row g-3 mb-4">
+    <div class="col-md-6">
+      <label class="form-label fw-semibold">Certification Authority <span class="text-danger">*</span></label>
+      <select id="caSelect" class="form-select"><option value="">Select CA…</option></select>
+    </div>
+    <div class="col-md-6">
+      <label class="form-label fw-semibold">Certificate Template <span class="text-danger">*</span></label>
+      <select id="templateSelect" class="form-select" onchange="onTemplateChange()">
+        <option value="">Select template…</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Subject + SAN (rendered after template selected) -->
+  <div id="templateForm" class="d-none">
+
+    <div class="card mb-3">
+      <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-person me-2"></i>Subject</span>
+        <span id="subjectBadge" class="badge"></span>
+      </div>
+      <div class="card-body" id="subjectFields"></div>
+    </div>
+
+    <div class="card mb-3 d-none" id="sanCard">
+      <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-link-45deg me-2"></i>Subject Alternative Names</span>
+        <span id="sanBadge" class="badge"></span>
+      </div>
+      <div class="card-body" id="sanFields"></div>
+    </div>
+
+  </div>
+
+  <!-- Key mode -->
+  <div class="card mb-4">
+    <div class="card-header fw-semibold"><i class="bi bi-key me-2"></i>Certificate Request Method</div>
+    <div class="card-body d-flex flex-wrap gap-4">
+      <div class="form-check">
+        <input type="radio" name="keyMode" id="modeServerKey" value="server" class="form-check-input"
+               onchange="onKeyModeChange()">
+        <label class="form-check-label" for="modeServerKey">Server-side key generation</label>
+      </div>
+      <div class="form-check">
+        <input type="radio" name="keyMode" id="modeUploadCsr" value="csr" class="form-check-input" checked
+               onchange="onKeyModeChange()">
+        <label class="form-check-label" for="modeUploadCsr">Upload CSR</label>
       </div>
     </div>
   </div>
-  <div id="certPemSection" class="d-none">
-    <label class="form-label fw-semibold">Certificate PEM</label>
-    <textarea class="form-control font-monospace" id="certPemArea" rows="10" readonly></textarea>
-    <button class="btn btn-outline-secondary btn-sm mt-2" onclick="copyPem()">
-      <i class="bi bi-clipboard"></i> Copy
+
+  <!-- Server-side key settings -->
+  <div id="serverKeySection" class="card mb-4 d-none">
+    <div class="card-header fw-semibold"><i class="bi bi-gear me-2"></i>Key Settings</div>
+    <div class="card-body">
+      <div class="row g-3">
+        <div class="col-md-4">
+          <label class="form-label small fw-semibold">Key Algorithm <span class="text-danger">*</span></label>
+          <select id="keyAlgorithm" class="form-select form-select-sm" onchange="onKeyAlgorithmChange()"></select>
+        </div>
+        <div class="col-md-4" id="keyTypeCol">
+          <label class="form-label small fw-semibold" id="keyTypeLabel">Key Size</label>
+          <select id="keyType" class="form-select form-select-sm" onchange="validate()"></select>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label small fw-semibold">PKCS#12 Passphrase</label>
+          <input type="password" id="pkcs12Passphrase" class="form-control form-control-sm"
+                 placeholder="Leave blank for no encryption"
+                 oninput="updateStoreKeyHint()">
+        </div>
+      </div>
+      <div class="mt-3 d-flex flex-column gap-1">
+        <div class="d-flex align-items-center gap-2">
+          <input type="checkbox" id="storeKeyInKms" style="width:1rem;height:1rem;cursor:pointer"
+                 onchange="updateStoreKeyHint()">
+          <label for="storeKeyInKms" class="mb-0 small" style="cursor:pointer">
+            <i class="bi bi-database me-1"></i>Store key in KMS
+          </label>
+        </div>
+        <div class="small mt-1" id="storeKeyHint"></div>
+      </div>
+      <div class="mt-2 text-muted small"><i class="bi bi-info-circle me-1"></i>
+        The PKCS#12 will be downloaded automatically. The passphrase is never stored.
+      </div>
+    </div>
+  </div>
+
+  <!-- CSR input -->
+  <div id="csrSection" class="card mb-4">
+    <div class="card-header fw-semibold"><i class="bi bi-file-earmark-code me-2"></i>CSR</div>
+    <div class="card-body">
+      <textarea id="csrInput" class="form-control font-monospace mb-2" rows="7"
+                placeholder="Paste PEM-encoded CSR here…"
+                oninput="scheduleParse()"></textarea>
+      <div class="d-flex gap-2 align-items-center flex-wrap">
+        <label class="btn btn-outline-secondary btn-sm mb-0" for="csrFile">
+          <i class="bi bi-folder2-open me-1"></i>Upload file…
+        </label>
+        <input type="file" id="csrFile" class="d-none" accept=".pem,.csr,.req,.txt" onchange="onCsrFile()">
+        <span id="csrFileName" class="text-muted small"></span>
+        <span id="csrParseStatus" class="small"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Options + submit -->
+  <div class="d-flex align-items-center gap-3 flex-wrap mt-2 mb-2">
+    <button class="btn btn-success" id="btnIssue" onclick="issueCertificate()" disabled>
+      <i class="bi bi-send me-1"></i><span id="btnIssueLabel">Issue Certificate</span>
     </button>
   </div>
+  <div id="validationMsg" class="small text-danger mb-3 d-none"></div>
+
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-  async function loadDropdowns() {
-    try {
-      const [caRes, templateRes] = await Promise.all([fetch(`${apiBase}/ca`), fetch(`${apiBase}/template`)]);
-      const [cas, templates] = await Promise.all([caRes.json(), templateRes.json()]);
-      const caSelect = document.getElementById('caSelect');
-      cas.forEach(ca => { const o = document.createElement('option'); o.value = ca.id; o.textContent = ca.name; caSelect.appendChild(o); });
-      const templateSelect = document.getElementById('templateSelect');
-      templates.forEach(tpl => { const o = document.createElement('option'); o.value = tpl.id; o.textContent = tpl.name; templateSelect.appendChild(o); });
-    } catch (err) { alert('Error loading dropdowns: ' + err); }
-  }
+// ── Constants ────────────────────────────────────────────────────────────────
 
-  async function issueCertificate() {
-    const caId = document.getElementById('caSelect').value;
-    const templateId = document.getElementById('templateSelect').value;
-    const csr = document.getElementById('csrInput').value.trim();
-    const returnCert = document.getElementById('returnPem').checked;
-    if (!csr) { alert('Please enter a CSR.'); return; }
+const SUBJECT_LABELS = {
+  commonName:             'Common Name (CN)',
+  countryName:            'Country (C)',
+  stateOrProvinceName:    'State / Province (ST)',
+  localityName:           'Locality (L)',
+  organizationName:       'Organization (O)',
+  organizationalUnitName: 'Organizational Unit (OU)',
+  serialNumber:           'Serial Number',
+  emailAddress:           'Email',
+  givenName:              'Given Name',
+  surname:                'Surname',
+  title:                  'Title',
+  streetAddress:          'Street Address',
+  postalCode:             'Postal Code',
+  pseudonym:              'Pseudonym',
+  domainComponent:        'Domain Component (DC)',
+  userId:                 'User ID',
+};
 
-    document.getElementById('resultSection').classList.remove('d-none');
-    document.getElementById('certIdSection').classList.add('d-none');
-    document.getElementById('certPemSection').classList.add('d-none');
+const SAN_LABELS = {
+  dnsNames:       'DNS Names',
+  ipAddresses:    'IP Addresses',
+  emailAddresses: 'Email Addresses',
+  uris:           'URIs',
+};
 
-    try {
-      const res = await fetch(`${apiBase}/certificate/issue`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ca_id: parseInt(caId), template_id: parseInt(templateId), csr, return_certificate: returnCert })
-      });
-      const data = await res.json();
-      if (returnCert && data.certificate_pem) {
-        document.getElementById('certPemSection').classList.remove('d-none');
-        document.getElementById('certPemArea').value = data.certificate_pem;
-      } else if (!returnCert && data.certificate_id) {
-        const id = data.certificate_id;
-        document.getElementById('certIdSection').classList.remove('d-none');
-        document.getElementById('certIdValue').textContent = id;
-        document.getElementById('viewCertLink').href = `/certificate_details.html?id=${id}`;
-        document.getElementById('downloadCertLink').href = `${apiBase}/certificate/pem/${id}`;
-      } else { alert('Unexpected response from server.'); }
-    } catch (err) { alert('Error issuing certificate: ' + err); }
-  }
+// ── State ────────────────────────────────────────────────────────────────────
 
-  function copyPem() {
-    navigator.clipboard.writeText(document.getElementById('certPemArea').value)
-      .then(() => alert('Copied to clipboard.'));
-  }
+let _template   = null;
+let _parseTimer = null;
 
-  if (!window._isOperator) {
-    document.getElementById('main').innerHTML =
-      '<div class="alert alert-warning"><i class="bi bi-shield-exclamation me-2"></i>You do not have permission to issue certificates.</div>';
+// ── Key mode helpers ─────────────────────────────────────────────────────────
+
+function getKeyMode() {
+  return document.querySelector('input[name="keyMode"]:checked')?.value || 'csr';
+}
+
+function updateStoreKeyHint() {
+  const hint     = document.getElementById('storeKeyHint');
+  if (!hint) return;
+  const checked    = document.getElementById('storeKeyInKms')?.checked;
+  const passphrase = document.getElementById('pkcs12Passphrase')?.value;
+  if (!checked) { hint.textContent = ''; return; }
+  if (passphrase) {
+    hint.innerHTML = '<i class="bi bi-lock me-1"></i>Key will be stored <strong>encrypted</strong> using the passphrase above.';
   } else {
-    loadDropdowns();
+    hint.innerHTML = '<i class="bi bi-unlock me-1"></i>Key will be stored <strong>unencrypted</strong> (no passphrase set).';
   }
+}
+
+function onKeyModeChange() {
+  const mode = getKeyMode();
+  document.getElementById('serverKeySection').classList.toggle('d-none', mode !== 'server');
+  document.getElementById('csrSection').classList.toggle('d-none', mode !== 'csr');
+  document.getElementById('btnIssueLabel').textContent =
+    mode === 'server' ? 'Generate & Download PKCS#12' : 'Issue Certificate';
+  validate();
+}
+
+function renderKeyAlgorithmOptions(tpl) {
+  const algSelect  = document.getElementById('keyAlgorithm');
+  algSelect.innerHTML = '';
+  const allowed = tpl?.allowed_cryptography?.keyAlgorithms || [];
+  if (allowed.length === 0) {
+    // Fallback defaults when template has no constraint
+    [['RSA', 'RSA'], ['ECDSA', 'ECDSA']].forEach(([v, l]) => {
+      const o = document.createElement('option'); o.value = v; o.textContent = l;
+      algSelect.appendChild(o);
+    });
+  } else {
+    allowed.forEach(alg => {
+      const o = document.createElement('option');
+      o.value = alg.name; o.textContent = alg.name;
+      algSelect.appendChild(o);
+    });
+  }
+  onKeyAlgorithmChange();
+}
+
+function onKeyAlgorithmChange() {
+  const alg = document.getElementById('keyAlgorithm').value;
+  const typeSelect = document.getElementById('keyType');
+  const typeLabel  = document.getElementById('keyTypeLabel');
+  const typeCol    = document.getElementById('keyTypeCol');
+  typeSelect.innerHTML = '';
+
+  const allowed = _template?.allowed_cryptography?.keyAlgorithms || [];
+  const algCfg  = allowed.find(a => a.name === alg);
+
+  if (alg === 'RSA') {
+    typeLabel.textContent = 'Key Size';
+    typeCol.classList.remove('d-none');
+    const minSize = algCfg?.min_size || 2048;
+    const maxSize = algCfg?.max_size || 4096;
+    [2048, 3072, 4096].filter(s => s >= minSize && s <= maxSize).forEach(s => {
+      const o = document.createElement('option'); o.value = String(s); o.textContent = s + ' bits';
+      typeSelect.appendChild(o);
+    });
+  } else if (alg === 'ECDSA') {
+    typeLabel.textContent = 'Curve';
+    typeCol.classList.remove('d-none');
+    const allowedCurves = algCfg?.curves || ['P-256', 'P-384', 'P-521'];
+    allowedCurves.forEach(c => {
+      const o = document.createElement('option'); o.value = c; o.textContent = c;
+      typeSelect.appendChild(o);
+    });
+  } else {
+    // Ed25519 / Ed448 — no sub-type needed
+    typeCol.classList.add('d-none');
+  }
+  validate();
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+
+window.onload = async function () {
+  if (!window._isOperator) {
+    document.getElementById('accessDenied').classList.remove('d-none');
+    return;
+  }
+  document.getElementById('mainContent').classList.remove('d-none');
+  await loadDropdowns();
+};
+
+async function loadDropdowns() {
+  const [caRes, tplRes] = await Promise.all([
+    fetch(`${apiBase}/ca`),
+    fetch(`${apiBase}/template`),
+  ]);
+  const [cas, templates] = await Promise.all([caRes.json(), tplRes.json()]);
+
+  const caSelect = document.getElementById('caSelect');
+  cas.forEach(c => {
+    const o = document.createElement('option');
+    o.value = c.id; o.textContent = c.name; caSelect.appendChild(o);
+  });
+
+  const tplSelect = document.getElementById('templateSelect');
+  templates.forEach(t => {
+    const o = document.createElement('option');
+    o.value = t.id; o.textContent = t.name; tplSelect.appendChild(o);
+  });
+}
+
+// ── Template change ──────────────────────────────────────────────────────────
+
+async function onTemplateChange() {
+  const id = document.getElementById('templateSelect').value;
+  _template = null;
+  document.getElementById('templateForm').classList.add('d-none');
+  setValidationMsg('');
+  document.getElementById('btnIssue').disabled = true;
+
+  if (!id) return;
+
+  try {
+    const res = await fetch(`${apiBase}/template/${id}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    _template = await res.json();
+    renderTemplateForm(_template);
+    document.getElementById('templateForm').classList.remove('d-none');
+    // If there's already a CSR pasted, re-parse to populate fields
+    const csr = document.getElementById('csrInput').value.trim();
+    if (csr) scheduleParse(0);
+    else validate();
+  } catch (err) {
+    showToast('Failed to load template: ' + err.message, 'danger');
+  }
+}
+
+// ── Render template form ─────────────────────────────────────────────────────
+
+function renderTemplateForm(tpl) {
+  // Subject
+  const container = document.getElementById('subjectFields');
+  container.innerHTML = '';
+  const fields = tpl.subject_name?.fields || {};
+
+  if (Object.keys(fields).length === 0) {
+    container.innerHTML = '<span class="text-muted small">No subject fields in this template.</span>';
+  } else {
+    const row = document.createElement('div');
+    row.className = 'row g-2';
+    for (const [key, cfg] of Object.entries(fields)) {
+      const col = document.createElement('div');
+      col.className = 'col-md-6';
+      const label = SUBJECT_LABELS[key] || key;
+      const req = cfg.mandatory && !(cfg.default) ? ' <span class="text-danger">*</span>' : '';
+      col.innerHTML = `
+        <label class="form-label small mb-1">${label}${req}</label>
+        <input type="text" id="subj_${key}" class="form-control form-control-sm font-monospace"
+               placeholder="${escHtml(cfg.default || '')}"
+               value="${escHtml(cfg.default || '')}"
+               oninput="validate()">`;
+      row.appendChild(col);
+    }
+    container.appendChild(row);
+  }
+
+  // SAN
+  const sanCard = document.getElementById('sanCard');
+  const sanContainer = document.getElementById('sanFields');
+  sanContainer.innerHTML = '';
+  const sanTypes = tpl.extensions?.subjectAltName?.allowed_types || {};
+  const activeSan = Object.entries(sanTypes).filter(([, c]) => c.allowed !== false);
+
+  if (activeSan.length === 0) {
+    sanCard.classList.add('d-none');
+  } else {
+    sanCard.classList.remove('d-none');
+    for (const [key, cfg] of activeSan) {
+      const label = SAN_LABELS[key] || key;
+      const req = cfg.mandatory ? ' <span class="text-danger">*</span>' : '';
+      const div = document.createElement('div');
+      div.className = 'mb-3';
+      div.innerHTML = `<div class="form-label small fw-semibold mb-1">${label}${req}</div>
+                       <div id="san_${key}"></div>`;
+      sanContainer.appendChild(div);
+      // Start with one empty row
+      addSanRow(key, '');
+    }
+  }
+
+  document.getElementById('subjectBadge').textContent = '';
+  document.getElementById('subjectBadge').className = 'badge';
+  document.getElementById('sanBadge').textContent = '';
+  document.getElementById('sanBadge').className = 'badge';
+
+  // Populate key algorithm options for server-side mode
+  renderKeyAlgorithmOptions(tpl);
+}
+
+// ── SAN dynamic rows ─────────────────────────────────────────────────────────
+
+function addSanRow(key, value) {
+  const container = document.getElementById(`san_${key}`);
+  if (!container) return;
+
+  const row = document.createElement('div');
+  row.className = 'san-row';
+  row.innerHTML = `
+    <input type="text" class="form-control form-control-sm font-monospace"
+           value="${escHtml(value)}" placeholder="Enter value…" oninput="validate()">
+    <button class="btn btn-sm btn-outline-danger" type="button"
+            onclick="removeSanRow(this, '${key}')">
+      <i class="bi bi-x"></i>
+    </button>`;
+  // Insert before the "Add" button if present, otherwise append
+  const addBtn = container.querySelector('.btn-san-add');
+  if (addBtn) container.insertBefore(row, addBtn);
+  else         container.appendChild(row);
+
+  // Ensure there's always an "Add" button at the bottom
+  if (!container.querySelector('.btn-san-add')) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-outline-secondary btn-sm btn-san-add mt-1';
+    btn.innerHTML = '<i class="bi bi-plus me-1"></i>Add';
+    btn.onclick = () => { addSanRow(key, ''); };
+    container.appendChild(btn);
+  }
+}
+
+function removeSanRow(btn, key) {
+  btn.closest('.san-row').remove();
+  // Keep at least one empty row
+  const container = document.getElementById(`san_${key}`);
+  if (!container.querySelector('.san-row')) addSanRow(key, '');
+  validate();
+}
+
+function setSanValues(key, values) {
+  const container = document.getElementById(`san_${key}`);
+  if (!container) return;
+  // Remove existing rows and Add button
+  container.innerHTML = '';
+  if (values.length === 0) {
+    addSanRow(key, '');
+  } else {
+    values.forEach(v => addSanRow(key, v));
+  }
+}
+
+function getSanValues(key) {
+  const container = document.getElementById(`san_${key}`);
+  if (!container) return [];
+  return Array.from(container.querySelectorAll('input'))
+    .map(el => el.value.trim())
+    .filter(v => v !== '');
+}
+
+// ── CSR parsing ──────────────────────────────────────────────────────────────
+
+function scheduleParse(delay = 600) {
+  clearTimeout(_parseTimer);
+  _parseTimer = setTimeout(doParseCsr, delay);
+}
+
+function onCsrFile() {
+  const file = document.getElementById('csrFile').files[0];
+  if (!file) return;
+  document.getElementById('csrFileName').textContent = file.name;
+  const reader = new FileReader();
+  reader.onload = e => {
+    document.getElementById('csrInput').value = e.target.result;
+    scheduleParse(0);
+  };
+  reader.readAsText(file);
+}
+
+async function doParseCsr() {
+  const csr = document.getElementById('csrInput').value.trim();
+  const statusEl = document.getElementById('csrParseStatus');
+
+  if (!csr) {
+    statusEl.textContent = '';
+    validate();
+    return;
+  }
+
+  if (!csr.includes('BEGIN CERTIFICATE REQUEST') && !csr.includes('BEGIN NEW CERTIFICATE REQUEST')) {
+    statusEl.innerHTML = '<span class="text-danger"><i class="bi bi-x-circle me-1"></i>Not a valid CSR PEM</span>';
+    validate();
+    return;
+  }
+
+  statusEl.innerHTML = '<span class="text-muted"><span class="spinner-border spinner-border-sm me-1"></span>Parsing…</span>';
+
+  try {
+    const res = await fetch(`${apiBase}/certificate/parse-csr`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ csr }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.description || `HTTP ${res.status}`);
+    }
+    const parsed = await res.json();
+    populateFromCsr(parsed);
+    statusEl.innerHTML = '<span class="text-success"><i class="bi bi-check-circle me-1"></i>CSR parsed</span>';
+  } catch (err) {
+    statusEl.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle me-1"></i>${escHtml(err.message)}</span>`;
+  }
+
+  validate();
+}
+
+// Populate form from parsed CSR.
+// Only overwrites fields/SAN types that the CSR actually contains.
+function populateFromCsr(parsed) {
+  if (!_template) return;
+
+  // Subject: overwrite only fields present in the CSR
+  const fields = _template.subject_name?.fields || {};
+  for (const key of Object.keys(fields)) {
+    const val = parsed.subject?.[key];
+    if (val != null) {
+      const el = document.getElementById(`subj_${key}`);
+      if (el) el.value = val;
+    }
+  }
+
+  // SAN: overwrite only types that appear in the CSR
+  const sanTypes = _template.extensions?.subjectAltName?.allowed_types || {};
+  for (const key of Object.keys(sanTypes)) {
+    const values = parsed.san?.[key];
+    if (values != null) setSanValues(key, values);
+  }
+}
+
+// ── Validation ───────────────────────────────────────────────────────────────
+// Reads from the live form fields (not from parsed CSR state).
+
+function validate() {
+  const btn  = document.getElementById('btnIssue');
+  const mode = getKeyMode();
+
+  if (!_template) {
+    setValidationMsg('Select a template to continue.');
+    btn.disabled = true;
+    return;
+  }
+
+  if (mode === 'csr') {
+    const csr = document.getElementById('csrInput').value.trim();
+    if (!csr) {
+      setValidationMsg('Provide a CSR to continue.');
+      btn.disabled = true;
+      updateBadges(null, null);
+      return;
+    }
+  } else {
+    // server-side: verify a key algorithm is selected
+    const alg = document.getElementById('keyAlgorithm').value;
+    if (!alg) {
+      setValidationMsg('Select a key algorithm.');
+      btn.disabled = true;
+      updateBadges(null, null);
+      return;
+    }
+  }
+
+  const missing = [];
+  const fields = _template.subject_name?.fields || {};
+  let subjectOk = true;
+
+  for (const [key, cfg] of Object.entries(fields)) {
+    const el = document.getElementById(`subj_${key}`);
+    const value = el ? el.value.trim() : '';
+    // A mandatory field is satisfied if it has a value in the form,
+    // or if the template defines a non-empty default (server will use it).
+    const hasDefault = cfg.default != null && cfg.default !== '';
+    const satisfied  = value !== '' || hasDefault;
+
+    el?.classList.remove('field-ok', 'field-error');
+    if (value) {
+      el?.classList.add('field-ok');
+    } else if (cfg.mandatory && !hasDefault) {
+      el?.classList.add('field-error');
+    }
+
+    if (cfg.mandatory && !satisfied) {
+      missing.push(SUBJECT_LABELS[key] || key);
+      subjectOk = false;
+    }
+  }
+
+  const sanTypes = _template.extensions?.subjectAltName?.allowed_types || {};
+  let sanOk = true;
+
+  for (const [key, cfg] of Object.entries(sanTypes)) {
+    if (cfg.mandatory && getSanValues(key).length === 0) {
+      missing.push(SAN_LABELS[key] || key);
+      sanOk = false;
+    }
+  }
+
+  updateBadges(subjectOk, sanOk);
+
+  if (missing.length > 0) {
+    setValidationMsg('Mandatory fields missing: ' + missing.join(', ') + '.');
+    btn.disabled = true;
+  } else {
+    setValidationMsg('');
+    btn.disabled = false;
+  }
+}
+
+function updateBadges(subjectOk, sanOk) {
+  const sb = document.getElementById('subjectBadge');
+  const nb = document.getElementById('sanBadge');
+  if (subjectOk === null) {
+    sb.textContent = ''; sb.className = 'badge';
+    nb.textContent = ''; nb.className = 'badge';
+    return;
+  }
+  sb.textContent = subjectOk ? 'OK' : 'Missing fields';
+  sb.className   = 'badge ' + (subjectOk ? 'bg-success' : 'bg-danger');
+  if (!document.getElementById('sanCard').classList.contains('d-none')) {
+    nb.textContent = sanOk ? 'OK' : 'Missing fields';
+    nb.className   = 'badge ' + (sanOk ? 'bg-success' : 'bg-danger');
+  }
+}
+
+function setValidationMsg(msg) {
+  const el = document.getElementById('validationMsg');
+  el.textContent = msg;
+  el.classList.toggle('d-none', !msg);
+}
+
+// ── Issue certificate ────────────────────────────────────────────────────────
+
+function collectSubjectSan() {
+  const subjectData = {};
+  const sanData     = {};
+  if (_template) {
+    for (const key of Object.keys(_template.subject_name?.fields || {})) {
+      const el  = document.getElementById(`subj_${key}`);
+      const val = el ? el.value.trim() : '';
+      if (val) subjectData[key] = val;
+    }
+    for (const key of Object.keys(_template.extensions?.subjectAltName?.allowed_types || {})) {
+      const values = getSanValues(key);
+      if (values.length > 0) sanData[key] = values;
+    }
+  }
+  return { subjectData, sanData };
+}
+
+async function issueCertificate() {
+  const caId       = document.getElementById('caSelect').value;
+  const templateId = document.getElementById('templateSelect').value;
+  const mode       = getKeyMode();
+
+  if (!caId)       { showToast('Select a Certification Authority.', 'warning'); return; }
+  if (!templateId) { showToast('Select a template.', 'warning'); return; }
+
+  const btn = document.getElementById('btnIssue');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Issuing…';
+
+  const { subjectData, sanData } = collectSubjectSan();
+
+  try {
+    if (mode === 'server') {
+      await issueServerKey(caId, templateId, subjectData, sanData);
+    } else {
+      await issueCsr(caId, templateId, subjectData, sanData);
+    }
+  } catch (err) {
+    showToast('Failed to issue certificate: ' + err.message, 'danger');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-send me-1"></i><span id="btnIssueLabel">' +
+      (mode === 'server' ? 'Generate & Download PKCS#12' : 'Issue Certificate') + '</span>';
+    validate();
+  }
+}
+
+async function issueCsr(caId, templateId, subjectData, sanData) {
+  const csr = document.getElementById('csrInput').value.trim();
+  if (!csr) { showToast('Provide a CSR.', 'warning'); return; }
+
+  const res = await fetch(`${apiBase}/certificate/issue`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ca_id: parseInt(caId), template_id: parseInt(templateId),
+      csr, subject: subjectData, san: sanData,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+
+  showToast('Certificate issued successfully.');
+  window.location.href = `/certificate_details.html?id=${data.certificate_id}`;
+}
+
+async function issueServerKey(caId, templateId, subjectData, sanData) {
+  const keyAlgorithm = document.getElementById('keyAlgorithm').value;
+  const keyType      = document.getElementById('keyType').value || keyAlgorithm;
+  const passphrase   = document.getElementById('pkcs12Passphrase').value;
+  const storeKey     = document.getElementById('storeKeyInKms').checked;
+
+  const res = await fetch(`${apiBase}/certificate/issue-pkcs12`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ca_id: parseInt(caId), template_id: parseInt(templateId),
+      key_algorithm: keyAlgorithm, key_type: keyType,
+      passphrase, subject: subjectData, san: sanData,
+      friendly_name: 'Certificate',
+      store_key: storeKey,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.description || `HTTP ${res.status}`);
+  }
+
+  const certId = res.headers.get('X-Certificate-Id');
+  const blob   = await res.blob();
+
+  // Trigger automatic download
+  const url  = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href  = url;
+  link.download = certId ? `certificate_${certId}.p12` : 'certificate.p12';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+
+  showToast('Certificate issued and PKCS#12 downloaded.');
+  if (certId) {
+    window.location.href = `/certificate_details.html?id=${certId}`;
+  }
+}
+
+function escHtml(str) {
+  if (str == null) return '';
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
 </script>
 {% endblock %}

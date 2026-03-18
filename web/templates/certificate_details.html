@@ -55,6 +55,8 @@
     8: 'Remove From CRL', 9: 'Privilege Withdrawn', 10: 'AA Compromise'
   };
 
+  let _keyStorageType = null;  // 'Plain', 'Encrypted', or null
+
   function getIdFromUrl() { return new URLSearchParams(window.location.search).get("id"); }
 
   function statusBadge(status) {
@@ -79,6 +81,28 @@
         <i class="bi bi-x-circle me-1"></i>Revoke
       </button>` : '';
 
+    const hasPrivateKey = !!(cert.private_key_reference);
+
+    const pkcs12Section = (hasPrivateKey && window._isAdmin) ? `
+      <div class="card mt-4">
+        <div class="card-header fw-semibold"><i class="bi bi-file-earmark-lock me-2"></i>Download as PKCS#12</div>
+        <div class="card-body">
+          <div id="pkcs12PassphraseHint"></div>
+          <div class="row g-2 align-items-end mt-1">
+            <div class="col-md-5">
+              <label class="form-label small">Passphrase</label>
+              <input type="password" id="pkcs12PassphraseInput" class="form-control form-control-sm"
+                     placeholder="Leave blank for no encryption">
+            </div>
+            <div class="col-auto">
+              <button class="btn btn-outline-primary btn-sm" onclick="downloadPkcs12(${cert.id})">
+                <i class="bi bi-download me-1"></i>Download PKCS#12
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>` : '';
+
     document.getElementById('certDetails').innerHTML = `
       <div class="card mb-4">
         <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
@@ -98,6 +122,7 @@
             ${row('Fingerprint', `<span class="font-monospace small">${cert.fingerprint}</span>`)}
             ${row('Created At', cert.created_at)}
             ${row('Updated At', cert.updated_at)}
+            ${hasPrivateKey ? row('Private Key Ref', cert.private_key_reference) : ''}
             ${revocationRows}
           </tbody></table>
         </div>
@@ -106,7 +131,18 @@
         <div class="card-header fw-semibold">Public Key</div>
         <div class="card-body p-2"><pre class="mb-0 small">${cert.public_key}</pre></div>
       </div>
-      <div class="card">
+      <div id="privateKeyCard" class="${hasPrivateKey && window._isAdmin ? '' : 'd-none'} card mb-4">
+        <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+          <span><i class="bi bi-key me-2"></i>Private Key</span>
+          <button class="btn btn-sm btn-outline-secondary" onclick="downloadPrivateKey(${cert.id})">
+            <i class="bi bi-download me-1"></i>Download PEM
+          </button>
+        </div>
+        <div class="card-body p-2">
+          <pre class="mb-0 small" id="privateKeyPem"><span class="text-muted">Loading…</span></pre>
+        </div>
+      </div>
+      <div class="card mb-4">
         <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
           Certificate PEM
           <a class="btn btn-sm btn-outline-primary" href="${apiBase}/certificate/pem/${cert.id}" target="_blank">
@@ -114,9 +150,87 @@
           </a>
         </div>
         <div class="card-body p-2"><pre class="mb-0 small">${cert.certificate_data}</pre></div>
-      </div>`;
+      </div>
+      ${pkcs12Section}`;
 
     document.getElementById('confirmRevokeBtn').addEventListener('click', () => revokeCertificate(cert.id));
+
+    if (hasPrivateKey && window._isAdmin) {
+      loadPrivateKey(cert.id);
+    }
+  }
+
+  function loadPrivateKey(certId) {
+    fetch(`${apiBase}/certificate/private-key/${certId}`)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(data => {
+        _keyStorageType = data.storage_type || null;
+        const pre = document.getElementById('privateKeyPem');
+        if (pre) pre.textContent = data.private_key_pem || '—';
+        // Update PKCS12 section hint now that we know storage type
+        updatePkcs12PassphraseHint();
+      })
+      .catch(err => {
+        const pre = document.getElementById('privateKeyPem');
+        if (pre) pre.innerHTML = `<span class="text-danger">Failed to load: ${err.message}</span>`;
+      });
+  }
+
+  function updatePkcs12PassphraseHint() {
+    const hint = document.getElementById('pkcs12PassphraseHint');
+    if (!hint) return;
+    if (_keyStorageType === 'Encrypted') {
+      hint.innerHTML = '<i class="bi bi-lock me-1"></i>This key is stored <strong>encrypted</strong>. ' +
+        'The passphrase below must match the one used when the key was created.';
+      hint.className = 'small text-warning mt-1';
+    } else {
+      hint.textContent = '';
+    }
+  }
+
+  function downloadPrivateKey(certId) {
+    fetch(`${apiBase}/certificate/private-key/${certId}`)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(data => {
+        const blob = new Blob([data.private_key_pem], { type: 'application/x-pem-file' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href = url; a.download = `private_key_cert_${certId}.pem`;
+        document.body.appendChild(a); a.click();
+        document.body.removeChild(a); URL.revokeObjectURL(url);
+      })
+      .catch(err => showToast('Download failed: ' + err.message, 'danger'));
+  }
+
+  async function downloadPkcs12(certId) {
+    const passphrase = document.getElementById('pkcs12PassphraseInput')?.value || '';
+    const btn = event.currentTarget;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Building…';
+
+    try {
+      const res = await fetch(`${apiBase}/certificate/pkcs12/${certId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ passphrase }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.description || `HTTP ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url; a.download = `certificate_${certId}.p12`;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a); URL.revokeObjectURL(url);
+      showToast('PKCS#12 downloaded.');
+    } catch (err) {
+      showToast('Download failed: ' + err.message, 'danger');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-download me-1"></i>Download PKCS#12';
+    }
   }
 
   function revokeCertificate(certId) {

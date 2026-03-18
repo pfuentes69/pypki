@@ -36,14 +36,24 @@
 
     window.fetch = function (url, opts) {
         opts = opts ? Object.assign({}, opts) : {};
+        const headers = Object.assign({}, opts.headers || {});
         const token = getToken();
-        if (token) {
-            opts.headers = Object.assign({}, opts.headers || {}, {
-                'Authorization': 'Bearer ' + token
-            });
+
+        // Only inject the Bearer token when the caller hasn't already set an
+        // Authorization header (e.g. EST test page sets Basic auth itself).
+        const hasAuth = Object.keys(headers).some(k => k.toLowerCase() === 'authorization');
+        if (token && !hasAuth) {
+            headers['Authorization'] = 'Bearer ' + token;
         }
+        opts.headers = headers;
+
+        // Only redirect to login on 401 for API calls — EST and other
+        // endpoints may legitimately return 401 for wrong credentials and
+        // the calling page should handle that itself.
+        const isApiCall = (typeof url === 'string') && url.startsWith(API_BASE);
+
         return _origFetch(url, opts).then(function (res) {
-            if (res.status === 401 && !onLoginPage) {
+            if (res.status === 401 && isApiCall && !onLoginPage) {
                 clearToken();
                 window.location.href = LOGIN_PAGE;
             }

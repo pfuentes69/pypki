@@ -1,6 +1,7 @@
 import base64
 import datetime
 import json
+import os
 
 import jwt
 from cryptography import x509
@@ -203,17 +204,46 @@ def get_certificate_details_json(cert_id):
     return ca_details
 
 
-def generate_certificate_from_csr(ca_template_config, csr_pem: bytes, return_certificate:bool = True):
+def generate_certificate_from_csr(ca_template_config, csr_pem: bytes,
+                                   return_certificate: bool = True,
+                                   request_json: str = None):
     certificate_der = pki.generate_certificate_from_csr(
         csr_pem=csr_pem,
         ca_id=ca_template_config["ca_id"],
         template_id=ca_template_config["template_id"],
-        request_json=None,
+        request_json=request_json,
         validity_days=PKITools.INFINITE_VALIDITY,
         enforce_template=True,
         return_certificate=return_certificate
     )
     return certificate_der
+
+def generate_pkcs12(ca_template_config, request_json: str,
+                    key_algorithm: str = "RSA", key_type: str = "2048",
+                    pfx_password: bytes = b"", friendly_name: bytes = b"MyCert",
+                    store_key: bool = False):
+    p12_bytes, cert_id = pki.generate_pkcs12(
+        request_json=request_json,
+        ca_id=ca_template_config["ca_id"],
+        template_id=ca_template_config["template_id"],
+        key_algorithm=key_algorithm,
+        key_type=key_type,
+        pfx_password=pfx_password,
+        friendly_name=friendly_name,
+        validity_days=PKITools.INFINITE_VALIDITY,
+        store_key=store_key,
+    )
+    return p12_bytes, cert_id
+
+
+def get_certificate_private_key_pem(cert_id: int):
+    """Returns (pem_str, storage_type) or (None, None)."""
+    return pki.get_certificate_private_key_pem(cert_id)
+
+
+def build_pkcs12_for_certificate(cert_id: int, pfx_password: bytes = b""):
+    return pki.build_pkcs12_for_certificate(cert_id, pfx_password=pfx_password)
+
 
 def get_ca_certificate(est_config, data):
     ca_certificate = pki.get_ca_certificate(ca_id=est_config["ca_id"])
@@ -238,6 +268,59 @@ def get_certificate_status(cert_id:int = None, ca_id:int = None, ca_ski:str = No
                 return None
         result = db.get_certificate_status(certificate_id=cert_id, ca_id=ca_id, serial_number=serial_number)
     return result if result else None
+
+
+def parse_csr(csr_pem: str) -> dict:
+    """Parse a PEM CSR and return subject fields and SAN values."""
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+
+    csr_bytes = csr_pem.encode() if isinstance(csr_pem, str) else csr_pem
+    csr = x509.load_pem_x509_csr(csr_bytes)
+
+    OID_MAP = {
+        NameOID.COMMON_NAME:              "commonName",
+        NameOID.COUNTRY_NAME:             "countryName",
+        NameOID.STATE_OR_PROVINCE_NAME:   "stateOrProvinceName",
+        NameOID.LOCALITY_NAME:            "localityName",
+        NameOID.ORGANIZATION_NAME:        "organizationName",
+        NameOID.ORGANIZATIONAL_UNIT_NAME: "organizationalUnitName",
+        NameOID.SERIAL_NUMBER:            "serialNumber",
+        NameOID.EMAIL_ADDRESS:            "emailAddress",
+        NameOID.GIVEN_NAME:               "givenName",
+        NameOID.SURNAME:                  "surname",
+        NameOID.TITLE:                    "title",
+        NameOID.STREET_ADDRESS:           "streetAddress",
+        NameOID.POSTAL_CODE:              "postalCode",
+        NameOID.PSEUDONYM:                "pseudonym",
+        NameOID.DOMAIN_COMPONENT:         "domainComponent",
+        NameOID.USER_ID:                  "userId",
+    }
+
+    subject = {}
+    for attr in csr.subject:
+        key = OID_MAP.get(attr.oid)
+        if key:
+            subject[key] = attr.value
+
+    san = {}
+    try:
+        san_ext = csr.extensions.get_extension_for_oid(
+            x509.ExtensionOID.SUBJECT_ALTERNATIVE_NAME
+        )
+        v = san_ext.value
+        dns    = list(v.get_values_for_type(x509.DNSName))
+        ips    = [str(ip) for ip in v.get_values_for_type(x509.IPAddress)]
+        emails = list(v.get_values_for_type(x509.RFC822Name))
+        uris   = list(v.get_values_for_type(x509.UniformResourceIdentifier))
+        if dns:    san["dnsNames"] = dns
+        if ips:    san["ipAddresses"] = ips
+        if emails: san["emailAddresses"] = emails
+        if uris:   san["uris"] = uris
+    except x509.ExtensionNotFound:
+        pass
+
+    return {"subject": subject, "san": san}
 
 
 def revoke_certificate(cert_id, revocation_reason):
@@ -369,6 +452,121 @@ def record_login(user_id: int):
     db = pki.get_db()
     with db.connection():
         db.update_last_login(user_id)
+
+
+_BACKUP_DIR = os.path.join("out", "backup")
+
+
+def list_backups() -> list:
+    """Return backup files sorted newest-first."""
+    import glob
+    files = sorted(glob.glob(os.path.join(_BACKUP_DIR, "*.bak")), reverse=True)
+    result = []
+    for path in files:
+        name = os.path.basename(path)
+        result.append({"filename": name, "size": os.path.getsize(path)})
+    return result
+
+
+def reset_pki_database() -> dict:
+    """Drop and recreate all tables, then seed defaults from config files."""
+    pki.reset_pki()
+    # Reload in-memory state to reflect the fresh DB
+    pki.load_template_collection()
+    pki.load_ca_collection()
+    pki.load_ocsp_responders()
+    return {"reset": True}
+
+
+def restore_database(filename: str) -> dict:
+    """Restore the DB from a named backup file."""
+    # Reject any path traversal attempts
+    if os.sep in filename or "/" in filename or ".." in filename:
+        raise ValueError("Invalid filename")
+    backup_file = os.path.join(_BACKUP_DIR, filename)
+    if not os.path.isfile(backup_file):
+        raise FileNotFoundError(f"Backup not found: {filename}")
+    pki.restore_backup(backup_file)
+    return {"restored": filename}
+
+
+def _sql_escape(v) -> str:
+    """Return a properly escaped SQL literal for a Python value."""
+    if v is None:
+        return "NULL"
+    if isinstance(v, bytes):
+        # Use hex notation — no quoting issues whatsoever
+        return "0x" + v.hex()
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    if isinstance(v, (int, float)):
+        return str(v)
+    # String (including datetime stringified below)
+    s = str(v)
+    # Escape in MySQL string-literal order (backslash first!)
+    s = s.replace("\\", "\\\\")
+    s = s.replace("'",  "\\'")
+    s = s.replace("\n", "\\n")
+    s = s.replace("\r", "\\r")
+    s = s.replace("\0", "\\0")
+    return f"'{s}'"
+
+
+def backup_database() -> dict:
+    """Dump the MySQL database to out/backup/YYYYmmddHHMM.bak using mysql.connector."""
+    import mysql.connector
+
+    db_cfg = pki.get_config_value("db_config", {})
+    host     = db_cfg.get("host", "localhost")
+    port     = int(db_cfg.get("port", 3306))
+    user     = db_cfg.get("user", "root")
+    password = db_cfg.get("password", "")
+    database = db_cfg.get("database", "")
+
+    backup_dir = os.path.join("out", "backup")
+    os.makedirs(backup_dir, exist_ok=True)
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M")
+    backup_file = os.path.join(backup_dir, f"{timestamp}.bak")
+
+    conn = mysql.connector.connect(
+        host=host, port=port, user=user, password=password, database=database
+    )
+    try:
+        cursor = conn.cursor()
+        with open(backup_file, "w", encoding="utf-8") as f:
+            f.write(f"-- PyPKI database backup\n")
+            f.write(f"-- Created: {datetime.datetime.now().isoformat()}\n")
+            f.write(f"-- Database: {database}\n\n")
+            f.write("SET FOREIGN_KEY_CHECKS=0;\n\n")
+
+            cursor.execute("SHOW TABLES")
+            tables = [row[0] for row in cursor.fetchall()]
+
+            for table in tables:
+                # Table structure
+                cursor.execute(f"SHOW CREATE TABLE `{table}`")
+                create_stmt = cursor.fetchone()[1]
+                f.write(f"DROP TABLE IF EXISTS `{table}`;\n")
+                f.write(f"{create_stmt};\n\n")
+
+                # Table data
+                cursor.execute(f"SELECT * FROM `{table}`")
+                rows = cursor.fetchall()
+                if rows:
+                    col_names = ", ".join(f"`{d[0]}`" for d in cursor.description)
+                    for row in rows:
+                        values = ", ".join(_sql_escape(v) for v in row)
+                        f.write(f"INSERT INTO `{table}` ({col_names}) VALUES ({values});\n")
+                    f.write("\n")
+
+            f.write("SET FOREIGN_KEY_CHECKS=1;\n")
+        cursor.close()
+    finally:
+        conn.close()
+
+    size = os.path.getsize(backup_file)
+    return {"filename": f"{timestamp}.bak", "path": backup_file, "size": size}
 
 
 def validate_jwt_token(token: str):

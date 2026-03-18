@@ -19,13 +19,15 @@
   <script src="/static/auth.js"></script>
   <script>
     // Role flags — available to all page scripts before DOMContentLoaded
-    const _authRole     = (window._auth.getCurrentUser() || {}).role || '';
-    window._isAdmin     = _authRole === 'superadmin' || _authRole === 'admin';
-    window._isOperator  = window._isAdmin || _authRole === 'user';  // admin + user; not auditor
+    const _authRole       = (window._auth.getCurrentUser() || {}).role || '';
+    window._isSuperAdmin  = _authRole === 'superadmin';
+    window._isAdmin       = window._isSuperAdmin || _authRole === 'admin';
+    window._isOperator    = window._isAdmin || _authRole === 'user';  // admin + user; not auditor
 
     document.addEventListener('DOMContentLoaded', function () {
-      if (!window._isAdmin)    document.querySelectorAll('[data-admin-only]').forEach(el => el.remove());
-      if (!window._isOperator) document.querySelectorAll('[data-operator-only]').forEach(el => el.remove());
+      if (!window._isSuperAdmin) document.querySelectorAll('[data-superadmin-only]').forEach(el => el.remove());
+      if (!window._isAdmin)      document.querySelectorAll('[data-admin-only]').forEach(el => el.remove());
+      if (!window._isOperator)   document.querySelectorAll('[data-operator-only]').forEach(el => el.remove());
     });
   </script>
 </head>
@@ -88,6 +90,11 @@
       <li class="nav-item" data-admin-only>
         <a href="/users_list.html" class="nav-link {% if active_nav == 'users_list' %}active{% endif %}">
           <i class="bi bi-people me-2"></i>Users
+        </a>
+      </li>
+      <li class="nav-item" data-superadmin-only>
+        <a href="/tools.html" class="nav-link {% if active_nav == 'tools' %}active{% endif %}">
+          <i class="bi bi-tools me-2"></i>Tools
         </a>
       </li>
     </ul>

@@ -11,7 +11,10 @@ start_time = time.time()  # Record start time
 
 print("Reset PKI Database")
 
-pki = PyPKI("config/config.aws.json")
+_DEFAULT_CONFIG = os.path.join(os.path.dirname(__file__), '..', 'config', 'config.json')
+config_path = sys.argv[1] if len(sys.argv) > 1 else _DEFAULT_CONFIG
+
+pki = PyPKI(config_path)
 
 pki.reset_pki()
 

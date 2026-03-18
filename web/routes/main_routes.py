@@ -20,8 +20,16 @@ def require_auth():
     # Let CORS preflight pass through
     if request.method == 'OPTIONS':
         return None
-    # Public endpoints that don't need a token
-    if request.endpoint == 'main.status':
+    # Public endpoints that don't need a token.
+    # CA certificates and CRLs are public PKI documents; any client must be
+    # able to fetch them without authenticating to the management API.
+    _PUBLIC = {
+        'main.status',
+        'main.download_ca_cert', 'main.download_ca_cert_der',
+        'main.get_ca_crl', 'main.get_ca_crl_der',
+        'main.download_crl',
+    }
+    if request.endpoint in _PUBLIC:
         return None
     auth = request.headers.get('Authorization', '')
     if not auth.startswith('Bearer '):
@@ -120,7 +128,8 @@ def download_ca_cert(ca_id):
 
 @bp.route('/ca/<int:ca_id>/crl', methods=['GET'])
 def get_ca_crl(ca_id):
-    logger.info(f"API - GET CRL from DB for CA ID {ca_id}")
+    """Download the latest CRL for this CA in PEM format."""
+    logger.info(f"API - GET CRL (PEM) for CA ID {ca_id}")
     ca_details = api_adapters.get_ca_details(ca_id)
     if not ca_details:
         abort(404, description="Certification Authority not found")
@@ -130,8 +139,56 @@ def get_ca_crl(ca_id):
     if not crl_record or not crl_record.get("crl_data"):
         abort(404, description="No CRL found for this CA")
     ca_name = ca_details.get("name", f"ca_{ca_id}").replace(" ", "_")
-    response = Response(crl_record["crl_data"], content_type="application/pkix-crl")
+    crl_pem = crl_record["crl_data"]
+    if isinstance(crl_pem, bytes):
+        crl_pem = crl_pem.decode("utf-8")
+    response = Response(crl_pem, content_type="application/x-pem-file")
+    response.headers["Content-Disposition"] = f'attachment; filename="{ca_name}.pem.crl"'
+    return response
+
+
+@bp.route('/ca/<int:ca_id>/crl/der', methods=['GET'])
+def get_ca_crl_der(ca_id):
+    """Download the latest CRL for this CA in DER format."""
+    from cryptography import x509 as _x509
+    from cryptography.hazmat.primitives import serialization as _ser
+    logger.info(f"API - GET CRL (DER) for CA ID {ca_id}")
+    ca_details = api_adapters.get_ca_details(ca_id)
+    if not ca_details:
+        abort(404, description="Certification Authority not found")
+    db = api_adapters.pki.get_db()
+    with db.connection():
+        crl_record = db.get_crl(ca_id)
+    if not crl_record or not crl_record.get("crl_data"):
+        abort(404, description="No CRL found for this CA")
+    ca_name = ca_details.get("name", f"ca_{ca_id}").replace(" ", "_")
+    crl_pem = crl_record["crl_data"]
+    if isinstance(crl_pem, str):
+        crl_pem = crl_pem.encode("utf-8")
+    crl_der = _x509.load_pem_x509_crl(crl_pem).public_bytes(_ser.Encoding.DER)
+    response = Response(crl_der, content_type="application/pkix-crl")
     response.headers["Content-Disposition"] = f'attachment; filename="{ca_name}.crl"'
+    return response
+
+
+@bp.route('/ca/<int:ca_id>/cert/der', methods=['GET'])
+def download_ca_cert_der(ca_id):
+    """Download the CA certificate in DER format."""
+    from cryptography import x509 as _x509
+    from cryptography.hazmat.primitives import serialization as _ser
+    logger.info(f"API - GET CA Certificate (DER) for CA ID {ca_id}")
+    ca_details = api_adapters.get_ca_details(ca_id)
+    if not ca_details:
+        abort(404, description="Certification Authority not found")
+    cert_pem = ca_details.get("certificate")
+    if not cert_pem:
+        abort(404, description="Certificate not available")
+    if isinstance(cert_pem, str):
+        cert_pem = cert_pem.encode("utf-8")
+    ca_name = ca_details.get("name", f"ca_{ca_id}").replace(" ", "_")
+    cert_der = _x509.load_pem_x509_certificate(cert_pem).public_bytes(_ser.Encoding.DER)
+    response = Response(cert_der, content_type="application/pkix-cert")
+    response.headers["Content-Disposition"] = f'attachment; filename="{ca_name}.der"'
     return response
 
 
@@ -151,6 +208,19 @@ def issue_crl(ca_id):
         "issue_date": result["issue_date"],
         "next_update": result["next_update"],
     })), 200
+
+
+@bp.route('/certificate/parse-csr', methods=['POST'])
+def parse_csr():
+    logger.info("API - POST Parse CSR")
+    data = request.get_json()
+    if not data or not data.get('csr'):
+        abort(400, description="Missing 'csr' field")
+    try:
+        result = api_adapters.parse_csr(data['csr'])
+    except Exception as e:
+        abort(400, description=f"Invalid CSR: {e}")
+    return jsonify(result), 200
 
 
 @bp.route('/certificate', methods=['GET'])
@@ -264,6 +334,18 @@ def issue_certificate_from_csr():
     # Optional parameter: return_certificate, default is True
     return_certificate = data.get('return_certificate', True)
 
+    # Build request_json from form-supplied subject/SAN if present.
+    # This lets the UI override or supplement what is in the CSR.
+    subject_data = data.get('subject') or {}
+    san_data     = data.get('san') or {}
+    if subject_data or san_data:
+        import json as _json
+        request_json = _json.dumps({
+            "subject_name": subject_data,
+            "subjectAltName": san_data,
+        })
+    else:
+        request_json = None
 
     request_config = {
         "ca_id": ca_id,
@@ -271,25 +353,129 @@ def issue_certificate_from_csr():
     }
 
     try:
-        result = api_adapters.generate_certificate_from_csr(request_config, csr_pem, return_certificate)
-        if result is None:
+        # Always get the cert_id so we can redirect the caller
+        cert_id = api_adapters.generate_certificate_from_csr(
+            request_config, csr_pem, return_certificate=False, request_json=request_json
+        )
+        if cert_id is None:
             abort(500, description="Certificate generation failed")
 
+        response_body = {"certificate_id": cert_id}
+
         if return_certificate:
-            # Serialize the certificate to PEM format
-            pem_cert = result.public_bytes(encoding=serialization.Encoding.PEM)
-            return jsonify({
-                "certificate_pem": pem_cert.decode('utf-8')
-            }), 201
-        else:
-            return jsonify({
-                "certificate_id": result  # assuming result is an ID (string or int)
-            }), 201
+            cert_details = api_adapters.get_certificate_details_json(cert_id)
+            if cert_details and cert_details.get("certificate_data"):
+                pem = cert_details["certificate_data"]
+                if isinstance(pem, bytes):
+                    pem = pem.decode('utf-8')
+                response_body["certificate_pem"] = pem
+
+        return jsonify(response_body), 201
 
     except Exception as e:
         logger.error(f"Error issuing certificate: {e}")
         abort(500, description="Internal Server Error")
 
+
+
+@bp.route('/certificate/issue-pkcs12', methods=['POST'])
+def issue_certificate_pkcs12():
+    logger.info("API - POST Issue Certificate (server-side key, PKCS12)")
+    err = _require_role('superadmin', 'admin', 'user')
+    if err: return err
+
+    data = request.get_json()
+    if not data:
+        abort(400, description="Missing JSON body")
+    if 'ca_id' not in data or 'template_id' not in data:
+        abort(400, description="Missing 'ca_id' or 'template_id' in request body")
+
+    ca_id       = data['ca_id']
+    template_id = data['template_id']
+    if not isinstance(ca_id, int) or not isinstance(template_id, int):
+        abort(400, description="'ca_id' and 'template_id' must be integers")
+
+    key_algorithm = data.get('key_algorithm', 'RSA')
+    key_type      = data.get('key_type', '2048')
+    passphrase    = data.get('passphrase', '')
+    pfx_password  = passphrase.encode() if passphrase else b""
+    friendly_name = data.get('friendly_name', 'Certificate').encode()
+    store_key     = bool(data.get('store_key', False))
+
+    subject_data = data.get('subject') or {}
+    san_data     = data.get('san') or {}
+    if subject_data or san_data:
+        import json as _json
+        request_json = _json.dumps({
+            "subject_name": subject_data,
+            "subjectAltName": san_data,
+        })
+    else:
+        request_json = None
+
+    request_config = {"ca_id": ca_id, "template_id": template_id}
+
+    try:
+        p12_bytes, cert_id = api_adapters.generate_pkcs12(
+            request_config,
+            request_json=request_json,
+            key_algorithm=key_algorithm,
+            key_type=key_type,
+            pfx_password=pfx_password,
+            friendly_name=friendly_name,
+            store_key=store_key,
+        )
+    except (ValueError, TypeError) as e:
+        logger.error(f"Error issuing PKCS12 (validation/build): {e}", exc_info=True)
+        abort(400, description=str(e))
+    except Exception as e:
+        logger.error(f"Error issuing PKCS12: {e}", exc_info=True)
+        abort(500, description="Certificate generation failed")
+
+    resp = Response(p12_bytes, content_type='application/x-pkcs12')
+    resp.headers['Content-Disposition'] = f'attachment; filename="certificate_{cert_id}.p12"'
+    resp.headers['X-Certificate-Id'] = str(cert_id)
+    return resp
+
+
+@bp.route('/certificate/private-key/<int:cert_id>', methods=['GET'])
+def get_certificate_private_key(cert_id):
+    logger.info(f"API - GET Private Key for cert {cert_id}")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
+
+    pem, storage_type = api_adapters.get_certificate_private_key_pem(cert_id)
+    if pem is None:
+        abort(404, description="Private key not found for this certificate")
+    if isinstance(pem, bytes):
+        pem = pem.decode()
+    return jsonify({"private_key_pem": pem, "storage_type": storage_type}), 200
+
+
+@bp.route('/certificate/pkcs12/<int:cert_id>', methods=['POST'])
+def download_certificate_pkcs12(cert_id):
+    logger.info(f"API - POST Download PKCS12 for cert {cert_id}")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
+
+    data = request.get_json() or {}
+    passphrase   = data.get('passphrase', '')
+    pfx_password = passphrase.encode() if passphrase else b""
+
+    try:
+        p12_bytes = api_adapters.build_pkcs12_for_certificate(cert_id, pfx_password=pfx_password)
+    except (ValueError, TypeError) as e:
+        abort(400, description="Could not decrypt the private key — wrong passphrase.")
+    except Exception as e:
+        logger.error(f"Error building PKCS12: {e}")
+        abort(500, description="Failed to build PKCS12")
+
+    if p12_bytes is None:
+        abort(404, description="Certificate not found or no private key stored")
+
+    resp = Response(p12_bytes, content_type='application/x-pkcs12')
+    resp.headers['Content-Disposition'] = f'attachment; filename="certificate_{cert_id}.p12"'
+    return resp
 
 
 @bp.route("/ca/crl/<int:ca_id>", methods=["GET"])
@@ -605,3 +791,58 @@ def create_template():
     if template_id is None:
         abort(500, description="Failed to create template")
     return jsonify({"message": "Template created successfully", "template_id": template_id}), 201
+
+
+# ── Tools (superadmin only) ───────────────────────────────────────────────────
+
+@bp.route('/tools/backup-db', methods=['POST'])
+def backup_db():
+    logger.info("API - POST Backup Database")
+    err = _require_role('superadmin')
+    if err: return err
+    try:
+        result = api_adapters.backup_database()
+    except RuntimeError as e:
+        abort(500, description=f"Backup failed: {e}")
+    return jsonify(result), 200
+
+
+@bp.route('/tools/reset-pki', methods=['POST'])
+def reset_pki():
+    logger.info("API - POST Reset PKI")
+    err = _require_role('superadmin')
+    if err: return err
+    try:
+        result = api_adapters.reset_pki_database()
+    except Exception as e:
+        logger.error(f"Reset PKI failed: {e}")
+        abort(500, description=f"Reset failed: {e}")
+    return jsonify(result), 200
+
+
+@bp.route('/tools/backups', methods=['GET'])
+def list_backups():
+    logger.info("API - GET Backup List")
+    err = _require_role('superadmin')
+    if err: return err
+    return jsonify(api_adapters.list_backups()), 200
+
+
+@bp.route('/tools/restore-db', methods=['POST'])
+def restore_db():
+    logger.info("API - POST Restore Database")
+    err = _require_role('superadmin')
+    if err: return err
+    data = request.get_json()
+    if not data or not data.get('filename'):
+        abort(400, description="Missing 'filename' in request body")
+    try:
+        result = api_adapters.restore_database(data['filename'])
+    except FileNotFoundError as e:
+        abort(404, description=str(e))
+    except (ValueError, RuntimeError) as e:
+        abort(400, description=str(e))
+    except Exception as e:
+        logger.error(f"Restore failed: {e}")
+        abort(500, description=f"Restore failed: {e}")
+    return jsonify(result), 200

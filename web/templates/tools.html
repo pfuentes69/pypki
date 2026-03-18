@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item active">Tools</li>
+  </ol>
+</nav>
+<h4 class="mb-4"><i class="bi bi-tools me-2"></i>Tools</h4>
+
+<div id="accessDenied" class="alert alert-warning d-none">
+  <i class="bi bi-shield-exclamation me-2"></i>You do not have permission to use this page.
+</div>
+
+<div id="toolsContent" class="d-none">
+
+  <!-- Backup -->
+  <div class="card mb-4" style="max-width: 640px;">
+    <div class="card-header"><i class="bi bi-database-down me-2"></i>Database Backup</div>
+    <div class="card-body">
+      <p class="card-text text-muted small mb-3">
+        Creates a full dump of the database and saves it to <code>out/backup/</code> with a
+        timestamp filename (<code>YYYYmmddHHMM.bak</code>).
+      </p>
+      <button class="btn btn-primary" id="btnBackup" onclick="runBackup()">
+        <i class="bi bi-download me-1"></i>Backup Now
+      </button>
+    </div>
+  </div>
+
+  <!-- Reset PKI -->
+  <div class="card mb-4 border-danger" style="max-width: 640px;">
+    <div class="card-header text-danger"><i class="bi bi-arrow-repeat me-2"></i>Reset PKI</div>
+    <div class="card-body">
+      <p class="card-text text-muted small mb-3">
+        Drops and recreates all database tables, then re-seeds from the config files
+        (CA store, templates, OCSP responders). The default <strong>superadmin</strong> account is recreated.
+        <strong class="text-danger">All certificates, users and custom data will be permanently deleted.</strong>
+      </p>
+      <button class="btn btn-danger" onclick="confirmReset()">
+        <i class="bi bi-arrow-repeat me-1"></i>Reset PKI
+      </button>
+    </div>
+  </div>
+
+  <!-- Restore -->
+  <div class="card mb-4" style="max-width: 640px;">
+    <div class="card-header"><i class="bi bi-database-up me-2"></i>Restore Backup</div>
+    <div class="card-body">
+      <p class="card-text text-muted small mb-3">
+        Restores the database from a previously created backup file.
+        <strong class="text-danger">This will overwrite all current data.</strong>
+      </p>
+      <div class="mb-3">
+        <label class="form-label">Select backup file</label>
+        <select class="form-select" id="backupSelect">
+          <option value="">Loading…</option>
+        </select>
+      </div>
+      <button class="btn btn-danger" id="btnRestore" onclick="confirmRestore()" disabled>
+        <i class="bi bi-arrow-counterclockwise me-1"></i>Restore Selected Backup
+      </button>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block modals %}
+<!-- Reset PKI confirmation modal -->
+<div class="modal fade" id="resetModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-exclamation-triangle-fill text-danger me-2"></i>Confirm PKI Reset</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-danger fw-semibold">This will permanently delete ALL data in the database.</p>
+        <p class="mb-0">The database will be rebuilt from the config files. All issued certificates, users and configuration changes will be lost. This cannot be undone.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-danger" id="btnConfirmReset" onclick="runReset()">
+          <i class="bi bi-arrow-repeat me-1"></i>Yes, Reset Now
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Restore confirmation modal -->
+<div class="modal fade" id="restoreModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-exclamation-triangle-fill text-danger me-2"></i>Confirm Restore</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p>You are about to restore:</p>
+        <p><strong id="restoreFilename" class="font-monospace"></strong></p>
+        <p class="text-danger mb-0">All current database data will be <strong>permanently overwritten</strong>. This cannot be undone.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-danger" id="btnConfirmRestore" onclick="runRestore()">
+          <i class="bi bi-arrow-counterclockwise me-1"></i>Yes, Restore Now
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let restoreModal, resetModal;
+
+  window.onload = async function () {
+    if (!window._isSuperAdmin) {
+      document.getElementById('accessDenied').classList.remove('d-none');
+      return;
+    }
+    document.getElementById('toolsContent').classList.remove('d-none');
+    resetModal   = new bootstrap.Modal(document.getElementById('resetModal'));
+    restoreModal = new bootstrap.Modal(document.getElementById('restoreModal'));
+    await loadBackups();
+  };
+
+  async function loadBackups() {
+    const sel = document.getElementById('backupSelect');
+    const btn = document.getElementById('btnRestore');
+    try {
+      const res = await fetch(`${apiBase}/tools/backups`, {
+        headers: { 'Authorization': 'Bearer ' + window._auth.getToken() }
+      });
+      const files = await res.json();
+      if (!files.length) {
+        sel.innerHTML = '<option value="">No backups available</option>';
+        btn.disabled = true;
+        return;
+      }
+      sel.innerHTML = files.map(f =>
+        `<option value="${escHtml(f.filename)}">${escHtml(f.filename)} &nbsp;(${(f.size / 1024).toFixed(1)} KB)</option>`
+      ).join('');
+      btn.disabled = false;
+    } catch (err) {
+      sel.innerHTML = '<option value="">Failed to load backups</option>';
+      showToast('Could not load backup list: ' + err.message, 'danger');
+    }
+  }
+
+  async function runBackup() {
+    const btn = document.getElementById('btnBackup');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Backing up…';
+    try {
+      const res = await fetch(`${apiBase}/tools/backup-db`, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + window._auth.getToken() }
+      });
+      let data = {};
+      try { data = await res.json(); } catch (_) {}
+      if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+      showToast(`Backup created: <strong>${data.filename}</strong> (${(data.size / 1024).toFixed(1)} KB)`);
+      await loadBackups();
+    } catch (err) {
+      showToast('Backup failed: ' + err.message, 'danger');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-download me-1"></i>Backup Now';
+    }
+  }
+
+  function confirmRestore() {
+    const filename = document.getElementById('backupSelect').value;
+    if (!filename) return;
+    document.getElementById('restoreFilename').textContent = filename;
+    restoreModal.show();
+  }
+
+  async function runRestore() {
+    const filename = document.getElementById('backupSelect').value;
+    const btn = document.getElementById('btnConfirmRestore');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Restoring…';
+    try {
+      const res = await fetch(`${apiBase}/tools/restore-db`, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + window._auth.getToken(),
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ filename })
+      });
+      let data = {};
+      try { data = await res.json(); } catch (_) {}
+      restoreModal.hide();
+      if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+      showToast(`Database restored from <strong>${filename}</strong> successfully.`);
+    } catch (err) {
+      showToast('Restore failed: ' + err.message, 'danger');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-arrow-counterclockwise me-1"></i>Yes, Restore Now';
+    }
+  }
+
+  function confirmReset() {
+    resetModal.show();
+  }
+
+  async function runReset() {
+    const btn = document.getElementById('btnConfirmReset');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Resetting…';
+    try {
+      const res = await fetch(`${apiBase}/tools/reset-pki`, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + window._auth.getToken() }
+      });
+      let data = {};
+      try { data = await res.json(); } catch (_) {}
+      resetModal.hide();
+      if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+      showToast('PKI reset successfully. Database rebuilt from config files.');
+    } catch (err) {
+      showToast('Reset failed: ' + err.message, 'danger');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-arrow-repeat me-1"></i>Yes, Reset Now';
+    }
+  }
+
+  function escHtml(str) {
+    if (str == null) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+</script>
+{% endblock %}
