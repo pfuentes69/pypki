@@ -184,21 +184,39 @@ Key endpoints:
 | GET | `/api/certificate/<id>` | Certificate details |
 | GET | `/api/certificate/pem/<id>` | Download certificate PEM |
 | POST | `/api/certificate/revoke/<id>` | Revoke a certificate |
+| GET | `/api/est` | List EST aliases |
+| POST | `/api/est` | Create EST alias |
+| GET | `/api/est/<id>` | Get EST alias |
+| PUT | `/api/est/<id>` | Update EST alias |
+| DELETE | `/api/est/<id>` | Delete EST alias |
+| POST | `/api/est/<id>/set-default` | Set default EST alias |
 | POST | `/api/kms/generate-key` | Generate a key via the KMS |
-| GET | `/.well-known/est/...` | EST endpoints (cacerts, simpleenroll, …) |
+| GET | `/.well-known/est[/<label>]/cacerts` | CA certificate (public, no auth) |
+| POST | `/.well-known/est[/<label>]/simpleenroll` | Enroll via CSR → PKCS#7 (Basic Auth if configured) |
+| POST | `/.well-known/est[/<label>]/simpleenrollpem` | Enroll via CSR → PEM, non-standard (Basic Auth if configured) |
 
 ---
 
 ## Management interface
 
-Open `web/html/index.html` in a browser while the API server is running. The interface provides:
+Open `web/html/index.html` in a browser while the API server is running. The interface is organised into four sidebar sections:
 
-- **Dashboard** — system overview
+**Certificates**
+- **Dashboard** — system overview (metrics, CA summary, recent activity)
 - **Certificates** — list, inspect, and revoke issued certificates
-- **Request** — issue a certificate from a CSR
-- **CA Certificate** — download the active CA certificate
+- **Request** — issue a certificate from a JSON payload
+- **CSR Tool** — browser-based key and CSR generator (ECC P-256 or RSA 2048, no server round-trip)
+
+**Certification Authorities**
+- **CAs & CRL** — CA list, certificate chain and CRL download
 - **Templates** — list, edit, create, and export certificate templates
-- **KMS → Key Generation** — generate RSA, ECDSA, Ed25519, or AES keys
+
+**EST Service**
+- **EST Config** — manage EST enrollment aliases (CA + template binding, Basic Auth credentials)
+- **EST Test** — interactively test `cacerts` and `simpleenroll` endpoints against a selected alias
+
+**KMS**
+- **Key Generation** — generate RSA, ECDSA, Ed25519, or AES keys
 
 The static pages talk directly to the API at `http://127.0.0.1:8080/api`.
 
@@ -231,6 +249,7 @@ Tests that use a CA load its configuration directly from `config/ca_store/` and 
 | `utils/reset_pki.py` | Recreate the database from scratch and reload all config |
 | `utils/migrate_keystorage.py` | Schema upgrade: rename `PrivateKeyStorage` → `KeyStorage`, add `key_type` / `public_key` columns, backfill `key_type` from existing key material |
 | `utils/migrate_keys_to_kms.py` | Move CA and OCSP private keys into `KeyStorage`, populate `private_key_reference` |
+| `utils/migrate_est_auth_fields.py` | Idempotent schema upgrade: add `username`, `password_hash`, `cert_fingerprint` columns to `ESTAliases` (for existing databases — not needed on fresh installs) |
 | `utils/generate_crls.py` | Generate and export CRLs for all active CAs |
 | `utils/generate_sample_certs.py` | Issue a batch of sample certificates |
 

@@ -1226,6 +1226,142 @@ class PKIDataBase:
                 cursor.close()
 
 
+    # ── User management ───────────────────────────────────────────────────────
+
+    def get_users(self):
+        """Return all users, never exposing password_hash."""
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute("""
+                SELECT id, username, role, is_active, last_login, created_at, updated_at
+                FROM Users
+                ORDER BY username
+            """)
+            rows = cursor.fetchall()
+            cursor.close()
+            return rows
+        except mysql.connector.Error as err:
+            logger.error(f"Database error: {err}")
+            return []
+
+    def get_user(self, user_id):
+        """Return a single user by id, never exposing password_hash."""
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute("""
+                SELECT id, username, role, is_active, last_login, created_at, updated_at
+                FROM Users WHERE id = %s
+            """, (user_id,))
+            row = cursor.fetchone()
+            cursor.close()
+            return row
+        except mysql.connector.Error as err:
+            logger.error(f"Database error: {err}")
+            return None
+
+    def create_user(self, username, password_hash, role):
+        """Insert a new user. Returns the new id, or None on failure.
+        Raises ValueError('username_taken') if the username already exists."""
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor()
+            cursor.execute(f"USE {db_name}")
+            cursor.execute(
+                "INSERT INTO Users (username, password_hash, role) VALUES (%s, %s, %s)",
+                (username, password_hash, role)
+            )
+            self._local.connection.commit()
+            new_id = cursor.lastrowid
+            cursor.close()
+            return new_id
+        except mysql.connector.IntegrityError as err:
+            if err.errno == 1062:
+                raise ValueError("username_taken")
+            logger.error(f"Database error: {err}")
+            return None
+        except mysql.connector.Error as err:
+            logger.error(f"Database error: {err}")
+            return None
+
+    def update_user(self, user_id, fields: dict):
+        """
+        Update mutable user fields. Accepted keys: username, password_hash, role, is_active.
+        password_hash is only updated when present in the dict.
+        """
+        allowed = {'username', 'password_hash', 'role', 'is_active'}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return False
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor()
+            cursor.execute(f"USE {db_name}")
+            set_clause = ", ".join(f"`{k}` = %s" for k in updates)
+            values = list(updates.values()) + [user_id]
+            cursor.execute(f"UPDATE Users SET {set_clause} WHERE id = %s", values)
+            self._local.connection.commit()
+            affected = cursor.rowcount
+            cursor.close()
+            return affected > 0
+        except mysql.connector.Error as err:
+            logger.error(f"Database error: {err}")
+            return False
+
+    def delete_user(self, user_id):
+        """Delete a user by id. Returns True if a row was removed."""
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor()
+            cursor.execute(f"USE {db_name}")
+            cursor.execute("DELETE FROM Users WHERE id = %s", (user_id,))
+            self._local.connection.commit()
+            affected = cursor.rowcount
+            cursor.close()
+            return affected > 0
+        except mysql.connector.IntegrityError as err:
+            if err.errno == 1062:
+                raise ValueError("username_taken")
+            logger.error(f"Database error: {err}")
+            return False
+        except mysql.connector.Error as err:
+            logger.error(f"Database error: {err}")
+            return False
+
+    def get_user_by_username(self, username: str):
+        """Return a single user including password_hash (for authentication only)."""
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute("""
+                SELECT id, username, password_hash, role, is_active, last_login, created_at
+                FROM Users WHERE username = %s
+            """, (username,))
+            row = cursor.fetchone()
+            cursor.close()
+            return row
+        except mysql.connector.Error as err:
+            logger.error(f"Database error: {err}")
+            return None
+
+    def update_last_login(self, user_id: int):
+        """Set last_login = NOW() for the given user."""
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor()
+            cursor.execute(f"USE {db_name}")
+            cursor.execute("UPDATE Users SET last_login = NOW() WHERE id = %s", (user_id,))
+            self._local.connection.commit()
+            cursor.close()
+        except mysql.connector.Error as err:
+            logger.error(f"Database error: {err}")
+
+    # ─────────────────────────────────────────────────────────────────────────
+
     def create_database(self):
         db_name = self.__config["database"]
 
@@ -1375,6 +1511,18 @@ class PKIDataBase:
                         action_details JSON,
                         user_id INT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """,
+                "Users": """
+                    CREATE TABLE IF NOT EXISTS Users (
+                        id INT PRIMARY KEY AUTO_INCREMENT,
+                        username VARCHAR(255) NOT NULL UNIQUE,
+                        password_hash VARCHAR(255) NOT NULL,
+                        role ENUM('superadmin', 'admin', 'user', 'auditor') NOT NULL DEFAULT 'user',
+                        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                        last_login TIMESTAMP NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                     );
                 """
             }

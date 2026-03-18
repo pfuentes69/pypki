@@ -83,7 +83,7 @@ Key methods:
 Represents a CA with its certificate, private key, and chain. Supports both software keys (PEM) and HSM-based keys (PKCS#11). Generates collision-free serial numbers.
 
 ### `db.py` — `PKIDataBase`
-All database operations against MySQL.
+All database operations against MySQL. Uses a `MySQLConnectionPool` (configurable pool size via `"pool_size"` in `db_config`, default 5) with `threading.local()` for per-thread connection checkout, making it safe for multi-threaded Flask deployments.
 
 Tables:
 | Table | Purpose |
@@ -93,7 +93,7 @@ Tables:
 | `CertificateTemplates` | JSON-encoded certificate templates |
 | `OCSPResponders` | OCSP responder configs |
 | `KeyStorage` | Asymmetric and symmetric keys (plain/encrypted/HSM) |
-| `ESTAliases` | EST protocol alias → CA + template mapping |
+| `ESTAliases` | EST alias → CA + template mapping, with optional Basic Auth credentials |
 | `CertificateLogs` | Certificate lifecycle audit log |
 | `CertificateRevocationLists` | Stored CRL records |
 | `AuditLogs` | Security audit trail |
@@ -105,7 +105,7 @@ Generates signed OCSP responses. Matches requests by issuer SKI. Supports Good, 
 Key generation and management. Supports RSA (2048/3072/4096) and ECDSA (P-256/P-384/P-521). Can delegate key operations to HSM via PKCS#11.
 
 ### `pki_tools.py` — `PKITools`
-OID mappings, revocation reason codes, and utility helpers for certificate parsing and format conversion.
+Shared constants: `OID_MAPPING` (OID → human-readable name dict) and `REVOCATION_REASONS` (RFC 5280 reason code → description dict). No methods — callers access the dicts directly.
 
 ---
 
@@ -134,7 +134,12 @@ Creates the Flask app with CORS enabled and registers three blueprints:
 | GET | `/api/template/<id>` | Template details |
 | POST | `/api/template` | Create template |
 | PUT | `/api/template/<id>` | Update template |
-| GET | `/api/getestaliases` | List EST aliases |
+| GET | `/api/est` | List EST aliases |
+| POST | `/api/est` | Create EST alias |
+| GET | `/api/est/<id>` | Get EST alias |
+| PUT | `/api/est/<id>` | Update EST alias (password only re-hashed when provided) |
+| DELETE | `/api/est/<id>` | Delete EST alias |
+| POST | `/api/est/<id>/set-default` | Set default EST alias (clears previous default) |
 
 ### OCSP routes (`api/routes/ocsp_routes.py`)
 
@@ -147,13 +152,13 @@ Parses serial number and issuer SKI from the request, queries certificate status
 ### EST routes (`api/routes/est_routes.py`)
 Implements RFC 7030 EST (Enrollment over Secure Transport):
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/.well-known/est[/<label>]/cacerts` | CA certificate chain (PEM) |
-| POST | `/.well-known/est[/<label>]/simpleenroll` | Enroll via CSR → PKCS#7 response |
-| POST | `/.well-known/est[/<label>]/simpleenrollpem` | Enroll via CSR → PEM response (non-standard) |
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/.well-known/est[/<label>]/cacerts` | None (public) | CA certificate chain (PEM) |
+| POST | `/.well-known/est[/<label>]/simpleenroll` | Basic Auth (if configured) | Enroll via CSR → PKCS#7 response |
+| POST | `/.well-known/est[/<label>]/simpleenrollpem` | Basic Auth (if configured) | Enroll via CSR → PEM response (non-standard) |
 
-Supports labeled enrollment via `<label>` mapped to EST aliases.
+`<label>` maps to an `ESTAliases` record; omitting it uses the default alias. When the alias has a `username` set, `simpleenroll` and `simpleenrollpem` require HTTP Basic Auth with matching credentials verified against the stored PBKDF2-SHA256 hash. Returns `401 Unauthorized` with `WWW-Authenticate: Basic realm="EST"` on failure. `cacerts` is always public per RFC 7030.
 
 ### Service init (`api/services/__init__.py`)
 Initializes the global `pki` instance and starts a background CRL generation task (APScheduler, every 10 minutes). CRLs are written to `out/crl/` in both DER and PEM formats.
@@ -200,12 +205,24 @@ Per-CA configuration:
 
 ## Web Frontend (`web/`)
 
-Simple Flask UI (port 5000) for manual certificate operations:
-- Request certificate via form or CSR upload
-- Download CA certificate
-- Communicates with the EST server at `http://127.0.0.1:8080/.well-known/est`
+Static HTML management UI in `web/html/` (Bootstrap 5 + Bootstrap Icons). Pages communicate directly with the API at `http://127.0.0.1:8080/api` via `fetch`. No server-side rendering — open directly in a browser.
 
-Static HTML prototypes in `web/tests/`: certificate list, certificate details, certificate request.
+| Page | Description |
+|---|---|
+| `index.html` | Dashboard — metrics, CA overview, health check |
+| `certificate_list.html` | Certificate inventory with status filtering |
+| `certificate_request.html` | Issue a certificate from a JSON payload |
+| `csr_tool.html` | Browser-based CSR generator (ECC P-256 / RSA 2048, key never leaves browser) |
+| `cas_and_crls.html` | CA list, chain download, CRL download |
+| `ca_details.html` | Single CA details |
+| `template_list.html` | Certificate template inventory |
+| `template_editor.html` | Create / edit certificate templates |
+| `est_list.html` | EST alias management (EST Config) |
+| `est_editor.html` | Create / edit EST alias |
+| `est_test.html` | Interactive EST endpoint tester (cacerts and simpleenroll) |
+| `kms_keygen.html` | KMS key generation |
+
+A legacy Flask app (`web/app.py`) provides a minimal Jinja2 UI on port 5000 for manual EST operations; the static `web/html/` pages are the primary interface.
 
 ---
 
@@ -234,8 +251,9 @@ Static HTML prototypes in `web/tests/`: certificate list, certificate details, c
 
 ## Current Status
 
-Recent commits reflect active development:
-- `d0c46bf` — Resources (CAs, templates, OCSP responders) now loaded into memory on startup for performance
-- `43684ba` — OCSP responder fully functional
-- `ac8437b` — EST alias support, logging improvements
-- `f05ae28` — API integrated with PyPKI core and MySQL database
+Recent work:
+- **EST Basic Auth** — `ESTAliases` stores `username` + PBKDF2-SHA256 `password_hash`; `simpleenroll`/`simpleenrollpem` enforce auth when configured; `cacerts` is public per RFC 7030
+- **EST management UI** — full CRUD web pages (`est_list.html`, `est_editor.html`) and interactive tester (`est_test.html`)
+- **CSR Tool** — browser-side key and CSR generation (`csr_tool.html`), no server round-trip; supports ECC P-256 and RSA 2048 with SAN
+- **DB connection pool** — `PKIDataBase` replaced single shared connection with `MySQLConnectionPool` + `threading.local()` for thread-safe multi-request handling
+- **EST admin API** — full CRUD REST endpoints at `/api/est` for alias management

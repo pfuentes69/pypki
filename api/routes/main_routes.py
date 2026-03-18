@@ -1,7 +1,7 @@
 import json
 import re
 
-from flask import Blueprint, jsonify, request, abort, Response, send_from_directory
+from flask import Blueprint, jsonify, request, abort, Response, send_from_directory, g
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import pkcs7
 from api.services import api_adapters
@@ -13,6 +13,25 @@ from pypki import logger
 CRL_FOLDER = "../out/crl"
 
 bp = Blueprint('main', __name__)
+
+
+@bp.before_request
+def require_auth():
+    # Let CORS preflight pass through
+    if request.method == 'OPTIONS':
+        return None
+    # Public endpoints that don't need a token
+    if request.endpoint == 'main.status':
+        return None
+    auth = request.headers.get('Authorization', '')
+    if not auth.startswith('Bearer '):
+        return jsonify({"error": "Unauthorized"}), 401
+    token = auth[7:]
+    user = api_adapters.validate_jwt_token(token)
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+    g.current_user = user
+
 
 @bp.route("/status", methods=["GET"])
 def status():
@@ -424,6 +443,135 @@ def kms_generate_key():
     except ValueError as e:
         abort(400, description=str(e))
     return jsonify(result), 200
+
+
+# ── User management ──────────────────────────────────────────────────────────
+
+BUILTIN_SUPERADMIN = 'superadmin'
+
+
+def _require_role(*roles):
+    user = getattr(g, 'current_user', None)
+    if not user or user.get('role') not in roles:
+        return jsonify({"error": "Forbidden"}), 403
+    return None
+
+
+@bp.route('/users', methods=['GET'])
+def list_users():
+    logger.info("API - GET User List")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
+    users = api_adapters.get_users()
+    return jsonify(api_adapters.convert_to_serializable(users)), 200
+
+
+@bp.route('/users', methods=['POST'])
+def create_user():
+    logger.info("API - POST Create User")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
+
+    data = request.get_json()
+    if not data:
+        abort(400, description="Missing JSON body")
+    if not data.get("username"):
+        abort(400, description="Missing required field: username")
+    if not data.get("password"):
+        abort(400, description="Missing required field: password")
+
+    requested_role = data.get("role", "user")
+    current_role = g.current_user.get('role')
+    if requested_role in ('superadmin', 'admin') and current_role != 'superadmin':
+        return jsonify({"error": "Forbidden", "description": "Only superadmins can create admin or superadmin accounts"}), 403
+
+    try:
+        user_id = api_adapters.create_user(data)
+    except ValueError as e:
+        if str(e) == "username_taken":
+            abort(409, description="Username already exists")
+        raise
+    if user_id is None:
+        abort(500, description="Failed to create user")
+    return jsonify({"message": "User created successfully", "user_id": user_id}), 201
+
+
+@bp.route('/users/<int:user_id>', methods=['GET'])
+def get_user(user_id):
+    logger.info(f"API - GET User {user_id}")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
+    user = api_adapters.get_user(user_id)
+    if not user:
+        abort(404, description="User not found")
+    return jsonify(api_adapters.convert_to_serializable(user)), 200
+
+
+@bp.route('/users/<int:user_id>', methods=['PUT'])
+def update_user(user_id):
+    logger.info(f"API - PUT Update User {user_id}")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
+
+    data = request.get_json()
+    if not data:
+        abort(400, description="Missing JSON body")
+
+    current_role     = g.current_user.get('role')
+    current_username = g.current_user.get('username')
+
+    target = api_adapters.get_user(user_id)
+    if not target:
+        abort(404, description="User not found")
+
+    target_username = target.get('username')
+    target_role     = target.get('role')
+
+    if target_username == BUILTIN_SUPERADMIN:
+        # Built-in superadmin can only be edited by themselves, password only
+        if current_username != BUILTIN_SUPERADMIN:
+            return jsonify({"error": "Forbidden", "description": "The built-in superadmin account can only be modified by the superadmin user themselves"}), 403
+        allowed = {'password'}
+        disallowed = [k for k in data if k not in allowed]
+        if disallowed:
+            return jsonify({"error": "Forbidden", "description": "Only the password can be changed for the built-in superadmin account"}), 403
+    elif target_role in ('superadmin', 'admin'):
+        if current_role != 'superadmin':
+            return jsonify({"error": "Forbidden", "description": "Only superadmins can modify admin or superadmin accounts"}), 403
+    # user/auditor targets: both admin and superadmin can modify
+
+    try:
+        ok = api_adapters.update_user(user_id, data)
+    except ValueError as e:
+        if str(e) == "username_taken":
+            abort(409, description="Username already exists")
+        raise
+    if not ok:
+        abort(404, description="User not found or nothing to update")
+    return jsonify({"message": "User updated successfully"}), 200
+
+
+@bp.route('/users/<int:user_id>', methods=['DELETE'])
+def delete_user(user_id):
+    logger.info(f"API - DELETE User {user_id}")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
+
+    target = api_adapters.get_user(user_id)
+    if not target:
+        abort(404, description="User not found")
+
+    if target.get('username') == BUILTIN_SUPERADMIN:
+        return jsonify({"error": "Forbidden", "description": "The built-in superadmin account cannot be deleted"}), 403
+
+    if target.get('role') in ('superadmin', 'admin'):
+        if g.current_user.get('role') != 'superadmin':
+            return jsonify({"error": "Forbidden", "description": "Only superadmins can delete admin or superadmin accounts"}), 403
+
+    ok = api_adapters.delete_user(user_id)
+    if not ok:
+        abort(404, description="User not found")
+    return jsonify({"message": "User deleted successfully"}), 200
 
 
 @bp.route('/template', methods=['POST'])

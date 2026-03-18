@@ -71,6 +71,9 @@ class PyPKI:
     def get_kms(self) -> KeyManagementService:
         return self.__kms
 
+    def get_config_value(self, key, default=None):
+        return self.__config.get(key, default)
+
 
     def create_ca_from_config_json(self, config_json: str):
         ca = CertificationAuthority()

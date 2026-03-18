@@ -2,11 +2,43 @@ import base64
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import pkcs7
 from flask import Blueprint, request, Response, jsonify
+from werkzeug.security import check_password_hash
 from api.services import api_adapters
 
 from pypki import logger
 
 bp = Blueprint('est', __name__)
+
+
+def _check_basic_auth(est_config) -> bool:
+    """
+    Validates HTTP Basic Auth credentials against the EST alias config.
+
+    Returns True if:
+    - No username is configured for the alias (auth not required), or
+    - The provided credentials match the stored username and password hash.
+
+    Returns False if credentials are missing or incorrect.
+    """
+    username = est_config.get("username") if est_config else None
+    if not username:
+        return True  # auth not required for this alias
+
+    auth = request.authorization
+    if not auth or auth.type != "basic":
+        return False
+
+    password_hash = est_config.get("password_hash") or ""
+    return auth.username == username and check_password_hash(password_hash, auth.password)
+
+
+def _unauthorized():
+    """Returns a 401 response with WWW-Authenticate header (RFC 7235)."""
+    return Response(
+        "Unauthorized",
+        status=401,
+        headers={"WWW-Authenticate": 'Basic realm="EST"'},
+    )
 
 @bp.route('/est/<path:label>/cacerts', methods=['GET'])
 @bp.route('/est/cacerts', methods=['GET'])
@@ -20,7 +52,7 @@ def get_ca_certs(label=None):
     else:
         logger.error(f"Label not valid")
         return Response(f"Invalid label {label}", status=404)
-        
+
     ca_cert = api_adapters.get_ca_certificate(est_config, request.data)
     
     if not ca_cert:
@@ -48,6 +80,9 @@ def simple_enroll(label=None):
         else:
             logger.error(f"Label not valid")
             return Response("Invalid label", status=404)
+
+    if not _check_basic_auth(est_config):
+        return _unauthorized()
 
     try:
         csr_pem = request.data
@@ -90,6 +125,9 @@ def simple_enroll_pem(label=None):
         else:
             logger.error(f"Label not valid")
             return Response("Invalid label", status=404)
+
+    if not _check_basic_auth(est_config):
+        return _unauthorized()
 
     try:
         csr_pem = request.data

@@ -15,6 +15,7 @@
     #sidebar .nav-section { color: #6c757d; font-size: 0.7rem; text-transform: uppercase; letter-spacing: .08em; padding: 1rem 1.25rem 0.25rem; }
     #main { flex: 1; min-width: 0; overflow-y: auto; }
   </style>
+  <script src="auth.js"></script>
 </head>
 <body>
 
@@ -26,13 +27,27 @@
       <div class="nav-section">Certificates</div>
       <li class="nav-item"><a href="certificate_list.html" class="nav-link"><i class="bi bi-card-list me-2"></i>Certificates</a></li>
       <li class="nav-item"><a href="certificate_request.html" class="nav-link"><i class="bi bi-file-earmark-plus me-2"></i>Request</a></li>
+      <li class="nav-item"><a href="csr_tool.html" class="nav-link"><i class="bi bi-file-earmark-lock me-2"></i>CSR Tool</a></li>
       <div class="nav-section">Certification Authorities</div>
       <li class="nav-item"><a href="cas_and_crls.html" class="nav-link"><i class="bi bi-building me-2"></i>CAs & CRL</a></li>
-      <li class="nav-item"><a href="est_list.html" class="nav-link active"><i class="bi bi-person-badge me-2"></i>EST Enrollment</a></li>
       <li class="nav-item"><a href="template_list.html" class="nav-link"><i class="bi bi-file-earmark-code me-2"></i>Templates</a></li>
+      <div class="nav-section">EST Service</div>
+      <li class="nav-item"><a href="est_list.html" class="nav-link active"><i class="bi bi-person-badge me-2"></i>EST Config</a></li>
+      <li class="nav-item"><a href="est_test.html" class="nav-link"><i class="bi bi-play-circle me-2"></i>EST Test</a></li>
       <div class="nav-section">KMS</div>
       <li class="nav-item"><a href="kms_keygen.html" class="nav-link"><i class="bi bi-key me-2"></i>Key Generation</a></li>
+      <div class="nav-section">Administration</div>
+      <li class="nav-item"><a href="users_list.html" class="nav-link"><i class="bi bi-people me-2"></i>Users</a></li>
     </ul>
+    <div class="mt-auto pt-3 border-top border-secondary">
+      <div class="small text-muted px-1 mb-2">
+        <i class="bi bi-person-circle me-1"></i><span id="sidebarUsername"></span>
+        <span class="badge bg-secondary ms-1" id="sidebarRole"></span>
+      </div>
+      <button class="btn btn-outline-secondary btn-sm w-100" onclick="logout()">
+        <i class="bi bi-box-arrow-right me-1"></i>Sign Out
+      </button>
+    </div>
   </div>
 
   <!-- Main content -->
@@ -40,7 +55,7 @@
     <nav aria-label="breadcrumb" class="mb-2">
       <ol class="breadcrumb small">
         <li class="breadcrumb-item"><a href="index.html">Dashboard</a></li>
-        <li class="breadcrumb-item"><a href="est_list.html">EST Enrollment</a></li>
+        <li class="breadcrumb-item"><a href="est_list.html">EST Config</a></li>
         <li class="breadcrumb-item active" id="breadcrumbCurrent">New Endpoint</li>
       </ol>
     </nav>

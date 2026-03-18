@@ -2,9 +2,10 @@ import base64
 import datetime
 import json
 
+import jwt
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
-from werkzeug.security import generate_password_hash
+from werkzeug.security import generate_password_hash, check_password_hash
 
 from pypki import PKITools, PKIDataBase
 
@@ -294,3 +295,93 @@ def create_template(template_dict):
     if template_id:
         pki.load_template_collection()
     return template_id
+
+
+# ── User management ───────────────────────────────────────────────────────────
+
+def get_users():
+    db = pki.get_db()
+    with db.connection():
+        return db.get_users()
+
+
+def get_user(user_id: int):
+    db = pki.get_db()
+    with db.connection():
+        return db.get_user(user_id)
+
+
+def create_user(data: dict):
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    role     = data.get("role") or "user"
+    if not username or not password:
+        return None
+    password_hash = generate_password_hash(password)
+    db = pki.get_db()
+    with db.connection():
+        return db.create_user(username, password_hash, role)
+
+
+def update_user(user_id: int, data: dict):
+    fields = {}
+    if "username" in data and data["username"]:
+        fields["username"] = data["username"].strip()
+    if "role" in data and data["role"]:
+        fields["role"] = data["role"]
+    if "is_active" in data:
+        fields["is_active"] = bool(data["is_active"])
+    if data.get("password"):
+        fields["password_hash"] = generate_password_hash(data["password"])
+    if not fields:
+        return False
+    db = pki.get_db()
+    with db.connection():
+        return db.update_user(user_id, fields)
+
+
+def delete_user(user_id: int):
+    db = pki.get_db()
+    with db.connection():
+        return db.delete_user(user_id)
+
+
+# ── Authentication ─────────────────────────────────────────────────────────────
+
+def get_secret_key() -> str:
+    return pki.get_config_value("secret_key", "change-me-in-production")
+
+
+def authenticate_user(username: str, password: str):
+    """Return user dict (without password_hash) if credentials are valid, else None."""
+    db = pki.get_db()
+    with db.connection():
+        user = db.get_user_by_username(username)
+    if not user:
+        return None
+    if not check_password_hash(user.get("password_hash", ""), password):
+        return None
+    user.pop("password_hash", None)
+    return user
+
+
+def record_login(user_id: int):
+    db = pki.get_db()
+    with db.connection():
+        db.update_last_login(user_id)
+
+
+def validate_jwt_token(token: str):
+    """Decode and validate a JWT. Returns user dict or None."""
+    from pypki import logger
+    secret_key = get_secret_key()
+    try:
+        payload = jwt.decode(token, secret_key, algorithms=["HS256"])
+        return {
+            "id": int(payload["sub"]),
+            "username": payload["username"],
+            "role": payload["role"],
+        }
+    except Exception as e:
+        logger.warning(f"JWT validation failed: {type(e).__name__}: {e}")
+        return None

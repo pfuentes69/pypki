@@ -10,5 +10,6 @@
     "ca_store_folder": "config/ca_store",
     "ocsp_responder_folder": "config/ocsp_responders",
     "default_ca_id": 1,
-    "default_template": 7
+    "default_template": 7,
+    "secret_key": "change-me-in-production-replace-this-key!"
 }

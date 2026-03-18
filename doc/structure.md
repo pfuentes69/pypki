@@ -26,19 +26,29 @@ pypki/
 │       ├── __init__.py             # Shared PyPKI instance
 │       └── api_adapters.py         # Adapter layer between routes and core library
 │
-├── web/                            # Flask web frontend (UI)
-│   ├── app.py                      # Web app entry point
-│   ├── templates/
+├── web/                            # Web frontend
+│   ├── app.py                      # Legacy Flask UI entry point (port 5000)
+│   ├── templates/                  # Jinja2 templates for legacy Flask UI
 │   │   ├── base.html
 │   │   ├── index.html
 │   │   ├── get_ca_cert.html
 │   │   ├── request_cert_csr.html
 │   │   ├── request_cert_form.html
 │   │   └── select_value.html
-│   └── tests/                      # Static HTML prototypes
-│       ├── certificate_list.html
-│       ├── certificate_details.html
-│       └── certificate_request.html
+│   └── html/                       # Static management UI (Bootstrap 5, primary interface)
+│       ├── index.html              # Dashboard
+│       ├── certificate_list.html   # Certificate inventory
+│       ├── certificate_request.html # Issue certificate
+│       ├── certificate_details.html # Certificate details
+│       ├── csr_tool.html           # Browser-based CSR generator
+│       ├── cas_and_crls.html       # CA list and CRL download
+│       ├── ca_details.html         # CA details
+│       ├── template_list.html      # Certificate templates
+│       ├── template_editor.html    # Create / edit template
+│       ├── est_list.html           # EST alias management
+│       ├── est_editor.html         # Create / edit EST alias
+│       ├── est_test.html           # EST endpoint tester
+│       └── kms_keygen.html         # KMS key generation
 │
 ├── config/                         # Configuration files
 │   ├── config.py                   # Config loader
@@ -65,6 +75,9 @@ pypki/
 │
 ├── utils/                          # Administrative scripts
 │   ├── reset_pki.py                # Drop and recreate the PKI database
+│   ├── migrate_keystorage.py       # Schema upgrade: PrivateKeyStorage → KeyStorage
+│   ├── migrate_keys_to_kms.py      # Move CA/OCSP keys into KeyStorage
+│   ├── migrate_est_auth_fields.py  # Add username/password_hash/cert_fingerprint to ESTAliases
 │   ├── generate_sample_certs.py    # Generate sample certificates
 │   └── generate_crls.py            # Generate and export CRLs
 │

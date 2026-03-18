@@ -135,7 +135,7 @@ Every certificate issued by the system, regardless of CA or template.
 
 ### ESTAliases
 
-Named aliases for the EST (Enrollment over Secure Transport, RFC 7030) service. Each alias binds a CA and a certificate template, allowing different enrollment profiles to be exposed under different URL paths.
+Named aliases for the EST (Enrollment over Secure Transport, RFC 7030) service. Each alias binds a CA and a certificate template, allowing different enrollment profiles to be exposed under different URL paths. Optionally enforces HTTP Basic Authentication on enrollment endpoints.
 
 | Column | Type | Constraints | Description |
 |---|---|---|---|
@@ -144,12 +144,17 @@ Named aliases for the EST (Enrollment over Secure Transport, RFC 7030) service. 
 | `ca_id` | INT | FK → CertificationAuthorities | CA used to sign certificates for this alias |
 | `template_id` | INT | FK → CertificateTemplates | Template applied for this alias |
 | `is_default` | BOOLEAN | DEFAULT FALSE | Whether this is the default alias (used when no name is specified) |
+| `username` | VARCHAR(255) | | Username for HTTP Basic Auth. If NULL/empty, the enrollment endpoints require no authentication |
+| `password_hash` | VARCHAR(255) | | Werkzeug PBKDF2-SHA256 password hash. Never returned by the API |
+| `cert_fingerprint` | VARCHAR(255) | | Reserved for future mTLS client certificate authentication |
 | `created_at` | TIMESTAMP | DEFAULT NOW | |
 | `updated_at` | TIMESTAMP | ON UPDATE NOW | |
 
 **Foreign keys**
 - `ca_id` → `CertificationAuthorities(id)`
 - `template_id` → `CertificateTemplates(id)`
+
+> **Note:** The `cacerts` endpoint is always public (no auth required per RFC 7030). Authentication is enforced only on `simpleenroll` and `simpleenrollpem`. Existing databases need `utils/migrate_est_auth_fields.py` to add the new columns.
 
 ---
 

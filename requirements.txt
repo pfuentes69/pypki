@@ -7,3 +7,4 @@ mysql-connector-python==9.3.0
 pykcs11==1.5.17
 Requests==2.32.3
 flask_cors
+PyJWT>=2.8.0
