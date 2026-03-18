@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="/est_list.html">EST Config</a></li>
+    <li class="breadcrumb-item active" id="breadcrumbCurrent">New Endpoint</li>
+  </ol>
+</nav>
+<h4 class="mb-4" id="pageTitle">New EST Endpoint</h4>
+
+<div class="card mb-3" style="max-width: 640px;">
+  <div class="card-header"><i class="bi bi-person-badge me-2"></i>Endpoint</div>
+  <div class="card-body row g-3">
+    <div class="col-12">
+      <label class="form-label">Name <span class="text-danger">*</span></label>
+      <input type="text" class="form-control font-monospace" id="aliasName" placeholder="e.g. client-auth">
+      <div class="form-text">Used as the URL label: <code>/.well-known/est/&lt;name&gt;/simpleenroll</code></div>
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Certification Authority <span class="text-danger">*</span></label>
+      <select id="caSelect" class="form-select"><option value="">Loading…</option></select>
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Certificate Template <span class="text-danger">*</span></label>
+      <select id="templateSelect" class="form-select"><option value="">Loading…</option></select>
+    </div>
+  </div>
+</div>
+
+<div class="card mb-3" style="max-width: 640px;">
+  <div class="card-header"><i class="bi bi-lock me-2"></i>Basic Authentication</div>
+  <div class="card-body row g-3">
+    <div class="col-md-6">
+      <label class="form-label">Username <span class="text-danger">*</span></label>
+      <input type="text" class="form-control" id="username" autocomplete="off">
+    </div>
+    <div class="col-md-6">
+      <label class="form-label" id="passwordLabel">Password <span class="text-danger">*</span></label>
+      <div class="input-group">
+        <input type="password" class="form-control" id="password" autocomplete="new-password">
+        <button class="btn btn-outline-secondary" type="button" onclick="togglePwd('password', this)">
+          <i class="bi bi-eye"></i>
+        </button>
+      </div>
+      <div id="passwordHint" class="form-text d-none text-muted">Leave blank to keep the current password.</div>
+    </div>
+  </div>
+</div>
+
+<div class="card mb-4" style="max-width: 640px;">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span><i class="bi bi-fingerprint me-2"></i>mTLS (future)</span>
+    <span class="badge bg-secondary">Not enforced yet</span>
+  </div>
+  <div class="card-body">
+    <label class="form-label">Client Certificate Fingerprint</label>
+    <input type="text" class="form-control font-monospace" id="certFingerprint"
+           placeholder="SHA-256 fingerprint (hex)" disabled>
+    <div class="form-text text-muted">Stored for future mTLS client certificate validation.</div>
+  </div>
+</div>
+
+<div class="d-flex gap-2 mb-5">
+  <button class="btn btn-primary" onclick="save()"><i class="bi bi-floppy me-1"></i>Save</button>
+  <a href="/est_list.html" class="btn btn-outline-secondary">Cancel</a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let aliasId = null;
+
+  async function loadDropdowns() {
+    try {
+      const [caRes, tplRes] = await Promise.all([fetch(`${apiBase}/ca`), fetch(`${apiBase}/template`)]);
+      const [cas, templates] = await Promise.all([caRes.json(), tplRes.json()]);
+      const caSelect = document.getElementById('caSelect');
+      caSelect.innerHTML = '<option value="">Select CA…</option>' +
+        cas.map(c => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
+      const tplSelect = document.getElementById('templateSelect');
+      tplSelect.innerHTML = '<option value="">Select Template…</option>' +
+        templates.map(t => `<option value="${t.id}">${escHtml(t.name)}</option>`).join('');
+    } catch (err) { showToast('Failed to load dropdowns: ' + err.message, 'danger'); }
+  }
+
+  async function loadAlias(id) {
+    try {
+      const res = await fetch(`${apiBase}/est/${id}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const a = await res.json();
+      document.getElementById('aliasName').value = a.name ?? '';
+      document.getElementById('caSelect').value = a.ca_id ?? '';
+      document.getElementById('templateSelect').value = a.template_id ?? '';
+      document.getElementById('username').value = a.username ?? '';
+      document.getElementById('certFingerprint').value = a.cert_fingerprint ?? '';
+      document.getElementById('passwordHint').classList.remove('d-none');
+      document.getElementById('passwordLabel').innerHTML = 'Password';
+      document.getElementById('breadcrumbCurrent').textContent = a.name || 'Edit Endpoint';
+      document.getElementById('pageTitle').textContent = 'Edit EST Endpoint';
+    } catch (err) { showToast('Failed to load endpoint: ' + err.message, 'danger'); }
+  }
+
+  async function save() {
+    const name = document.getElementById('aliasName').value.trim();
+    const caId = document.getElementById('caSelect').value;
+    const templateId = document.getElementById('templateSelect').value;
+    const username = document.getElementById('username').value.trim();
+    const password = document.getElementById('password').value;
+    const certFingerprint = document.getElementById('certFingerprint').value.trim();
+
+    if (!name) { showToast('Name is required.', 'warning'); return; }
+    if (!caId) { showToast('Select a Certification Authority.', 'warning'); return; }
+    if (!templateId) { showToast('Select a Certificate Template.', 'warning'); return; }
+    if (!username) { showToast('Username is required.', 'warning'); return; }
+    if (!aliasId && !password) { showToast('Password is required for new endpoints.', 'warning'); return; }
+
+    const body = { name, ca_id: parseInt(caId), template_id: parseInt(templateId), username };
+    if (password) body.password = password;
+    if (certFingerprint) body.cert_fingerprint = certFingerprint;
+
+    try {
+      const url = aliasId ? `${apiBase}/est/${aliasId}` : `${apiBase}/est`;
+      const method = aliasId ? 'PUT' : 'POST';
+      const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }, body: JSON.stringify(body) });
+      let data = {}; try { data = await res.json(); } catch (_) {}
+      if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+      showToast(`EST endpoint <strong>${name}</strong> ${aliasId ? 'updated' : 'created'} successfully.`);
+      setTimeout(() => { window.location.href = '/est_list.html'; }, 1200);
+    } catch (err) { showToast('Save failed: ' + err.message, 'danger'); }
+  }
+
+  function togglePwd(inputId, btn) {
+    const input = document.getElementById(inputId);
+    const isHidden = input.type === 'password';
+    input.type = isHidden ? 'text' : 'password';
+    btn.querySelector('i').className = isHidden ? 'bi bi-eye-slash' : 'bi bi-eye';
+  }
+
+  function escHtml(str) {
+    if (str == null) return '';
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  window.onload = async () => {
+    await loadDropdowns();
+    const params = new URLSearchParams(window.location.search);
+    const idParam = params.get('id');
+    if (idParam) { aliasId = parseInt(idParam); await loadAlias(aliasId); }
+  };
+</script>
+{% endblock %}

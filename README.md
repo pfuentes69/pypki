@@ -53,15 +53,12 @@ pypki/                          # Python library (importable as `pypki`)
 │   ├── pkcs11_helper.py        # PKCS11Helper — PKCS#11 session wrapper
 │   └── pki_tools.py            # PKITools — shared constants and helpers
 
-api/                            # Flask REST API
-│   ├── app.py                  # Application factory (create_app)
+web/                            # Flask web service (API + management UI)
+│   ├── app.py                  # Entry point — starts the server
 │   ├── routes/                 # Blueprint route handlers
-│   └── services/               # Business logic and adapters
-
-web/                            # Web interfaces
-│   ├── app.py                  # Lightweight EST test client (port 5000)
-│   ├── html/                   # Static management UI (Bootstrap 5, talks to the API)
-│   └── templates/              # Jinja2 templates for the EST client
+│   ├── services/               # Business logic and adapters
+│   ├── static/                 # Client-side JS (auth.js, pypki_ui.js)
+│   └── templates/              # Jinja2 templates — base layout + 16 pages
 
 config/                         # Runtime configuration
 │   ├── config.json             # Active config (DB connection, folder paths)
@@ -160,13 +157,13 @@ The schema includes: `KeyStorage`, `CertificationAuthorities`, `CertificateTempl
 
 ---
 
-## Running the API
+## Running the server
 
 ```bash
-python api/app.py
+python web/app.py
 ```
 
-The REST API starts on `http://0.0.0.0:8080`. Log output is written to `out/app.log` and stdout.
+The server starts on `http://0.0.0.0:8080`. Log output is written to `out/app.log` and stdout.
 
 Key endpoints:
 
@@ -199,7 +196,7 @@ Key endpoints:
 
 ## Management interface
 
-Open `web/html/index.html` in a browser while the API server is running. The interface is organised into four sidebar sections:
+Open `http://localhost:8080` in a browser while the server is running. The interface is organised into four sidebar sections:
 
 **Certificates**
 - **Dashboard** — system overview (metrics, CA summary, recent activity)
@@ -218,7 +215,7 @@ Open `web/html/index.html` in a browser while the API server is running. The int
 **KMS**
 - **Key Generation** — generate RSA, ECDSA, Ed25519, or AES keys
 
-The static pages talk directly to the API at `http://127.0.0.1:8080/api`.
+The management UI is served by the same Flask process. API calls use relative paths (`/api/…`) so no cross-origin configuration is needed.
 
 ---
 

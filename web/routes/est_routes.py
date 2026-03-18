@@ -3,7 +3,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import pkcs7
 from flask import Blueprint, request, Response, jsonify
 from werkzeug.security import check_password_hash
-from api.services import api_adapters
+from web.services import api_adapters
 
 from pypki import logger
 

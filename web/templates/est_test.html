@@ -1,0 +1,231 @@
+{% extends "base.html" %}
+{% block head_extra %}
+<style>
+  .result-box { font-family: monospace; font-size: 0.8rem; white-space: pre-wrap; word-break: break-all;
+                background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 0.375rem;
+                padding: 0.75rem; max-height: 260px; overflow-y: auto; }
+  .result-box.success { border-color: #198754; background: #f0fdf4; }
+  .result-box.error   { border-color: #dc3545; background: #fff5f5; }
+  .status-badge { font-size: 0.75rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item active">EST Test</li>
+  </ol>
+</nav>
+<h4 class="mb-4">EST Test</h4>
+
+<div class="card shadow-sm mb-4">
+  <div class="card-header"><i class="bi bi-sliders me-2"></i>Endpoint</div>
+  <div class="card-body">
+    <div class="row g-3 align-items-start">
+      <div class="col-md-4">
+        <label class="form-label fw-semibold small">Select endpoint</label>
+        <select class="form-select" id="aliasSelect" onchange="onAliasChange()">
+          <option value="">Loading…</option>
+        </select>
+      </div>
+      <div class="col-md-8" id="infoBox" style="display:none">
+        <label class="form-label fw-semibold small">Endpoint info</label>
+        <div class="table-responsive">
+          <table class="table table-sm table-bordered mb-0">
+            <tbody>
+              <tr><th class="table-light text-nowrap small" style="width:130px">cacerts URL</th><td><code id="infoCacertsUrl" class="small"></code></td></tr>
+              <tr><th class="table-light text-nowrap small">simpleenroll URL</th><td><code id="infoEnrollUrl" class="small"></code></td></tr>
+              <tr id="rowUsername"><th class="table-light text-nowrap small">Username</th><td><code id="infoUsername" class="small"></code></td></tr>
+              <tr id="rowPassword">
+                <th class="table-light text-nowrap small">Password</th>
+                <td>
+                  <div class="input-group input-group-sm" style="max-width:280px">
+                    <input type="password" class="form-control form-control-sm font-monospace"
+                           id="inputPassword" placeholder="Enter password for testing">
+                    <button class="btn btn-outline-secondary" type="button" onclick="togglePassword()" title="Show / hide password">
+                      <i class="bi bi-eye" id="eyeIcon"></i>
+                    </button>
+                  </div>
+                </td>
+              </tr>
+              <tr id="rowNoAuth" style="display:none">
+                <th class="table-light text-nowrap small">Auth</th>
+                <td><span class="badge bg-secondary">Not required</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-4">
+  <div class="col-lg-6">
+    <div class="card shadow-sm h-100">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-shield-check me-2"></i>Test cacerts</span>
+        <span id="cacertsBadge" class="badge status-badge" style="display:none"></span>
+      </div>
+      <div class="card-body d-flex flex-column gap-3">
+        <p class="text-muted small mb-0">Sends a <code>GET</code> request to the <code>cacerts</code> endpoint and returns the CA certificate in PEM format.</p>
+        <div><button class="btn btn-primary btn-sm" id="btnCacerts" onclick="testCacerts()" disabled><i class="bi bi-play-fill me-1"></i>Test cacerts</button></div>
+        <div id="cacertsResult" style="display:none"><div class="result-box" id="cacertsOutput"></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-6">
+    <div class="card shadow-sm h-100">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-file-earmark-arrow-up me-2"></i>Test simpleenroll</span>
+        <span id="enrollBadge" class="badge status-badge" style="display:none"></span>
+      </div>
+      <div class="card-body d-flex flex-column gap-3">
+        <p class="text-muted small mb-0">Sends a <code>POST</code> request with a PEM-encoded CSR and returns the issued certificate in PKCS#7 format.</p>
+        <div>
+          <label class="form-label small fw-semibold">CSR (PEM)</label>
+          <textarea class="form-control font-monospace" id="csrInput" rows="9" style="font-size:0.7rem; resize:vertical"></textarea>
+        </div>
+        <div><button class="btn btn-primary btn-sm" id="btnEnroll" onclick="testSimpleEnroll()" disabled><i class="bi bi-play-fill me-1"></i>Test simpleenroll</button></div>
+        <div id="enrollResult" style="display:none"><div class="result-box" id="enrollOutput"></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const EXAMPLE_CSR = `-----BEGIN CERTIFICATE REQUEST-----
+MIID1jCCAr4CAQAwggERMQswCQYDVQQGEwJDSDEPMA0GA1UECAwGWnVyaWNoMQ8w
+DQYDVQQHDAZadXJpY2gxEDAOBgNVBAoMB05hdml0ZXIxFDASBgNVBAsMC0VuZ2lu
+ZWVyaW5nMRQwEgYDVQQDDAtkZXZpY2VfbmFtZTEhMB8GCSqGSIb3DQEJARYSZGV2
+aWNlQGV4YW1wbGUuY29tMQ8wDQYDVQQFEwYxMjM0NTYxDzANBgNVBCoMBkRldmlj
+ZTENMAsGA1UEBAwEVW5pdDETMBEGA1UEDAwKSW9UIFNlbnNvcjERMA8GA1UEDwwI
+SGFyZHdhcmUxDTALBgNVBBEMBDgwMDAxFzAVBgNVBAkMDk1haW4gU3RyZWV0IDQy
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwLwKdbcdV4UdT96wJuzQ
+sC9lD0ozoJNE2E06SgH1JxEjueG3a6+C/TYOZZiiodtsjnHwgDPhRaEgC4s88Pj4
+I8nz+R3mBvnglSxz+gew7HeCzRaCisq/4LfXCnD9+JnQehFBZgzO07gNivTf5ajs
+FHcP3sdux4I3J6U7J/d0Jmr/Zs5Ea7pwNyTySOOBHoJR7W0T/OaTTz5KTdLOgEnw
+m9H0//EdooyoUFlUY6NEzDbh2k4e1ad+Vk/TawZiaNxdv+tko/IVwYWRjweTPadi
+EdbEBc+ch+dl3TQMCeVDyZzFonWvNCSjCdGtIkTW31dnVVNPjkyAl2FsGgKMjXie
+TwIDAQABoH4wfAYJKoZIhvcNAQkOMW8wbTBrBgNVHREEZDBighVjbGllbnRuYW1l
+Lm5hdml0ZXIuZXOCDGRldmljZS5sb2NhbIcEwKgBZIcECgAAAYEPYWx0QGV4YW1w
+bGUuY29thh5odHRwczovL2RldmljZS5uYXZpdGVyLmVzL2luZm8wDQYJKoZIhvcN
+AQELBQADggEBALiu2qvbt1C0d3kSsrSWwNey975RuKchwYx/+go5LBTKEMI7OJ8Q
+Qxgro3W7Jo+Jx4bzqP6mqroMiaK7h9/aZ/jWqspPOPWSjdbIqOdq6VmVe0UcOSVO
+LduXJ6gbXPMIFswv4qgn6A8cD3X+YgE1Gb9JmNmCnoyZXnZc6LeZkdwRcFyieZjP
+4Q99H1nDDDS1eipXFV/UEBFsbGp+6EqLV4/XLadcm6uHyiKK0wZexfxsb/ve+5uD
+31iWL8pwO6ImOUnF6bAVPofEPEU42R2DVqQ4LHGEokAgldC2z6WpW92+eYYWobwn
+aMdjhETZJoNLG3yq8mRqusC1wfbJrklsils=
+-----END CERTIFICATE REQUEST-----`;
+
+  let _aliases = [];
+  let _selected = null;
+
+  document.getElementById('csrInput').value = EXAMPLE_CSR.trim();
+
+  async function loadAliases() {
+    try {
+      const res = await fetch(`${apiBase}/est`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      _aliases = await res.json();
+    } catch (e) { _aliases = []; }
+
+    const sel = document.getElementById('aliasSelect');
+    if (!_aliases.length) { sel.innerHTML = '<option value="">No endpoints configured</option>'; return; }
+    sel.innerHTML = _aliases.map(a => `<option value="${a.id}">${a.name}${a.is_default ? ' (default)' : ''}</option>`).join('');
+    onAliasChange();
+  }
+
+  function onAliasChange() {
+    const id = parseInt(document.getElementById('aliasSelect').value);
+    _selected = _aliases.find(a => a.id === id) || null;
+    if (!_selected) { document.getElementById('infoBox').style.display = 'none'; setButtonsEnabled(false); return; }
+
+    const label = _selected.name;
+    const cacertsUrl = `${estBase}/${label}/cacerts`;
+    const enrollUrl = `${estBase}/${label}/simpleenroll`;
+    const hasAuth = !!_selected.username;
+
+    document.getElementById('infoCacertsUrl').textContent = cacertsUrl;
+    document.getElementById('infoEnrollUrl').textContent = enrollUrl;
+    document.getElementById('rowUsername').style.display = hasAuth ? '' : 'none';
+    document.getElementById('rowPassword').style.display = hasAuth ? '' : 'none';
+    document.getElementById('rowNoAuth').style.display = hasAuth ? 'none' : '';
+    document.getElementById('infoUsername').textContent = _selected.username || '';
+    document.getElementById('inputPassword').value = '';
+    document.getElementById('infoBox').style.display = '';
+    setButtonsEnabled(true);
+    ['cacertsResult', 'enrollResult'].forEach(id => { document.getElementById(id).style.display = 'none'; });
+    ['cacertsBadge', 'enrollBadge'].forEach(id => { document.getElementById(id).style.display = 'none'; });
+  }
+
+  function setButtonsEnabled(enabled) {
+    document.getElementById('btnCacerts').disabled = !enabled;
+    document.getElementById('btnEnroll').disabled = !enabled;
+  }
+
+  function buildAuthHeader() {
+    if (!_selected || !_selected.username) return null;
+    return `Basic ${btoa(`${_selected.username}:${document.getElementById('inputPassword').value}`)}`;
+  }
+
+  function showResult(containerEl, outputEl, badgeEl, ok, text) {
+    containerEl.style.display = '';
+    outputEl.className = 'result-box ' + (ok ? 'success' : 'error');
+    outputEl.textContent = text;
+    badgeEl.style.display = '';
+    badgeEl.className = 'badge status-badge ' + (ok ? 'bg-success' : 'bg-danger');
+    badgeEl.textContent = ok ? 'OK' : 'Failed';
+  }
+
+  async function testCacerts() {
+    if (!_selected) return;
+    const btn = document.getElementById('btnCacerts');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Testing…';
+    const url = `${estBase}/${_selected.name}/cacerts`;
+    const auth = buildAuthHeader();
+    const headers = {}; if (auth) headers['Authorization'] = auth;
+    const containerEl = document.getElementById('cacertsResult');
+    const outputEl = document.getElementById('cacertsOutput');
+    const badgeEl = document.getElementById('cacertsBadge');
+    try {
+      const res = await fetch(url, { headers });
+      const text = await res.text();
+      showResult(containerEl, outputEl, badgeEl, res.ok, res.ok ? text : `HTTP ${res.status} ${res.statusText}\n\n${text}`);
+    } catch (e) { showResult(containerEl, outputEl, badgeEl, false, `Network error: ${e.message}`); }
+    finally { btn.disabled = false; btn.innerHTML = '<i class="bi bi-play-fill me-1"></i>Test cacerts'; }
+  }
+
+  async function testSimpleEnroll() {
+    if (!_selected) return;
+    const btn = document.getElementById('btnEnroll');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Testing…';
+    const url = `${estBase}/${_selected.name}/simpleenroll`;
+    const auth = buildAuthHeader();
+    const headers = { 'Content-Type': 'application/pkcs10' }; if (auth) headers['Authorization'] = auth;
+    const csr = document.getElementById('csrInput').value.trim();
+    const containerEl = document.getElementById('enrollResult');
+    const outputEl = document.getElementById('enrollOutput');
+    const badgeEl = document.getElementById('enrollBadge');
+    try {
+      const res = await fetch(url, { method: 'POST', headers, body: csr });
+      const text = await res.text();
+      showResult(containerEl, outputEl, badgeEl, res.ok,
+        res.ok ? `Certificate issued (PKCS#7 base64):\n\n${text}` : `HTTP ${res.status} ${res.statusText}\n\n${text}`);
+    } catch (e) { showResult(containerEl, outputEl, badgeEl, false, `Network error: ${e.message}`); }
+    finally { btn.disabled = false; btn.innerHTML = '<i class="bi bi-play-fill me-1"></i>Test simpleenroll'; }
+  }
+
+  function togglePassword() {
+    const input = document.getElementById('inputPassword');
+    const icon = document.getElementById('eyeIcon');
+    if (input.type === 'password') { input.type = 'text'; icon.className = 'bi bi-eye-slash'; }
+    else { input.type = 'password'; icon.className = 'bi bi-eye'; }
+  }
+
+  window.onload = loadAliases;
+</script>
+{% endblock %}

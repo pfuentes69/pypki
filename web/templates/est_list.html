@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item active">EST Config</li>
+  </ol>
+</nav>
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0">EST Config</h4>
+  <a href="/est_editor.html" class="btn btn-primary btn-sm">
+    <i class="bi bi-plus-circle me-1"></i>New Endpoint
+  </a>
+</div>
+
+<div class="table-responsive">
+  <table class="table table-bordered table-hover table-striped align-middle">
+    <thead class="table-dark">
+      <tr>
+        <th style="width:5%">Default</th>
+        <th style="width:4%">ID</th>
+        <th>Name</th>
+        <th>CA</th>
+        <th>Template</th>
+        <th>Username</th>
+        <th style="width:14%">Actions</th>
+      </tr>
+    </thead>
+    <tbody id="aliasTableBody">
+      <tr><td colspan="7" class="text-center text-muted">Loading…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div id="emptyState" class="d-none text-center py-5 text-muted">
+  <i class="bi bi-person-badge" style="font-size:3rem;"></i>
+  <p class="mt-3">No EST endpoints defined yet.</p>
+  <a href="/est_editor.html" class="btn btn-primary">
+    <i class="bi bi-plus-circle me-1"></i>Create First Endpoint
+  </a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  async function loadAliases() {
+    const tbody = document.getElementById('aliasTableBody');
+    try {
+      const res = await fetch(`${apiBase}/est`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const aliases = await res.json();
+
+      if (!aliases.length) {
+        tbody.innerHTML = '';
+        document.getElementById('emptyState').classList.remove('d-none');
+        return;
+      }
+
+      tbody.innerHTML = aliases.map(a => `
+        <tr>
+          <td class="text-center">
+            <input type="radio" class="form-check-input" name="defaultAlias"
+                   ${a.is_default ? 'checked' : ''}
+                   onchange="setDefault(${a.id})" title="Set as default">
+          </td>
+          <td>${a.id}</td>
+          <td>
+            <span class="font-monospace">${escHtml(a.name)}</span>
+            ${a.is_default ? '<span class="badge bg-primary ms-2">default</span>' : ''}
+          </td>
+          <td>${a.ca_id ?? '—'}</td>
+          <td>${a.template_id ?? '—'}</td>
+          <td>${escHtml(a.username ?? '—')}</td>
+          <td>
+            <div class="d-flex gap-1">
+              <a href="/est_editor.html?id=${a.id}" class="btn btn-sm btn-outline-primary"><i class="bi bi-pencil"></i></a>
+              <button class="btn btn-sm btn-outline-danger" onclick="deleteAlias(${a.id}, '${escHtml(a.name)}')"><i class="bi bi-trash"></i></button>
+            </div>
+          </td>
+        </tr>`).join('');
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="7"><div class="alert alert-danger mb-0">Failed to load EST endpoints: ${escHtml(err.message)}</div></td></tr>`;
+    }
+  }
+
+  async function setDefault(aliasId) {
+    try {
+      const res = await fetch(`${apiBase}/est/${aliasId}/set-default`, { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      showToast('Default EST endpoint updated.');
+      loadAliases();
+    } catch (err) {
+      showToast('Failed to set default: ' + err.message, 'danger');
+      loadAliases();
+    }
+  }
+
+  async function deleteAlias(aliasId, name) {
+    const ok = await confirmAction(
+      `Delete EST endpoint <strong>${name}</strong>? This cannot be undone.`,
+      { title: 'Delete EST Endpoint', okLabel: 'Delete', okClass: 'btn-danger' }
+    );
+    if (!ok) return;
+    try {
+      const res = await fetch(`${apiBase}/est/${aliasId}`, { method: 'DELETE' });
+      if (!res.ok) { const d = await res.json(); throw new Error(d.description || `HTTP ${res.status}`); }
+      showToast(`EST endpoint <strong>${name}</strong> deleted.`);
+      loadAliases();
+    } catch (err) { showToast('Delete failed: ' + err.message, 'danger'); }
+  }
+
+  function escHtml(str) {
+    if (str == null) return '';
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  window.onload = loadAliases;
+</script>
+{% endblock %}

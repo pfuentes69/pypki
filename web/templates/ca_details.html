@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="/cas_and_crls.html">CAs &amp; CRL</a></li>
+    <li class="breadcrumb-item active" id="breadcrumbCurrent">Details</li>
+  </ol>
+</nav>
+<h4 class="mb-4">CA Details</h4>
+<div id="caDetails"><div class="text-muted">Loading…</div></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function getIdFromUrl() { return new URLSearchParams(window.location.search).get("id"); }
+
+  function row(label, value) {
+    return `<tr><th class="text-nowrap" style="width:200px">${label}</th><td>${value ?? '—'}</td></tr>`;
+  }
+
+  function formatDate(val) {
+    if (!val) return '—';
+    const d = new Date(val);
+    return isNaN(d) ? val : d.toLocaleString();
+  }
+
+  function renderCA(ca) {
+    const id = getIdFromUrl();
+    const crlSection = `
+      <div class="card mb-4">
+        <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+          <span><i class="bi bi-list-check me-2"></i>Certificate Revocation List (CRL)</span>
+          <div class="d-flex gap-2">
+            <a class="btn btn-sm btn-outline-secondary" href="${apiBase}/ca/${id}/crl" target="_blank">
+              <i class="bi bi-download me-1"></i>Download CRL
+            </a>
+            <button class="btn btn-sm btn-outline-primary" id="issueCrlBtn" onclick="issueCrl(${id})">
+              <i class="bi bi-arrow-clockwise me-1"></i>Issue Fresh CRL
+            </button>
+          </div>
+        </div>
+        <div class="card-body p-0">
+          <table class="table table-sm mb-0">
+            <tbody id="crlTableBody">
+              ${row('Last Issued', ca.crl_issue_date ? formatDate(ca.crl_issue_date) : '<span class="text-muted">No CRL issued yet</span>')}
+              ${row('Next Update', ca.crl_next_update ? formatDate(ca.crl_next_update) : '—')}
+              ${row('CRL Validity', ca.crl_validity != null ? ca.crl_validity + ' days' : null)}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+
+    document.getElementById('caDetails').innerHTML = `
+      <div class="card mb-4">
+        <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+          <span><i class="bi bi-building me-2"></i>General</span>
+          <a class="btn btn-sm btn-outline-secondary" href="${apiBase}/ca/${id}/cert" target="_blank">
+            <i class="bi bi-download me-1"></i>Download CA Certificate
+          </a>
+        </div>
+        <div class="card-body p-0">
+          <table class="table table-sm mb-0"><tbody>
+            ${row('ID', ca.id)}
+            ${row('Name', ca.name)}
+            ${row('Subject DN', ca.subject_dn ? `<span class="font-monospace small">${ca.subject_dn}</span>` : null)}
+            ${row('Issuer DN', ca.issuer_dn ? `<span class="font-monospace small">${ca.issuer_dn}</span>` : null)}
+            ${row('Not Before', ca.not_before ? formatDate(ca.not_before) : null)}
+            ${row('Not After', ca.not_after ? formatDate(ca.not_after) : null)}
+            ${row('Serial Number', ca.cert_serial ? `<span class="font-monospace">${ca.cert_serial}</span>` : null)}
+            ${row('Max Certificate Validity', ca.max_validity != null ? ca.max_validity + ' days' : null)}
+            ${row('Serial Number Length', ca.serial_number_length != null ? ca.serial_number_length + ' bytes' : null)}
+            ${row('SKI', ca.ski ? `<span class="font-monospace small">${ca.ski}</span>` : null)}
+          </tbody></table>
+        </div>
+      </div>
+      ${crlSection}
+      <div class="card">
+        <div class="card-header fw-semibold"><i class="bi bi-file-earmark-lock me-2"></i>CA Certificate PEM</div>
+        <div class="card-body p-2"><pre class="mb-0 small">${ca.certificate || '—'}</pre></div>
+      </div>`;
+  }
+
+  function updateCrlRows(issueDate, nextUpdate) {
+    const tbody = document.getElementById('crlTableBody');
+    if (!tbody) return;
+    tbody.innerHTML =
+      row('Last Issued', issueDate ? formatDate(issueDate) : '<span class="text-muted">No CRL issued yet</span>') +
+      row('Next Update', nextUpdate ? formatDate(nextUpdate) : '—') +
+      row('CRL Validity', window._crlValidity != null ? window._crlValidity + ' days' : null);
+  }
+
+  async function issueCrl(caId) {
+    const ok = await confirmAction(
+      'Generate a new CRL for this CA? The previous CRL will be replaced.',
+      { title: 'Issue Fresh CRL', okLabel: 'Generate', okClass: 'btn-primary' }
+    );
+    if (!ok) return;
+
+    const btn = document.getElementById('issueCrlBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Generating…';
+
+    fetch(`${apiBase}/ca/${caId}/crl`, { method: 'POST' })
+      .then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.description || `HTTP ${r.status}`); }); return r.json(); })
+      .then(data => {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Issue Fresh CRL';
+        updateCrlRows(data.issue_date, data.next_update);
+        showToast('CRL generated successfully.');
+      })
+      .catch(err => {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Issue Fresh CRL';
+        showToast(`CRL generation failed: ${err.message}`, 'danger');
+      });
+  }
+
+  function loadCA() {
+    const id = getIdFromUrl();
+    if (!id) { document.getElementById('caDetails').innerHTML = '<div class="alert alert-warning">No CA ID provided.</div>'; return; }
+    fetch(`${apiBase}/ca/${id}/full`)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(ca => {
+        window._crlValidity = ca.crl_validity;
+        document.getElementById('breadcrumbCurrent').textContent = ca.name || 'CA Details';
+        renderCA(ca);
+      })
+      .catch(err => {
+        document.getElementById('caDetails').innerHTML = `<div class="alert alert-danger">Failed to load CA: ${err.message}</div>`;
+      });
+  }
+
+  window.onload = loadCA;
+</script>
+{% endblock %}

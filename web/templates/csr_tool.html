@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+{% block head_extra %}
+<style>textarea.mono { font-family: monospace; font-size: 0.78rem; resize: vertical; }</style>
+{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item active">CSR Tool</li>
+  </ol>
+</nav>
+<h4 class="mb-4">CSR Generator</h4>
+
+<div class="card shadow-sm mb-4">
+  <div class="card-header"><i class="bi bi-sliders me-2"></i>Key &amp; Subject</div>
+  <div class="card-body">
+    <div class="row g-3">
+      <div class="col-md-4">
+        <label class="form-label fw-semibold small">Algorithm <span class="text-danger">*</span></label>
+        <select class="form-select" id="algo" onchange="onAlgoChange()">
+          <option value="EC">ECC P-256</option>
+          <option value="RSA">RSA 2048</option>
+        </select>
+        <div id="rsaNote" class="form-text text-warning" style="display:none">
+          <i class="bi bi-clock me-1"></i>RSA key generation may take a few seconds.
+        </div>
+      </div>
+      <div class="col-md-8">
+        <label class="form-label fw-semibold small">Common Name (CN) <span class="text-danger">*</span></label>
+        <input type="text" class="form-control" id="cn" placeholder="e.g. device_name">
+        <div class="invalid-feedback">Common Name is required.</div>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label fw-semibold small">Organization (O)</label>
+        <input type="text" class="form-control" id="org" placeholder="e.g. Acme Corp">
+      </div>
+      <div class="col-md-2">
+        <label class="form-label fw-semibold small">Country (C)</label>
+        <input type="text" class="form-control text-uppercase" id="country" maxlength="2" placeholder="e.g. US">
+        <div class="invalid-feedback">Must be 2 letters.</div>
+      </div>
+      <div class="col-md-6">
+        <label class="form-label fw-semibold small">Serial Number</label>
+        <input type="text" class="form-control" id="serialNum" placeholder="e.g. 123456">
+      </div>
+      <div class="col-md-6">
+        <label class="form-label fw-semibold small">DNS SAN</label>
+        <div class="input-group">
+          <span class="input-group-text text-muted small">DNS</span>
+          <input type="text" class="form-control" id="san" placeholder="e.g. device.local">
+        </div>
+      </div>
+      <div class="col-12 pt-1">
+        <button class="btn btn-primary" id="btnGenerate" onclick="generate()">
+          <i class="bi bi-gear-fill me-2"></i>Generate Key &amp; CSR
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="results" style="display:none">
+  <div class="alert alert-warning d-flex gap-2 align-items-start py-2">
+    <i class="bi bi-exclamation-triangle-fill flex-shrink-0 mt-1"></i>
+    <span class="small">The private key is generated entirely in your browser and is never transmitted.
+    Save it securely — it cannot be recovered after leaving this page.</span>
+  </div>
+  <div class="row g-4">
+    <div class="col-lg-6">
+      <div class="card shadow-sm h-100">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span><i class="bi bi-key me-2"></i>Private Key</span>
+          <div class="d-flex gap-1">
+            <button class="btn btn-outline-secondary btn-sm" onclick="copyText('privateKeyOut')" title="Copy to clipboard"><i class="bi bi-clipboard"></i></button>
+            <button class="btn btn-outline-primary btn-sm" onclick="saveFile('private_key.pem', 'privateKeyOut')" title="Save as file"><i class="bi bi-download me-1"></i>Save</button>
+          </div>
+        </div>
+        <div class="card-body p-2"><textarea class="form-control mono" id="privateKeyOut" rows="14" readonly></textarea></div>
+      </div>
+    </div>
+    <div class="col-lg-6">
+      <div class="card shadow-sm h-100">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span><i class="bi bi-file-earmark-lock me-2"></i>Certificate Signing Request</span>
+          <div class="d-flex gap-1">
+            <button class="btn btn-outline-secondary btn-sm" onclick="copyText('csrOut')" title="Copy to clipboard"><i class="bi bi-clipboard"></i></button>
+            <button class="btn btn-outline-primary btn-sm" onclick="saveFile('request.csr', 'csrOut')" title="Save as file"><i class="bi bi-download me-1"></i>Save</button>
+          </div>
+        </div>
+        <div class="card-body p-2"><textarea class="form-control mono" id="csrOut" rows="14" readonly></textarea></div>
+      </div>
+    </div>
+  </div>
+  <div class="mt-3">
+    <button class="btn btn-outline-secondary btn-sm" onclick="resetForm()">
+      <i class="bi bi-arrow-counterclockwise me-1"></i>Generate again
+    </button>
+  </div>
+</div>
+{% endblock %}
+
+{% block modals %}
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:9999">
+  <div id="toast" class="toast align-items-center text-bg-success border-0" role="alert">
+    <div class="d-flex">
+      <div class="toast-body" id="toastMsg"></div>
+      <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/jsrsasign@10.9.0/lib/jsrsasign-all-min.js"></script>
+<script>
+  function $(id) { return document.getElementById(id); }
+
+  function showToast(msg, type = 'success') {
+    const el = $('toast');
+    $('toastMsg').textContent = msg;
+    el.className = `toast align-items-center text-bg-${type} border-0`;
+    bootstrap.Toast.getOrCreateInstance(el, { delay: 2000 }).show();
+  }
+
+  function onAlgoChange() { $('rsaNote').style.display = $('algo').value === 'RSA' ? '' : 'none'; }
+
+  function validate() {
+    let ok = true;
+    const cnEl = $('cn');
+    if (!cnEl.value.trim()) { cnEl.classList.add('is-invalid'); ok = false; } else { cnEl.classList.remove('is-invalid'); }
+    const cEl = $('country');
+    const cVal = cEl.value.trim();
+    if (cVal && !/^[A-Za-z]{2}$/.test(cVal)) { cEl.classList.add('is-invalid'); ok = false; } else { cEl.classList.remove('is-invalid'); }
+    return ok;
+  }
+
+  async function generate() {
+    if (!validate()) return;
+    const btn = $('btnGenerate');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Generating…';
+    $('results').style.display = 'none';
+    await new Promise(r => setTimeout(r, 60));
+    try {
+      const algo = $('algo').value;
+      const cn = $('cn').value.trim();
+      const org = $('org').value.trim();
+      const country = $('country').value.trim().toUpperCase();
+      const sn = $('serialNum').value.trim();
+      const san = $('san').value.trim();
+
+      let subject = `/CN=${cn}`;
+      if (sn) subject += `/serialNumber=${sn}`;
+      if (org) subject += `/O=${org}`;
+      if (country) subject += `/C=${country}`;
+
+      let privKeyPem, pubKeyPem, sigalg;
+      if (algo === 'EC') {
+        const kp = KEYUTIL.generateKeypair('EC', 'secp256r1');
+        privKeyPem = KEYUTIL.getPEM(kp.prvKeyObj, 'PKCS8PRV');
+        pubKeyPem = KEYUTIL.getPEM(kp.pubKeyObj);
+        sigalg = 'SHA256withECDSA';
+      } else {
+        const kp = KEYUTIL.generateKeypair('RSA', 2048);
+        privKeyPem = KEYUTIL.getPEM(kp.prvKeyObj, 'PKCS8PRV');
+        pubKeyPem = KEYUTIL.getPEM(kp.pubKeyObj);
+        sigalg = 'SHA256withRSA';
+      }
+
+      const csrParams = { subject: { str: subject }, sbjpubkey: pubKeyPem, sigalg, sbjprvkey: privKeyPem };
+      if (san) csrParams.extreq = [{ extname: 'subjectAltName', array: [{ dns: san }] }];
+
+      const csrPem = KJUR.asn1.csr.CSRUtil.newCSRPEM(csrParams);
+      $('privateKeyOut').value = privKeyPem.trim();
+      $('csrOut').value = csrPem.trim();
+      $('results').style.display = '';
+      $('results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (e) {
+      showToast('Generation failed: ' + e.message, 'danger');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-gear-fill me-2"></i>Generate Key &amp; CSR';
+    }
+  }
+
+  function saveFile(filename, textareaId) {
+    const content = $(textareaId).value;
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a); URL.revokeObjectURL(url);
+  }
+
+  function copyText(textareaId) {
+    navigator.clipboard.writeText($(textareaId).value)
+      .then(() => showToast('Copied to clipboard'))
+      .catch(() => showToast('Copy failed', 'danger'));
+  }
+
+  function resetForm() { $('results').style.display = 'none'; $('cn').focus(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+</script>
+{% endblock %}

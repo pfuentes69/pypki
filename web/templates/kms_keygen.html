@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block head_extra %}
+<style>#resultBox { font-family: monospace; white-space: pre-wrap; word-break: break-all; }</style>
+{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item active">Key Generation</li>
+  </ol>
+</nav>
+<h4 class="mb-4">Key Generation</h4>
+
+<div class="card shadow-sm mb-4" style="max-width: 560px;">
+  <div class="card-body">
+    <div class="mb-3">
+      <label for="algorithmSelect" class="form-label">Algorithm</label>
+      <select id="algorithmSelect" class="form-select" onchange="onAlgorithmChange()">
+        <option value="RSA">RSA</option>
+        <option value="ECDSA">ECDSA</option>
+        <option value="Ed25519">Ed25519</option>
+        <option value="AES">AES (symmetric)</option>
+      </select>
+    </div>
+    <div id="rsaOptions" class="mb-3">
+      <label for="rsaKeySize" class="form-label">Key Size (bits)</label>
+      <select id="rsaKeySize" class="form-select">
+        <option value="2048">2048</option>
+        <option value="3072" selected>3072</option>
+        <option value="4096">4096</option>
+        <option value="8192">8192</option>
+      </select>
+    </div>
+    <div id="ecdsaOptions" class="mb-3 d-none">
+      <label for="ecdsaCurve" class="form-label">Curve</label>
+      <select id="ecdsaCurve" class="form-select">
+        <option value="P-256" selected>P-256</option>
+        <option value="P-384">P-384</option>
+        <option value="P-521">P-521</option>
+      </select>
+    </div>
+    <div id="aesOptions" class="mb-3 d-none">
+      <label for="aesKeySize" class="form-label">Key Size (bits)</label>
+      <select id="aesKeySize" class="form-select">
+        <option value="128">128</option>
+        <option value="192">192</option>
+        <option value="256" selected>256</option>
+        <option value="512">512</option>
+      </select>
+    </div>
+    <div class="mb-4">
+      <div class="form-check form-switch">
+        <input class="form-check-input" type="checkbox" id="persistToggle" checked>
+        <label class="form-check-label" for="persistToggle">Store in database (persist)</label>
+      </div>
+      <div class="form-text text-muted">
+        When enabled the key is saved to <code>KeyStorage</code> and the response contains
+        <code>key_id</code>. When disabled the key material is returned in clear.
+      </div>
+    </div>
+    <button class="btn btn-primary" onclick="generateKey()">
+      <i class="bi bi-plus-circle me-1"></i>Generate Key
+    </button>
+  </div>
+</div>
+
+<div id="resultSection" class="d-none" style="max-width: 700px;">
+  <div class="d-flex justify-content-between align-items-center mb-2">
+    <span class="fw-semibold">Result</span>
+    <div class="d-flex gap-2">
+      <button class="btn btn-outline-secondary btn-sm" onclick="copyResult()">
+        <i class="bi bi-clipboard me-1"></i>Copy
+      </button>
+      <button id="downloadBtn" class="btn btn-outline-primary btn-sm d-none" onclick="downloadKey()">
+        <i class="bi bi-download me-1"></i>Download
+      </button>
+    </div>
+  </div>
+  <pre id="resultBox" class="bg-light border rounded p-3"></pre>
+</div>
+
+<div id="errorSection" class="d-none" style="max-width: 700px;">
+  <div class="alert alert-danger" id="errorMsg"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let lastResult = null;
+
+  function onAlgorithmChange() {
+    const algo = document.getElementById('algorithmSelect').value;
+    document.getElementById('rsaOptions').classList.toggle('d-none', algo !== 'RSA');
+    document.getElementById('ecdsaOptions').classList.toggle('d-none', algo !== 'ECDSA');
+    document.getElementById('aesOptions').classList.toggle('d-none', algo !== 'AES');
+  }
+
+  async function generateKey() {
+    document.getElementById('resultSection').classList.add('d-none');
+    document.getElementById('errorSection').classList.add('d-none');
+    document.getElementById('downloadBtn').classList.add('d-none');
+    lastResult = null;
+
+    const algo = document.getElementById('algorithmSelect').value;
+    const persist = document.getElementById('persistToggle').checked;
+    const body = { algorithm: algo, persist };
+    if (algo === 'RSA') body.key_size = parseInt(document.getElementById('rsaKeySize').value);
+    else if (algo === 'ECDSA') body.curve = document.getElementById('ecdsaCurve').value;
+    else if (algo === 'AES') body.key_size = parseInt(document.getElementById('aesKeySize').value);
+
+    try {
+      const res = await fetch(`${apiBase}/kms/generate-key`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.description || data.error || `HTTP ${res.status}`);
+      lastResult = data;
+      document.getElementById('resultBox').textContent = JSON.stringify(data, null, 2);
+      document.getElementById('resultSection').classList.remove('d-none');
+      if (data.key_material) document.getElementById('downloadBtn').classList.remove('d-none');
+    } catch (err) {
+      document.getElementById('errorMsg').textContent = 'Error: ' + err.message;
+      document.getElementById('errorSection').classList.remove('d-none');
+    }
+  }
+
+  function copyResult() {
+    navigator.clipboard.writeText(document.getElementById('resultBox').textContent)
+      .then(() => alert('Copied to clipboard.'));
+  }
+
+  function downloadKey() {
+    if (!lastResult || !lastResult.key_material) return;
+    const algo = lastResult.algorithm || 'key';
+    const isPem = lastResult.key_material.startsWith('-----');
+    const filename = `${algo.toLowerCase()}_key.${isPem ? 'pem' : 'b64'}`;
+    const blob = new Blob([lastResult.key_material], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+    URL.revokeObjectURL(a.href);
+  }
+</script>
+{% endblock %}

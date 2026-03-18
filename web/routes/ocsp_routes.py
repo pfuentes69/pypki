@@ -7,7 +7,7 @@ from cryptography.x509.oid import ObjectIdentifier
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from flask import Blueprint, request, Response, jsonify
-from api.services import api_adapters
+from web.services import api_adapters
 
 from pypki import logger, PKITools, OCSPResponder
 

@@ -1,0 +1,163 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="/certificate_list.html">Certificates</a></li>
+    <li class="breadcrumb-item active" id="breadcrumbCurrent">Details</li>
+  </ol>
+</nav>
+<h4 class="mb-4">Certificate Details</h4>
+<div id="certDetails"><div class="text-muted">Loading...</div></div>
+{% endblock %}
+
+{% block modals %}
+<div class="modal fade" id="revokeModal" tabindex="-1" aria-labelledby="revokeModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="revokeModalLabel"><i class="bi bi-x-circle me-2 text-danger"></i>Revoke Certificate</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted small">This action is irreversible. The certificate will be added to the CRL.</p>
+        <label for="revocationReasonSelect" class="form-label fw-semibold">Revocation Reason</label>
+        <select id="revocationReasonSelect" class="form-select">
+          <option value="0">0 – Unspecified</option>
+          <option value="1">1 – Key Compromise</option>
+          <option value="2">2 – CA Compromise</option>
+          <option value="3">3 – Affiliation Changed</option>
+          <option value="4">4 – Superseded</option>
+          <option value="5">5 – Cessation of Operation</option>
+          <option value="6">6 – Certificate Hold</option>
+          <option value="8">8 – Remove From CRL</option>
+          <option value="9">9 – Privilege Withdrawn</option>
+          <option value="10">10 – AA Compromise</option>
+        </select>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-danger" id="confirmRevokeBtn">
+          <i class="bi bi-x-circle me-1"></i>Revoke
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const REVOCATION_REASONS = {
+    0: 'Unspecified', 1: 'Key Compromise', 2: 'CA Compromise', 3: 'Affiliation Changed',
+    4: 'Superseded', 5: 'Cessation of Operation', 6: 'Certificate Hold',
+    8: 'Remove From CRL', 9: 'Privilege Withdrawn', 10: 'AA Compromise'
+  };
+
+  function getIdFromUrl() { return new URLSearchParams(window.location.search).get("id"); }
+
+  function statusBadge(status) {
+    const map = { Active: 'success', Revoked: 'danger', Expired: 'secondary' };
+    return `<span class="badge bg-${map[status] || 'secondary'}">${status}</span>`;
+  }
+
+  function row(label, value) {
+    return `<tr><th class="text-nowrap" style="width:180px">${label}</th><td>${value}</td></tr>`;
+  }
+
+  function renderCertificate(cert) {
+    const revocationRows = cert.status === 'Revoked' ? `
+      ${row('Revoked At', cert.revoked_at || '—')}
+      ${row('Revocation Reason', cert.revocation_reason != null
+        ? `<span class="font-monospace">${cert.revocation_reason}</span> – ${REVOCATION_REASONS[cert.revocation_reason] || 'Unknown'}`
+        : '—')}
+    ` : '';
+
+    const revokeButton = cert.status === 'Active' ? `
+      <button class="btn btn-sm btn-danger ms-2" data-bs-toggle="modal" data-bs-target="#revokeModal">
+        <i class="bi bi-x-circle me-1"></i>Revoke
+      </button>` : '';
+
+    document.getElementById('certDetails').innerHTML = `
+      <div class="card mb-4">
+        <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+          <span>General</span>${revokeButton}
+        </div>
+        <div class="card-body p-0">
+          <table class="table table-sm mb-0"><tbody>
+            ${row('ID', cert.id)}
+            ${row('Status', statusBadge(cert.status))}
+            ${row('CA ID', cert.ca_id)}
+            ${row('Template ID', cert.template_id)}
+            ${row('Serial Number', `<span class="font-monospace">${cert.serial_number}</span>`)}
+            ${row('Subject', cert.subject_name || '—')}
+            ${row('Issuer', cert.issuer_name || '—')}
+            ${row('Not Before', cert.not_before)}
+            ${row('Not After', cert.not_after)}
+            ${row('Fingerprint', `<span class="font-monospace small">${cert.fingerprint}</span>`)}
+            ${row('Created At', cert.created_at)}
+            ${row('Updated At', cert.updated_at)}
+            ${revocationRows}
+          </tbody></table>
+        </div>
+      </div>
+      <div class="card mb-4">
+        <div class="card-header fw-semibold">Public Key</div>
+        <div class="card-body p-2"><pre class="mb-0 small">${cert.public_key}</pre></div>
+      </div>
+      <div class="card">
+        <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+          Certificate PEM
+          <a class="btn btn-sm btn-outline-primary" href="${apiBase}/certificate/pem/${cert.id}" target="_blank">
+            <i class="bi bi-download"></i> Download
+          </a>
+        </div>
+        <div class="card-body p-2"><pre class="mb-0 small">${cert.certificate_data}</pre></div>
+      </div>`;
+
+    document.getElementById('confirmRevokeBtn').addEventListener('click', () => revokeCertificate(cert.id));
+  }
+
+  function revokeCertificate(certId) {
+    const reason = parseInt(document.getElementById('revocationReasonSelect').value, 10);
+    const btn = document.getElementById('confirmRevokeBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Revoking…';
+
+    fetch(`${apiBase}/certificate/revoke/${certId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revocation_reason: reason })
+    })
+      .then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.description || `HTTP ${r.status}`); }); return r.json(); })
+      .then(() => {
+        bootstrap.Modal.getInstance(document.getElementById('revokeModal')).hide();
+        showToast('Certificate revoked successfully.');
+        loadCertificate();
+      })
+      .catch(err => {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-x-circle me-1"></i>Revoke';
+        showToast(`Revocation failed: ${err.message}`, 'danger');
+      });
+  }
+
+  function loadCertificate() {
+    const id = getIdFromUrl();
+    if (!id) { document.getElementById('certDetails').innerHTML = '<div class="alert alert-warning">No certificate ID provided.</div>'; return; }
+    fetch(`${apiBase}/certificate/${id}`)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(cert => {
+        const label = cert.subject_name || `#${cert.id}`;
+        document.getElementById('breadcrumbCurrent').textContent = label;
+        renderCertificate(cert);
+      })
+      .catch(err => {
+        document.getElementById('certDetails').innerHTML = `<div class="alert alert-danger">Failed to load certificate: ${err.message}</div>`;
+      });
+  }
+
+  window.onload = loadCertificate;
+</script>
+{% endblock %}

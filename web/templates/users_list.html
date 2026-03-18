@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item active">Users</li>
+  </ol>
+</nav>
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0">Users</h4>
+  <a href="/user_editor.html" class="btn btn-primary btn-sm" id="newUserBtn">
+    <i class="bi bi-plus-circle me-1"></i>New User
+  </a>
+</div>
+
+<div class="card shadow-sm">
+  <div class="card-body p-0">
+    <table class="table table-hover mb-0" id="usersTable">
+      <thead class="table-light">
+        <tr>
+          <th>Username</th>
+          <th>Role</th>
+          <th>Status</th>
+          <th>Last Login</th>
+          <th>Created</th>
+          <th class="text-end">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="usersBody">
+        <tr><td colspan="6" class="text-muted small p-3">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div id="emptyState" class="text-center py-5" style="display:none!important">
+  <i class="bi bi-people text-muted" style="font-size:3rem"></i>
+  <p class="text-muted mt-3">No users yet.</p>
+  <a href="/user_editor.html" class="btn btn-primary btn-sm">
+    <i class="bi bi-plus-circle me-1"></i>Create first user
+  </a>
+</div>
+{% endblock %}
+
+{% block modals %}
+<div class="modal fade" id="confirmModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Delete user</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="confirmBody"></div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-danger btn-sm" id="confirmBtn">Delete</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:9999">
+  <div id="toast" class="toast align-items-center text-bg-success border-0" role="alert">
+    <div class="d-flex">
+      <div class="toast-body" id="toastMsg"></div>
+      <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const currentUser = window._auth.getCurrentUser();
+
+  const ROLE_BADGES = {
+    superadmin: 'bg-danger', admin: 'bg-primary', user: 'bg-success', auditor: 'bg-secondary',
+  };
+
+  function showToast(msg, type = 'success') {
+    const el = document.getElementById('toast');
+    document.getElementById('toastMsg').innerHTML = msg;
+    el.className = `toast align-items-center text-bg-${type} border-0`;
+    bootstrap.Toast.getOrCreateInstance(el, { delay: 3000 }).show();
+  }
+
+  function formatDate(val) {
+    if (!val) return '<span class="text-muted">—</span>';
+    return new Date(val).toLocaleString();
+  }
+
+  function roleBadge(role) {
+    return `<span class="badge ${ROLE_BADGES[role] || 'bg-secondary'}">${role}</span>`;
+  }
+
+  function activeBadge(active) {
+    return active ? '<span class="badge bg-success">Active</span>' : '<span class="badge bg-secondary">Inactive</span>';
+  }
+
+  function canEdit(u) {
+    if (!currentUser) return false;
+    const me = currentUser;
+    if (u.username === 'superadmin') return me.username === 'superadmin';
+    if (u.role === 'superadmin' || u.role === 'admin') return me.role === 'superadmin';
+    return me.role === 'superadmin' || me.role === 'admin';
+  }
+
+  function canDelete(u) {
+    if (!currentUser) return false;
+    if (u.username === 'superadmin') return false;
+    const me = currentUser;
+    if (u.role === 'superadmin' || u.role === 'admin') return me.role === 'superadmin';
+    return me.role === 'superadmin' || me.role === 'admin';
+  }
+
+  async function loadUsers() {
+    const me = currentUser;
+    if (!me || (me.role !== 'superadmin' && me.role !== 'admin')) {
+      document.getElementById('usersBody').innerHTML =
+        '<tr><td colspan="6" class="p-4"><div class="alert alert-warning mb-0">' +
+        '<i class="bi bi-shield-exclamation me-2"></i>You do not have permission to manage users.</div></td></tr>';
+      document.getElementById('newUserBtn').style.display = 'none';
+      return;
+    }
+    try {
+      const res = await fetch(`${apiBase}/users`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const users = await res.json();
+      renderTable(users);
+    } catch (e) {
+      document.getElementById('usersBody').innerHTML =
+        `<tr><td colspan="6" class="text-danger small p-3">Failed to load users: ${e.message}</td></tr>`;
+    }
+  }
+
+  function renderTable(users) {
+    const tbody = document.getElementById('usersBody');
+    if (!users.length) {
+      tbody.innerHTML = '';
+      document.getElementById('usersTable').style.display = 'none';
+      document.getElementById('emptyState').style.display = '';
+      return;
+    }
+    tbody.innerHTML = users.map(u => {
+      const editBtn = canEdit(u)
+        ? `<a href="/user_editor.html?id=${u.id}" class="btn btn-outline-secondary btn-sm me-1" title="Edit"><i class="bi bi-pencil"></i></a>`
+        : '';
+      const deleteBtn = canDelete(u)
+        ? `<button class="btn btn-outline-danger btn-sm" onclick="confirmDelete(${u.id}, '${u.username}')" title="Delete"><i class="bi bi-trash"></i></button>`
+        : '';
+      return `
+        <tr>
+          <td class="fw-semibold">${u.username}</td>
+          <td>${roleBadge(u.role)}</td>
+          <td>${activeBadge(u.is_active)}</td>
+          <td class="small text-muted">${formatDate(u.last_login)}</td>
+          <td class="small text-muted">${formatDate(u.created_at)}</td>
+          <td class="text-end">${editBtn}${deleteBtn}</td>
+        </tr>`;
+    }).join('');
+  }
+
+  function confirmDelete(id, username) {
+    document.getElementById('confirmBody').innerHTML =
+      `Delete user <strong>${username}</strong>? This cannot be undone.`;
+    const btn = document.getElementById('confirmBtn');
+    btn.onclick = () => deleteUser(id, username);
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('confirmModal')).show();
+  }
+
+  async function deleteUser(id, username) {
+    bootstrap.Modal.getInstance(document.getElementById('confirmModal')).hide();
+    try {
+      const res = await fetch(`${apiBase}/users/${id}`, { method: 'DELETE', headers: { 'Accept': 'application/json' } });
+      let data = {}; try { data = await res.json(); } catch (_) {}
+      if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+      showToast(`User <strong>${username}</strong> deleted.`);
+      loadUsers();
+    } catch (e) { showToast(`Delete failed: ${e.message}`, 'danger'); }
+  }
+
+  window.onload = loadUsers;
+</script>
+{% endblock %}

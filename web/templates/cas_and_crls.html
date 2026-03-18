@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item active">CAs &amp; CRL</li>
+  </ol>
+</nav>
+<h4 class="mb-4">Certification Authorities</h4>
+
+<div id="caTableWrapper">
+  <div class="table-responsive">
+    <table class="table table-bordered table-hover table-striped align-middle w-100">
+      <thead class="table-dark">
+        <tr>
+          <th style="width:5%">ID</th>
+          <th>Name</th>
+          <th style="width:14%">Max Cert Validity</th>
+          <th style="width:12%">CRL Validity</th>
+          <th style="width:8%"></th>
+        </tr>
+      </thead>
+      <tbody id="caTableBody">
+        <tr><td colspan="5" class="text-muted text-center">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function loadCAs() {
+    fetch(`${apiBase}/ca`)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(cas => {
+        const tbody = document.getElementById('caTableBody');
+        if (!cas.length) {
+          tbody.innerHTML = '<tr><td colspan="5" class="text-muted text-center">No Certification Authorities found.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = cas.map(ca => `
+          <tr>
+            <td>${ca.id}</td>
+            <td>${ca.name}</td>
+            <td>${ca.max_validity != null ? ca.max_validity + ' days' : '—'}</td>
+            <td>${ca.crl_validity != null ? ca.crl_validity + ' days' : '—'}</td>
+            <td><a class="btn btn-sm btn-outline-primary" href="/ca_details.html?id=${ca.id}">Details</a></td>
+          </tr>`).join('');
+      })
+      .catch(err => {
+        document.getElementById('caTableBody').innerHTML =
+          `<tr><td colspan="5"><div class="alert alert-danger mb-0">Failed to load CAs: ${err.message}</div></td></tr>`;
+      });
+  }
+
+  window.onload = loadCAs;
+</script>
+{% endblock %}

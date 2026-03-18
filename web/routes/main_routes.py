@@ -4,7 +4,7 @@ import re
 from flask import Blueprint, jsonify, request, abort, Response, send_from_directory, g
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import pkcs7
-from api.services import api_adapters
+from web.services import api_adapters
 
 from pypki import logger
 

@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="/users_list.html">Users</a></li>
+    <li class="breadcrumb-item active" id="breadcrumbCurrent">New User</li>
+  </ol>
+</nav>
+
+<h4 class="mb-4" id="pageTitle">New User</h4>
+
+<div class="card shadow-sm" style="max-width:540px" id="editorCard">
+  <div class="card-body">
+    <div class="mb-3">
+      <label class="form-label fw-semibold small">Username <span class="text-danger">*</span></label>
+      <input type="text" class="form-control" id="username" autocomplete="off">
+    </div>
+
+    <div class="mb-3">
+      <label class="form-label fw-semibold small">Role <span class="text-danger">*</span></label>
+      <select class="form-select" id="role">
+        <option value="user">user</option>
+        <option value="auditor">auditor</option>
+        <option value="admin">admin</option>
+        <option value="superadmin">superadmin</option>
+      </select>
+    </div>
+
+    <div class="mb-3" id="activeRow" style="display:none">
+      <label class="form-label fw-semibold small">Status</label>
+      <div class="form-check form-switch mt-1">
+        <input class="form-check-input" type="checkbox" id="isActive" checked>
+        <label class="form-check-label small" for="isActive">Active</label>
+      </div>
+    </div>
+
+    <hr class="my-3">
+
+    <div class="mb-3">
+      <label class="form-label fw-semibold small" id="passwordLabel">
+        Password <span class="text-danger">*</span>
+      </label>
+      <div class="input-group">
+        <input type="password" class="form-control font-monospace" id="password" autocomplete="new-password">
+        <button class="btn btn-outline-secondary" type="button" onclick="toggleVis('password', 'eyeIcon1')">
+          <i class="bi bi-eye" id="eyeIcon1"></i>
+        </button>
+      </div>
+      <div class="form-text" id="passwordHint" style="display:none">Leave blank to keep the current password.</div>
+    </div>
+
+    <div class="mb-4">
+      <label class="form-label fw-semibold small">Confirm Password <span class="text-danger" id="confirmRequired">*</span></label>
+      <div class="input-group">
+        <input type="password" class="form-control font-monospace" id="confirmPassword" autocomplete="new-password">
+        <button class="btn btn-outline-secondary" type="button" onclick="toggleVis('confirmPassword', 'eyeIcon2')">
+          <i class="bi bi-eye" id="eyeIcon2"></i>
+        </button>
+      </div>
+      <div class="invalid-feedback" id="passwordMismatch">Passwords do not match.</div>
+    </div>
+
+    <div class="d-flex gap-2">
+      <button class="btn btn-primary btn-sm" id="btnSave" onclick="save()">
+        <i class="bi bi-floppy me-1"></i>Save
+      </button>
+      <a href="/users_list.html" class="btn btn-outline-secondary btn-sm">Cancel</a>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block modals %}
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:9999">
+  <div id="toast" class="toast align-items-center border-0" role="alert">
+    <div class="d-flex">
+      <div class="toast-body" id="toastMsg"></div>
+      <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const params      = new URLSearchParams(location.search);
+  const userId      = params.get('id') ? parseInt(params.get('id')) : null;
+  const currentUser = window._auth.getCurrentUser();
+
+  function showToast(msg, type = 'success') {
+    const el = document.getElementById('toast');
+    document.getElementById('toastMsg').innerHTML = msg;
+    el.className = `toast align-items-center text-bg-${type} border-0`;
+    bootstrap.Toast.getOrCreateInstance(el, { delay: 3000 }).show();
+  }
+
+  function toggleVis(inputId, iconId) {
+    const input = document.getElementById(inputId);
+    const icon  = document.getElementById(iconId);
+    if (input.type === 'password') {
+      input.type = 'text'; icon.className = 'bi bi-eye-slash';
+    } else {
+      input.type = 'password'; icon.className = 'bi bi-eye';
+    }
+  }
+
+  function showAccessDenied(msg) {
+    document.getElementById('editorCard').innerHTML =
+      `<div class="alert alert-warning"><i class="bi bi-shield-exclamation me-2"></i>${msg}</div>` +
+      `<a href="/users_list.html" class="btn btn-outline-secondary btn-sm">Back</a>`;
+  }
+
+  function filterRoleDropdown() {
+    if (!currentUser) return;
+    const select = document.getElementById('role');
+    if (currentUser.role !== 'superadmin') {
+      ['superadmin', 'admin'].forEach(r => {
+        const opt = select.querySelector(`option[value="${r}"]`);
+        if (opt) opt.remove();
+      });
+    }
+  }
+
+  async function loadUser() {
+    const me = currentUser;
+    if (!me || (me.role !== 'superadmin' && me.role !== 'admin')) {
+      showAccessDenied('You do not have permission to manage users.');
+      return;
+    }
+    if (!userId) { filterRoleDropdown(); return; }
+
+    document.getElementById('pageTitle').textContent        = 'Edit User';
+    document.getElementById('breadcrumbCurrent').textContent = 'Edit User';
+    document.getElementById('activeRow').style.display     = '';
+    document.getElementById('passwordHint').style.display  = '';
+    document.getElementById('passwordLabel').innerHTML     =
+      'Password <span class="text-muted small fw-normal">(optional)</span>';
+    document.getElementById('confirmRequired').style.display = 'none';
+
+    try {
+      const res = await fetch(`${apiBase}/users/${userId}`, { headers: { 'Accept': 'application/json' } });
+      let data = {}; try { data = await res.json(); } catch (_) {}
+      if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+
+      document.getElementById('username').value   = data.username;
+      document.getElementById('role').value       = data.role;
+      document.getElementById('isActive').checked = !!data.is_active;
+
+      if (data.username === 'superadmin') {
+        if (me.username !== 'superadmin') {
+          showAccessDenied('The built-in superadmin account can only be modified by the superadmin user.');
+          return;
+        }
+        document.getElementById('username').readOnly = true;
+        document.getElementById('role').disabled     = true;
+        document.getElementById('activeRow').style.display = 'none';
+        document.getElementById('pageTitle').textContent = 'Change Superadmin Password';
+      } else {
+        filterRoleDropdown();
+      }
+    } catch (e) { showToast('Failed to load user: ' + e.message, 'danger'); }
+  }
+
+  function validate() {
+    const pw  = document.getElementById('password').value;
+    const cpw = document.getElementById('confirmPassword').value;
+    const mismatch = document.getElementById('passwordMismatch');
+    const cpwEl    = document.getElementById('confirmPassword');
+
+    if (!userId && !pw) { showToast('Password is required.', 'danger'); return false; }
+    if (pw && pw !== cpw) { cpwEl.classList.add('is-invalid'); mismatch.style.display = 'block'; return false; }
+    cpwEl.classList.remove('is-invalid'); mismatch.style.display = 'none';
+    if (!document.getElementById('username').value.trim()) { showToast('Username is required.', 'danger'); return false; }
+    return true;
+  }
+
+  async function save() {
+    if (!validate()) return;
+    const btn = document.getElementById('btnSave');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Saving…';
+
+    const body = {
+      username:  document.getElementById('username').value.trim(),
+      role:      document.getElementById('role').value,
+      is_active: document.getElementById('isActive').checked,
+    };
+    const pw = document.getElementById('password').value;
+    if (pw) body.password = pw;
+
+    const url    = userId ? `${apiBase}/users/${userId}` : `${apiBase}/users`;
+    const method = userId ? 'PUT' : 'POST';
+
+    try {
+      const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }, body: JSON.stringify(body) });
+      let data = {}; try { data = await res.json(); } catch (_) {}
+      if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+      showToast(`User <strong>${body.username}</strong> ${userId ? 'updated' : 'created'} successfully.`);
+      setTimeout(() => { window.location.href = '/users_list.html'; }, 1200);
+    } catch (e) { showToast('Save failed: ' + e.message, 'danger'); }
+    finally { btn.disabled = false; btn.innerHTML = '<i class="bi bi-floppy me-1"></i>Save'; }
+  }
+
+  window.onload = loadUser;
+</script>
+{% endblock %}

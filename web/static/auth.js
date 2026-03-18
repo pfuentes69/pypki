@@ -10,7 +10,7 @@
     'use strict';
 
     const LOGIN_PAGE   = 'login.html';
-    const API_BASE     = 'http://127.0.0.1:8080/api';
+    const API_BASE     = '/api';
     const onLoginPage  = window.location.pathname.endsWith(LOGIN_PAGE)
                       || window.location.pathname === '/'
                          && window.location.search === ''

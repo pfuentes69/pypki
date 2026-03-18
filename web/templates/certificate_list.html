@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block head_extra %}
+<style>
+  .col-serial { width: 8%; }
+  .col-subject { width: auto; }
+  .col-date { width: 10%; white-space: nowrap; }
+  .col-narrow { width: 5%; }
+  .col-status { width: 7%; }
+  .col-action { width: 5%; }
+  .truncate { max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item active">Certificates</li>
+  </ol>
+</nav>
+<h4 class="mb-4">Certificates</h4>
+
+<form class="row g-3 mb-4">
+  <div class="col-md-3">
+    <label for="filterCaId" class="form-label">CA:</label>
+    <select class="form-select" id="filterCaId"><option value="">All</option></select>
+  </div>
+  <div class="col-md-3">
+    <label for="filterTemplateId" class="form-label">Template:</label>
+    <select class="form-select" id="filterTemplateId"><option value="">All</option></select>
+  </div>
+  <div class="col-md-2">
+    <label for="filterStatus" class="form-label">Status:</label>
+    <select class="form-select" id="filterStatus">
+      <option value="">All</option>
+      <option value="Active">Active</option>
+      <option value="Revoked">Revoked</option>
+      <option value="Expired">Expired</option>
+    </select>
+  </div>
+  <div class="col-md-2 d-flex align-items-end pb-1">
+    <div class="form-check">
+      <input class="form-check-input" type="checkbox" id="filterExpiringSoon" onchange="onExpiringSoonChanged()">
+      <label class="form-check-label" for="filterExpiringSoon">Expiring in 30 days</label>
+    </div>
+  </div>
+  <div class="col-md-2 align-self-end">
+    <button type="button" class="btn btn-primary w-100" onclick="applyFilter()">
+      <i class="bi bi-funnel me-1"></i>Filter
+    </button>
+  </div>
+</form>
+
+<div class="table-responsive">
+  <table class="table table-bordered table-hover table-striped align-middle w-100">
+    <thead class="table-dark">
+      <tr>
+        <th class="col-narrow">ID</th>
+        <th class="col-narrow">CA</th>
+        <th class="col-narrow">Tmpl</th>
+        <th class="col-serial">Serial Number</th>
+        <th class="col-subject">Subject Name</th>
+        <th class="col-date">Not Before</th>
+        <th class="col-date">Not After</th>
+        <th class="col-status">Status</th>
+        <th class="col-action"></th>
+      </tr>
+    </thead>
+    <tbody id="certTableBody"></tbody>
+  </table>
+</div>
+
+<div class="d-flex justify-content-between align-items-center mt-3">
+  <button class="btn btn-outline-secondary" onclick="prevPage()">
+    <i class="bi bi-chevron-left"></i> Previous
+  </button>
+  <span class="text-muted" id="pageIndicator">Page 1</span>
+  <div class="d-flex align-items-center gap-2">
+    <label for="perPageSelect" class="text-muted small mb-0">Per page:</label>
+    <select class="form-select form-select-sm" id="perPageSelect" style="width:auto" onchange="perPageChanged()">
+      <option value="10">10</option>
+      <option value="50">50</option>
+      <option value="100">100</option>
+    </select>
+    <button class="btn btn-outline-secondary" onclick="nextPage()">
+      Next <i class="bi bi-chevron-right"></i>
+    </button>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let currentPage = 1;
+
+  function perPage() { return parseInt(document.getElementById('perPageSelect').value, 10); }
+
+  function loadDropdowns() {
+    fetch(`${apiBase}/ca`).then(r => r.json()).then(cas => {
+      const sel = document.getElementById('filterCaId');
+      cas.forEach(ca => { const o = document.createElement('option'); o.value = ca.id; o.textContent = ca.name; sel.appendChild(o); });
+    });
+    fetch(`${apiBase}/template`).then(r => r.json()).then(templates => {
+      const sel = document.getElementById('filterTemplateId');
+      templates.forEach(t => { const o = document.createElement('option'); o.value = t.id; o.textContent = t.name; sel.appendChild(o); });
+    });
+  }
+
+  function statusBadge(status) {
+    const map = { Active: 'success', Revoked: 'danger', Expired: 'secondary' };
+    return `<span class="badge bg-${map[status] || 'secondary'}">${status}</span>`;
+  }
+
+  function onExpiringSoonChanged() {
+    const checked = document.getElementById('filterExpiringSoon').checked;
+    const statusSel = document.getElementById('filterStatus');
+    statusSel.disabled = checked;
+    if (checked) statusSel.value = '';
+  }
+
+  function applyFilter() { currentPage = 1; loadCertificates(); }
+  function perPageChanged() { currentPage = 1; loadCertificates(); }
+
+  function loadCertificates() {
+    const caId = document.getElementById('filterCaId').value;
+    const templateId = document.getElementById('filterTemplateId').value;
+    const status = document.getElementById('filterStatus').value;
+    const expiringSoon = document.getElementById('filterExpiringSoon').checked;
+    const pp = perPage();
+
+    let url = `${apiBase}/certificate?page=${currentPage}&per_page=${pp}`;
+    if (caId) url += `&ca_id=${caId}`;
+    if (templateId) url += `&template_id=${templateId}`;
+    if (expiringSoon) { url += `&expiring_soon=true`; } else if (status) { url += `&status=${encodeURIComponent(status)}`; }
+
+    const tbody = document.getElementById('certTableBody');
+    tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">Loading…</td></tr>';
+
+    fetch(url)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(data => {
+        if (!data.certificates.length) {
+          tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No certificates found.</td></tr>';
+        } else {
+          tbody.innerHTML = data.certificates.map(cert => `
+            <tr>
+              <td class="col-narrow">${cert.id}</td>
+              <td class="col-narrow">${cert.ca_id}</td>
+              <td class="col-narrow">${cert.template_id}</td>
+              <td class="col-serial truncate" title="${cert.serial_number}"><small class="font-monospace">${cert.serial_number}</small></td>
+              <td class="col-subject truncate" title="${cert.subject_name || ''}">${cert.subject_name || ''}</td>
+              <td class="col-date"><small>${cert.not_before}</small></td>
+              <td class="col-date"><small>${cert.not_after}</small></td>
+              <td class="col-status">${statusBadge(cert.status)}</td>
+              <td class="col-action"><a class="btn btn-sm btn-outline-primary" href="/certificate_details.html?id=${cert.id}">View</a></td>
+            </tr>`).join('');
+        }
+        const totalPages = data.total ? Math.ceil(data.total / pp) : '?';
+        document.getElementById('pageIndicator').textContent = `Page ${currentPage} of ${totalPages}  (${data.total} total)`;
+      })
+      .catch(err => {
+        tbody.innerHTML = `<tr><td colspan="9"><div class="alert alert-danger mb-0">Error: ${err.message}</div></td></tr>`;
+      });
+  }
+
+  function nextPage() { currentPage++; loadCertificates(); }
+  function prevPage() { if (currentPage > 1) { currentPage--; loadCertificates(); } }
+
+  function applyUrlParams() {
+    const p = new URLSearchParams(window.location.search);
+    if (p.has('status')) document.getElementById('filterStatus').value = p.get('status');
+    if (p.get('expiring_soon') === 'true') { document.getElementById('filterExpiringSoon').checked = true; onExpiringSoonChanged(); }
+  }
+
+  window.onload = () => { loadDropdowns(); applyUrlParams(); loadCertificates(); };
+</script>
+{% endblock %}
