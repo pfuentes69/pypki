@@ -40,7 +40,12 @@ class KeyManagementService:
     # ── Key loading ──────────────────────────────────────────────────────────
 
     def load_key(self, key_id: int, token_password: str = None) -> None:
-        """Load a key from KeyStorage into the in-memory cache."""
+        """Load a key from KeyStorage into the in-memory cache.
+
+        For HSM keys the token_password is read from the KeyStorage record.
+        The token_password parameter is accepted for backwards compatibility
+        but the stored value takes precedence when present.
+        """
         with self.__db.connection():
             record = self.__db.get_key_record(key_id)
 
@@ -57,11 +62,12 @@ class KeyManagementService:
             kt.set_private_key(load_pem_private_key(pem.encode("utf-8"), password=None))
 
         elif storage_type == "HSM":
+            stored_password = record.get("token_password")
             kt = KeyTools(
                 private_key=None,
                 key_id=record.get("hsm_token_id"),
                 slot_num=record.get("hsm_slot"),
-                token_password=token_password or ""
+                token_password=stored_password if stored_password is not None else (token_password or "")
             )
 
         else:

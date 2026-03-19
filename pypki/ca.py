@@ -16,7 +16,6 @@ class CertificationAuthority:
         self.__local_key: KeyTools = None   # direct key when KMS is not used
         self.__certificate: x509.Certificate = b""
         self.__certificate_chain_pem: str = ""
-        self.__issued_serials = set()
 
 
     def load_config_json(self, ca_config_json: str):
@@ -84,20 +83,10 @@ class CertificationAuthority:
         )
 
 
-    def load_serials(self, initial_serials: set):
-        if not isinstance(initial_serials, set):
-            raise TypeError("initial_serials must be a set")
-        self.__issued_serials.update(initial_serials)
-
-
     def generate_unique_serial(self):
-        while True:
-            serial = int.from_bytes(
-                secrets.token_bytes(self.__config["serial_number_length"]), "big"
-            )
-            if serial not in self.__issued_serials:
-                self.__issued_serials.add(serial)
-                return serial
+        return int.from_bytes(
+            secrets.token_bytes(self.__config["serial_number_length"]), "big"
+        )
 
 
     def get_certificate(self) -> x509.Certificate:

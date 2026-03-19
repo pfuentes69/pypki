@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 
 from cryptography.hazmat.primitives.asymmetric import rsa, ec
 
-from .db import PKIDataBase
+from .db import PKIDataBase, DuplicateSerialError
 from .certificate_tools import CertificateTools
 from .pki_tools import PKITools
 from .key_tools import KeyTools
@@ -174,8 +174,6 @@ class PyPKI:
                 }
                 ca.load_config_json(json.dumps(ca_config, indent=2))
                 ca.set_kms(self.__kms)
-                with self.__db.connection():
-                    ca.load_serials(self.__db.fetch_used_serials())
                 return ca
         return None
 
@@ -303,20 +301,25 @@ class PyPKI:
             used_ca_id = None
             used_template_id = self.__cert_template_id
 
-        new_cert_pem = cert_tool.generate_certificate_pem(
-            request_json=request_json,
-            issuing_ca=issuing_ca,
-            certificate_key=certificate_key,
-            validity_days=validity_days,
-            enforce_template=True
-        )
-
-        if new_cert_pem:
-            with self.__db.connection():
-                new_cert_id = self.__db.insert_certificate(new_cert_pem, used_ca_id, used_template_id, private_key_reference=None)
+        for _attempt in range(3):
+            new_cert_pem = cert_tool.generate_certificate_pem(
+                request_json=request_json,
+                issuing_ca=issuing_ca,
+                certificate_key=certificate_key,
+                validity_days=validity_days,
+                enforce_template=True
+            )
+            if not new_cert_pem:
+                logger.error("Problem generating new certificate")
+                return None
+            try:
+                with self.__db.connection():
+                    new_cert_id = self.__db.insert_certificate(new_cert_pem, used_ca_id, used_template_id, private_key_reference=None)
+                break
+            except DuplicateSerialError:
+                logger.warning(f"Serial collision on attempt {_attempt + 1}, retrying")
         else:
-            logger.error("Problem generating new certificate")
-            return None
+            raise RuntimeError("Failed to obtain a unique serial after 3 attempts")
 
         if return_certificate is True:
             return new_cert_pem
@@ -353,20 +356,25 @@ class PyPKI:
             used_ca_id = None
             used_template_id = self.__cert_template_id
 
-        new_cert = cert_tool.generate_certificate_from_csr(
-            csr_pem=csr_pem,
-            request_json=request_json,
-            issuing_ca=issuing_ca,
-            validity_days=validity_days,
-            enforce_template=enforce_template)
-
-        if new_cert:
+        for _attempt in range(3):
+            new_cert = cert_tool.generate_certificate_from_csr(
+                csr_pem=csr_pem,
+                request_json=request_json,
+                issuing_ca=issuing_ca,
+                validity_days=validity_days,
+                enforce_template=enforce_template)
+            if not new_cert:
+                logger.error("Problem generating new certificate")
+                return None
             new_cert_pem = new_cert.public_bytes(serialization.Encoding.PEM)
-            with self.__db.connection():
-                new_cert_id = self.__db.insert_certificate(new_cert_pem, used_ca_id, used_template_id, private_key_reference=None)
+            try:
+                with self.__db.connection():
+                    new_cert_id = self.__db.insert_certificate(new_cert_pem, used_ca_id, used_template_id, private_key_reference=None)
+                break
+            except DuplicateSerialError:
+                logger.warning(f"Serial collision on attempt {_attempt + 1}, retrying")
         else:
-            logger.error("Problem generating new certificate")
-            return None
+            raise RuntimeError("Failed to obtain a unique serial after 3 attempts")
 
         if return_certificate is True:
             return new_cert
@@ -409,26 +417,12 @@ class PyPKI:
         # Validate against template constraints
         cert_tool.validate_key_algorithm(certificate_key.get_public_key())
 
-        # Generate the certificate object (not PEM yet)
-        new_cert = cert_tool.generate_certificate(
-            request_json=request_json,
-            issuing_ca=issuing_ca,
-            certificate_key=certificate_key,
-            validity_days=validity_days,
-            enforce_template=True,
-        )
-        if not new_cert:
-            raise ValueError("Certificate generation failed")
-
-        new_cert_pem = new_cert.public_bytes(serialization.Encoding.PEM)
-
-        # Optionally store the private key in KeyStorage
+        # Optionally store the private key in KeyStorage (done once, before cert retry loop)
         key_id = None
         if store_key:
             public_key_pem = certificate_key.get_public_key_pem().decode()
             key_type_label = f"{key_algorithm}-{key_type}"
             if pfx_password:
-                # Encrypt the stored key with the same passphrase as the PKCS12
                 stored_key_pem = certificate_key.get_private_key_pem(password=pfx_password).decode()
                 stored_storage_type = "Encrypted"
             else:
@@ -442,11 +436,29 @@ class PyPKI:
                     key_type=key_type_label,
                 )
 
-        with self.__db.connection():
-            cert_id = self.__db.insert_certificate(
-                new_cert_pem, used_ca_id, used_template_id,
-                private_key_reference=key_id,
+        # Generate the certificate and insert; retry on the (astronomically rare) serial collision
+        for _attempt in range(3):
+            new_cert = cert_tool.generate_certificate(
+                request_json=request_json,
+                issuing_ca=issuing_ca,
+                certificate_key=certificate_key,
+                validity_days=validity_days,
+                enforce_template=True,
             )
+            if not new_cert:
+                raise ValueError("Certificate generation failed")
+            new_cert_pem = new_cert.public_bytes(serialization.Encoding.PEM)
+            try:
+                with self.__db.connection():
+                    cert_id = self.__db.insert_certificate(
+                        new_cert_pem, used_ca_id, used_template_id,
+                        private_key_reference=key_id,
+                    )
+                break
+            except DuplicateSerialError:
+                logger.warning(f"Serial collision on attempt {_attempt + 1}, retrying")
+        else:
+            raise RuntimeError("Failed to obtain a unique serial after 3 attempts")
 
         # Build the CA chain for the PKCS12 bag
         ca_certs = None

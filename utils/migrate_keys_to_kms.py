@@ -59,16 +59,17 @@ def migrate_table(cursor, db_name: str, source_table: str, stats: dict) -> None:
 
         storage_type = determine_storage_type(row)
 
-        # Insert into KeyStorage
+        # Insert into KeyStorage (include token_password for HSM keys)
         cursor.execute(f"USE {db_name}")
         cursor.execute("""
-            INSERT INTO KeyStorage (private_key, storage_type, hsm_slot, hsm_token_id)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO KeyStorage (private_key, storage_type, hsm_slot, hsm_token_id, token_password)
+            VALUES (%s, %s, %s, %s, %s)
         """, (
             row["private_key"],
             storage_type,
             row["token_slot"],
             row["token_key_id"] or None,
+            row["token_password"] or None,
         ))
         new_key_id = cursor.lastrowid
 

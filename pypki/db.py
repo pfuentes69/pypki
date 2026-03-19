@@ -3,7 +3,7 @@ import threading
 from contextlib import contextmanager
 import mysql.connector
 import mysql.connector.pooling
-from mysql.connector import OperationalError
+from mysql.connector import OperationalError, IntegrityError
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.backends import default_backend
@@ -14,6 +14,10 @@ from werkzeug.security import generate_password_hash
 from .ca import CertificationAuthority
 from .ocsp_responder import OCSPResponder
 from .log import logger
+
+
+class DuplicateSerialError(Exception):
+    """Raised when a generated serial number collides with an existing one for the same CA."""
 
 
 class PKIDataBase:
@@ -115,18 +119,28 @@ class PKIDataBase:
 
 
     def insert_key(self, private_key: str, storage_type: str = "Plain",
-                   public_key: str = None, key_type: str = None) -> int:
+                   public_key: str = None, key_type: str = None,
+                   hsm_slot: int = None, hsm_token_id: str = None,
+                   token_password: str = None) -> int:
         """
         Insert a row into KeyStorage.
         Returns the new row id.
+
+        For software keys only private_key, storage_type, public_key, and
+        key_type are used.  For HSM keys also pass hsm_slot, hsm_token_id,
+        and token_password.
         """
         try:
             db_name = self.__config["database"]
             cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
             cursor.execute(
-                "INSERT INTO KeyStorage (private_key, storage_type, public_key, key_type) VALUES (%s, %s, %s, %s)",
-                (private_key, storage_type, public_key, key_type)
+                "INSERT INTO KeyStorage "
+                "(private_key, storage_type, public_key, key_type, "
+                " hsm_slot, hsm_token_id, token_password) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (private_key, storage_type, public_key, key_type,
+                 hsm_slot, hsm_token_id, token_password)
             )
             self._local.connection.commit()
             new_id = cursor.lastrowid
@@ -185,10 +199,9 @@ class PKIDataBase:
             insert_query = """
                 INSERT INTO CertificationAuthorities (
                     name, certificate, ski, private_key_reference, certificate_chain,
-                    token_slot, token_key_id, token_password,
                     max_validity, serial_number_length,
                     crl_validity, extensions
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
 
             data = (
@@ -197,9 +210,6 @@ class PKIDataBase:
                 ski,
                 private_key_reference,
                 ca.get_config()["crypto"]["certificate_chain"],
-                ca.get_config()["crypto"]["token_slot"],
-                ca.get_config()["crypto"]["token_key_id"],
-                ca.get_config()["crypto"]["token_password"],
                 ca.get_config()["max_validity"],
                 ca.get_config()["serial_number_length"],
                 ca.get_config()["crl_validity"],
@@ -675,13 +685,22 @@ class PKIDataBase:
             self._local.connection.commit()
             logger.info(f"Certificate inserted successfully! New ID: {new_id}")
 
+        except IntegrityError as err:
+            cursor.close()
+            if err.errno == 1062 and 'uq_ca_serial' in str(err):
+                raise DuplicateSerialError(
+                    f"Serial number collision for ca_id={ca_id}: {serial_number}"
+                ) from err
+            logger.error(f"Database integrity error: {err}")
+            return None
         except mysql.connector.Error as err:
             logger.error(f"Database error: {err}")
             return None
         except Exception as e:
             logger.error(f"Problem processing certificate: {e}")
         finally:
-            cursor.close()
+            if not cursor.is_closed():
+                cursor.close()
 
         return new_id
 
@@ -899,40 +918,6 @@ class PKIDataBase:
         except mysql.connector.Error as err:
             logger.error(f"Error: {err}")
             return False
-
-
-    def fetch_used_serials(self) -> set:
-        """
-        Fetch all used serial numbers from the Certificates table.
-
-        Args:
-            db_config (dict): Database connection parameters.
-
-        Returns:
-            set: A set containing all used serial numbers.
-        """
-        used_serials = set()
-        
-        try:
-            db_name = self.__config["database"]
-            cursor = self._local.connection.cursor(buffered=True)
-            cursor.execute(f"USE {db_name}")
-
-            # Query to fetch all serial numbers
-            query = "SELECT serial_number FROM Certificates"
-            cursor.execute(query)
-
-            # Fetch results and add to the set
-            for (serial_number,) in cursor.fetchall():
-                used_serials.add(serial_number)
-
-        except mysql.connector.Error as err:
-            logger.error(f"Database error: {err}")
-
-        finally:
-            cursor.close()
-        
-        return used_serials
 
 
     def get_revoked_certificates(self, ca_id):
@@ -1561,6 +1546,7 @@ class PKIDataBase:
                         storage_type ENUM('Encrypted', 'Plain', 'HSM') NOT NULL,
                         hsm_slot INT,
                         hsm_token_id VARCHAR(255),
+                        token_password VARCHAR(255),
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 """,
@@ -1572,13 +1558,10 @@ class PKIDataBase:
                         contact_email VARCHAR(255),
                         certificate TEXT,
                         public_key TEXT,
-                        ski VARCHAR(64), 
+                        ski VARCHAR(64),
                         private_key TEXT,
                         private_key_reference INT,
                         certificate_chain TEXT,
-                        token_slot INT, 
-                        token_key_id VARCHAR(64), 
-                        token_password VARCHAR(64), 
                         max_validity INT,
                         serial_number_length INT,
                         crl_validity  INT DEFAULT 365,
@@ -1616,7 +1599,8 @@ class PKIDataBase:
                         certificate_data TEXT,
                         fingerprint VARCHAR(128) NOT NULL UNIQUE,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        UNIQUE KEY uq_ca_serial (ca_id, serial_number)
                     );
                 """,
                 "ESTAliases": """
@@ -1645,9 +1629,6 @@ class PKIDataBase:
                         private_key TEXT,
                         private_key_reference INT,
                         certificate TEXT,
-                        token_slot INT, 
-                        token_key_id VARCHAR(64), 
-                        token_password VARCHAR(64), 
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                     );
