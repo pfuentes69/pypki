@@ -167,21 +167,32 @@ class PKIDataBase:
             cert = x509.load_pem_x509_certificate(ca.get_config()["crypto"]["certificate"].encode("utf-8"))
             public_key = cert.public_key()
 
+            # Derive key type label
             if isinstance(public_key, ec.EllipticCurvePublicKey):
-                public_bytes = public_key.public_bytes(
-                    encoding=serialization.Encoding.X962,
-                    format=serialization.PublicFormat.UncompressedPoint
-                )
-                digest = hashes.Hash(hashes.SHA1())
-                digest.update(public_bytes)
-                ski = digest.finalize().hex()
                 key_type = f"ECDSA-{public_key.curve.name}"
             else:
-                spki_der = public_key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
-                digest = hashes.Hash(hashes.SHA1())
-                digest.update(spki_der)
-                ski = digest.finalize().hex()
                 key_type = f"RSA-{public_key.key_size}"
+
+            # SKI: prefer the extension already embedded in the certificate (it is exactly
+            # what OCSP clients hash to compute issuer_key_hash).  Fall back to computing
+            # SHA-1 of the BIT STRING *value* from SubjectPublicKeyInfo — not the full SPKI
+            # structure — which is what RFC 5280 §4.2.1.2 Method 1 specifies:
+            #   EC  → SHA-1 of the uncompressed EC point
+            #   RSA → SHA-1 of the PKCS#1 DER (RSAPublicKey), i.e. PublicFormat.PKCS1
+            try:
+                ski_ext = cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier)
+                ski = ski_ext.value.digest.hex()
+            except x509.ExtensionNotFound:
+                if isinstance(public_key, ec.EllipticCurvePublicKey):
+                    key_bytes = public_key.public_bytes(
+                        encoding=serialization.Encoding.X962,
+                        format=serialization.PublicFormat.UncompressedPoint
+                    )
+                else:
+                    key_bytes = public_key.public_bytes(Encoding.DER, PublicFormat.PKCS1)
+                digest = hashes.Hash(hashes.SHA1())
+                digest.update(key_bytes)
+                ski = digest.finalize().hex()
 
             # Insert private key into KeyStorage; store the returned id as
             # private_key_reference so the KMS can load it at runtime.
@@ -217,11 +228,14 @@ class PKIDataBase:
             )
 
             cursor.execute(insert_query, data)
+            new_id = cursor.lastrowid
             self._local.connection.commit()
-            logger.info("Certification Authority inserted successfully!")
+            logger.info(f"Certification Authority inserted successfully! New ID: {new_id}")
+            return new_id
 
         except mysql.connector.Error as err:
             logger.error(f"Error inserting Certification Authority: {err}")
+            raise
         finally:
             cursor.close()
 
@@ -316,6 +330,74 @@ class PKIDataBase:
             logger.error(f"Error updating CA: {err}")
             return False
 
+    def delete_ca(self, ca_id: int) -> dict:
+        """
+        Delete a CA and all its directly dependent resources in a single transaction.
+
+        Deletion order (avoids FK violations):
+          1. OCSPResponders       WHERE ca_id = ?   → deleted
+          2. ESTAliases           WHERE ca_id = ?   → deleted
+          3. CertificateRevocationLists WHERE ca_id = ? → deleted
+          4. Certificates         WHERE ca_id = ?   → ca_id set to NULL (records preserved)
+          5. CertificationAuthorities WHERE id = ?  → deleted
+          6. KeyStorage           WHERE id = private_key_reference → deleted
+
+        Returns a dict with counts of affected rows per table, or raises on error.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(buffered=True, dictionary=True)
+            cursor.execute(f"USE {db_name}")
+
+            # Capture private_key_reference before deletion
+            cursor.execute(
+                "SELECT private_key_reference FROM CertificationAuthorities WHERE id = %s",
+                (ca_id,)
+            )
+            ca_row = cursor.fetchone()
+            if not ca_row:
+                cursor.close()
+                return None
+            key_ref = ca_row["private_key_reference"]
+
+            stats = {}
+
+            cursor.execute("DELETE FROM OCSPResponders WHERE ca_id = %s", (ca_id,))
+            stats["ocsp_responders_deleted"] = cursor.rowcount
+
+            cursor.execute("DELETE FROM ESTAliases WHERE ca_id = %s", (ca_id,))
+            stats["est_aliases_deleted"] = cursor.rowcount
+
+            cursor.execute("DELETE FROM CertificateRevocationLists WHERE ca_id = %s", (ca_id,))
+            stats["crls_deleted"] = cursor.rowcount
+
+            cursor.execute(
+                "UPDATE Certificates SET ca_id = NULL WHERE ca_id = %s", (ca_id,)
+            )
+            stats["certificates_unlinked"] = cursor.rowcount
+
+            cursor.execute(
+                "DELETE FROM CertificationAuthorities WHERE id = %s", (ca_id,)
+            )
+            stats["ca_deleted"] = cursor.rowcount
+
+            if key_ref:
+                cursor.execute("DELETE FROM KeyStorage WHERE id = %s", (key_ref,))
+                stats["key_deleted"] = cursor.rowcount
+            else:
+                stats["key_deleted"] = 0
+
+            self._local.connection.commit()
+            logger.info(f"CA id={ca_id} deleted: {stats}")
+            return stats
+
+        except mysql.connector.Error as err:
+            self._local.connection.rollback()
+            logger.error(f"Error deleting CA id={ca_id}: {err}")
+            raise
+        finally:
+            cursor.close()
+
     def get_ca_collection(self):
         """
         Retrieves a collection of CA IDs and names from the CertificationAuthorities table.
@@ -376,16 +458,31 @@ class PKIDataBase:
                 private_key_reference = cursor.lastrowid
                 logger.info(f"OCSP responder private key stored in KeyStorage id={private_key_reference}")
 
+            # Resolve the issuing CA by its SKI so we can populate ca_id
+            issuer_ski = ocsp_resp.get_config()["issuer_ski"]
+            cursor.execute(
+                "SELECT id FROM CertificationAuthorities WHERE ski = %s",
+                (issuer_ski,)
+            )
+            ca_row = cursor.fetchone()
+            ca_id = ca_row[0] if ca_row else None
+            if ca_id is None:
+                logger.warning(
+                    f"insert_ocsp_responder: no CA found with ski='{issuer_ski}'; "
+                    "ca_id will be NULL"
+                )
+
             insert_query = """
                 INSERT INTO OCSPResponders (
-                    name, issuer_ski, issuer_certificate,
+                    name, ca_id, issuer_ski, issuer_certificate,
                     private_key_reference, certificate, response_validity
-                ) VALUES (%s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
             """
 
             data = (
                 ocsp_resp.get_config()["name"],
-                ocsp_resp.get_config()["issuer_ski"],
+                ca_id,
+                issuer_ski,
                 ocsp_resp.get_config()["issuer_certificate"],
                 private_key_reference,
                 ocsp_resp.get_config()["crypto"]["certificate"],
@@ -425,7 +522,8 @@ class PKIDataBase:
                     issuer_certificate=row['issuer_certificate'],
                     response_validity=row['response_validity'],
                     certificate_pem=row['certificate'],
-                    kms_key_id=row.get('private_key_reference')
+                    kms_key_id=row.get('private_key_reference'),
+                    ca_id=row.get('ca_id')
                 )
                 ocsp_responders.append(responder)
 

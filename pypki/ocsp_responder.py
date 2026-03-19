@@ -49,13 +49,16 @@ class OCSPResponder:
         issuer_certificate: str = "",
         response_validity: int = 1,
         certificate_pem: str = "",
-        kms_key_id: int = None
+        kms_key_id: int = None,
+        ca_id: int = None
     ):
         """
         Initialise an OCSPResponder.
 
         kms_key_id: the KeyStorage.id of the responder's signing key.
                     Set by db.get_ocsp_responders_collection() from private_key_reference.
+        ca_id: the CertificationAuthorities.id of the issuing CA this responder serves.
+               Used to scope certificate status queries to the correct CA.
         """
         self.__config = {}
         self.__name = name
@@ -63,6 +66,7 @@ class OCSPResponder:
         self.__response_validity = response_validity
         self.__kms = None
         self.__kms_key_id = kms_key_id
+        self.__ca_id = ca_id
 
         if issuer_certificate:
             self.__issuer_certificate = x509.load_pem_x509_certificate(
@@ -112,6 +116,8 @@ class OCSPResponder:
     def get_issuer_ski(self):
         return self.__issuer_ski
 
+    def get_ca_id(self) -> int:
+        return self.__ca_id
 
     def get_certificate(self) -> x509.Certificate:
         return self.__certificate

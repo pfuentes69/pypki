@@ -127,6 +127,48 @@ def update_ca(ca_id: int, data: dict, user_id: int = 0):
     return ok
 
 
+def create_ca(data: dict, user_id: int = 0) -> int:
+    """
+    Create a new CA from a validated data dict.
+
+    Required keys:
+        name, certificate (PEM), private_key (PEM)
+    Optional keys:
+        certificate_chain (PEM), max_validity (int, default -1),
+        serial_number_length (int, default 10), crl_validity (int, default 365),
+        extensions (dict)
+
+    Returns the new CA's database ID.
+    """
+    config = {
+        "ca_name": data["name"],
+        "max_validity": int(data.get("max_validity", -1)),
+        "serial_number_length": int(data.get("serial_number_length", 10)),
+        "crl_validity": int(data.get("crl_validity", 365)),
+        "extensions": data.get("extensions") or {},
+        "crypto": {
+            "certificate": data["certificate"],
+            "private_key": data["private_key"],
+            "certificate_chain": data.get("certificate_chain") or "",
+        },
+    }
+    new_id = pki.create_ca_from_config_json(json.dumps(config))
+    write_audit_log("cas", new_id, "CREATE", user_id)
+    return new_id
+
+
+def delete_ca(ca_id: int, user_id: int = 0):
+    """
+    Delete a CA and all its dependent resources.
+    Returns the stats dict from db.delete_ca(), or None if the CA was not found.
+    Raises on database error.
+    """
+    stats = pki.delete_ca(ca_id)
+    if stats is not None:
+        write_audit_log("cas", ca_id, "DELETE", user_id)
+    return stats
+
+
 def generate_crl(ca_id):
     """Generate a fresh CRL for the given CA. Returns issue/next-update dates or None."""
     crl = pki.generate_crl(ca_id)

@@ -11,6 +11,7 @@ _PAGES = {
     'certificate_request.html': ('certificate_request', 'Request Certificate'),
     'cas_and_crls.html':        ('cas_and_crls',        'CAs & CRL'),
     'ca_details.html':          ('cas_and_crls',        'CA Details'),
+    'ca_add.html':              ('cas_and_crls',        'Add New CA'),
     'ca_editor.html':           ('cas_and_crls',        'Edit CA'),
     'template_list.html':       ('template_list',       'Certificate Templates'),
     'template_editor.html':     ('template_list',       'Template Editor'),

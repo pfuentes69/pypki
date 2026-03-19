@@ -67,6 +67,7 @@
 
   function renderCA(ca) {
     const id = getIdFromUrl();
+    window._caName = ca.name;
     const hasCrl = !!(ca.crl_issue_date);
     const crlSection = `
       <div class="card mb-4">
@@ -113,6 +114,9 @@
             ${window._isAdmin ? `<a class="btn btn-sm btn-outline-primary" href="/ca_editor.html?id=${id}">
               <i class="bi bi-pencil me-1"></i>Edit
             </a>` : ''}
+            ${window._isSuperAdmin ? `<button class="btn btn-sm btn-outline-danger" data-superadmin-only onclick="deleteCA(${id})">
+              <i class="bi bi-trash me-1"></i>Delete
+            </button>` : ''}
           </div>
         </div>
         <div class="card-body p-0">
@@ -181,6 +185,30 @@
         btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i>Issue Fresh CRL';
         showToast(`CRL generation failed: ${err.message}`, 'danger');
       });
+  }
+
+  async function deleteCA(caId) {
+    const caName = window._caName || `CA #${caId}`;
+    const ok = await confirmAction(
+      `<p>This will permanently delete CA <strong>${caName}</strong> and all its related resources:</p>
+       <ul class="mb-1">
+         <li>OCSP responders for this CA</li>
+         <li>EST aliases pointing to this CA</li>
+         <li>CRL records for this CA</li>
+         <li>The CA private key from KeyStorage</li>
+       </ul>
+       <p class="mb-0">Issued certificates are preserved but will no longer reference this CA.</p>`,
+      { title: 'Delete CA', okLabel: 'Delete', okClass: 'btn-danger' }
+    );
+    if (!ok) return;
+
+    fetch(`${apiBase}/ca/${caId}`, { method: 'DELETE' })
+      .then(r => { if (!r.ok) return r.json().then(e => { throw new Error(e.description || `HTTP ${r.status}`); }); return r.json(); })
+      .then(data => {
+        showToast(`CA deleted. OCSP: ${data.ocsp_responders_deleted}, EST aliases: ${data.est_aliases_deleted}, CRLs: ${data.crls_deleted}, certs unlinked: ${data.certificates_unlinked}.`);
+        setTimeout(() => { window.location.href = '/cas_and_crls.html'; }, 1500);
+      })
+      .catch(err => showToast(`Delete failed: ${err.message}`, 'danger'));
   }
 
   function loadCA() {

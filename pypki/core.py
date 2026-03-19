@@ -116,11 +116,15 @@ class PyPKI:
         return self.__config.get(key, default)
 
 
-    def create_ca_from_config_json(self, config_json: str):
+    def create_ca_from_config_json(self, config_json: str) -> int:
+        """Create a CA from a JSON config string, persist it, and refresh the collection.
+        Returns the new CA's database ID."""
         ca = CertificationAuthority()
         ca.load_config_json(config_json)
         with self.__db.connection():
-            self.__db.insert_ca(ca)
+            new_id = self.__db.insert_ca(ca)
+        self.load_ca_collection()
+        return new_id
 
 
     def load_ca_collection(self):
@@ -131,6 +135,15 @@ class PyPKI:
     def get_ca_collection(self):
         return self.__ca_collection
 
+
+    def delete_ca(self, ca_id: int) -> dict:
+        """Delete a CA and its dependent resources, then refresh the in-memory collection."""
+        with self.__db.connection():
+            stats = self.__db.delete_ca(ca_id)
+        if stats is not None:
+            self.load_ca_collection()
+            self.load_ocsp_responders()
+        return stats
 
     def get_ca_by_id(self, ca_id: int) -> CertificationAuthority:
         with self.__db.connection():

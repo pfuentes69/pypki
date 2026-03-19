@@ -92,6 +92,67 @@ def get_certification_authorities():
     return jsonify(filtered_result), 200
 
 
+@bp.route('/ca', methods=['POST'])
+def create_ca():
+    logger.info("API - POST Create CA")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+
+    data = request.get_json()
+    if not data:
+        abort(400, description="Missing JSON body")
+
+    # PKCS12 path: decode base64, extract key + cert + chain
+    if data.get('pkcs12_b64'):
+        import base64 as _b64
+        from cryptography.hazmat.primitives.serialization import pkcs12 as _pkcs12
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding, PrivateFormat, PublicFormat, NoEncryption
+        )
+        try:
+            p12_bytes = _b64.b64decode(data['pkcs12_b64'])
+            password = data.get('pkcs12_password') or ''
+            p12 = _pkcs12.load_pkcs12(
+                p12_bytes,
+                password.encode('utf-8') if password else None
+            )
+        except Exception as e:
+            abort(400, description=f"Invalid PKCS12 file: {e}")
+
+        if not p12.key or not p12.cert:
+            abort(400, description="PKCS12 must contain a private key and a certificate")
+
+        data['private_key'] = p12.key.private_bytes(
+            Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()
+        ).decode()
+        data['certificate'] = p12.cert.certificate.public_bytes(Encoding.PEM).decode()
+
+        # Chain: additional_certs from PKCS12, plus any manually supplied PEM
+        chain_pem = ''.join(
+            c.certificate.public_bytes(Encoding.PEM).decode()
+            for c in (p12.additional_certs or [])
+        )
+        if data.get('certificate_chain'):
+            chain_pem += data['certificate_chain']
+        data['certificate_chain'] = chain_pem
+
+    if not data.get('name', '').strip():
+        abort(400, description="CA name is required")
+    if not data.get('certificate'):
+        abort(400, description="CA certificate is required")
+    if not data.get('private_key'):
+        abort(400, description="Private key is required")
+
+    try:
+        new_id = api_adapters.create_ca(data, user_id=user_id)
+    except Exception as e:
+        logger.error(f"CA creation failed: {e}")
+        abort(500, description=f"CA creation failed: {e}")
+
+    return jsonify({"message": "CA created successfully", "ca_id": new_id}), 201
+
+
 @bp.route('/ca/<int:ca_id>', methods=['GET'])
 def get_ca_details(ca_id):
     logger.info("API - GET CA Details")
@@ -115,6 +176,22 @@ def update_ca(ca_id):
     if not ok:
         abort(404, description="CA not found or nothing to update")
     return jsonify({"message": "CA updated successfully"}), 200
+
+
+@bp.route('/ca/<int:ca_id>', methods=['DELETE'])
+def delete_ca(ca_id):
+    logger.info(f"API - DELETE CA {ca_id}")
+    err = _require_role('superadmin')
+    if err: return err
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+    try:
+        stats = api_adapters.delete_ca(ca_id, user_id=user_id)
+    except Exception as e:
+        logger.error(f"CA deletion failed: {e}")
+        abort(500, description="CA deletion failed due to a database error")
+    if stats is None:
+        abort(404, description="CA not found")
+    return jsonify({"message": "CA deleted successfully", **stats}), 200
 
 
 @bp.route('/ca/<int:ca_id>/full', methods=['GET'])
