@@ -148,20 +148,39 @@ SQL
 ok "Database '$DB_NAME' and user '$DB_USER' ready"
 
 # =============================================================================
-#  5. CREATE config/config.json  (skip if already present)
+#  5. WRITE config/config.json
+#     Always generate a fresh file so the DB credentials are guaranteed to match
+#     the user/password we just created.  Any pre-existing file is backed up.
 # =============================================================================
 step "Writing configuration"
 
 mkdir -p config/cert_templates config/ca_store config/ocsp_responders
 
+# Preserve a custom secret_key if one is already set so JWT sessions survive re-runs.
+EXISTING_SECRET=""
 if [[ -f config/config.json ]]; then
-    warn "config/config.json already exists — not overwriting."
-    warn "Make sure the db_config section reflects these credentials:"
-    warn "  user=${DB_USER}  password=${DB_PASS}  database=${DB_NAME}"
+    EXISTING_SECRET=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('config/config.json'))
+    sk = d.get('secret_key','')
+    if sk and sk != 'replace-with-64-random-chars' and len(sk) > 8:
+        print(sk)
+except Exception:
+    pass
+" 2>/dev/null || true)
+    cp config/config.json "config/config.json.bak.$(date +%Y%m%d%H%M%S)"
+    warn "Existing config/config.json backed up (config/config.json.bak.*)"
+fi
+
+if [[ -n "$EXISTING_SECRET" ]]; then
+    SECRET_KEY="$EXISTING_SECRET"
+    ok "Reusing existing secret_key"
 else
     SECRET_KEY="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9_-' | head -c 64)"
+fi
 
-    cat > config/config.json <<JSON
+cat > config/config.json <<JSON
 {
     "db_config": {
         "host": "localhost",
@@ -178,11 +197,11 @@ else
     "secret_key":            "${SECRET_KEY}"
 }
 JSON
-    ok "config/config.json created"
+ok "config/config.json written"
 
-    # Save credentials to a protected file so the admin can note them
-    CREDS_FILE="$APP_DIR/.setup_credentials"
-    cat > "$CREDS_FILE" <<CREDS
+# Save credentials to a protected file so the admin can note them
+CREDS_FILE="$APP_DIR/.setup_credentials"
+cat > "$CREDS_FILE" <<CREDS
 # pypki setup – generated credentials
 # NOTE: Delete this file after you have noted the values.
 DB_NAME=${DB_NAME}
@@ -190,9 +209,8 @@ DB_USER=${DB_USER}
 DB_PASS=${DB_PASS}
 SECRET_KEY=${SECRET_KEY}
 CREDS
-    chmod 600 "$CREDS_FILE"
-    ok "Credentials saved to .setup_credentials  ← delete this file after noting them"
-fi
+chmod 600 "$CREDS_FILE"
+ok "Credentials saved to .setup_credentials  ← delete this file after noting them"
 
 # =============================================================================
 #  6. OUTPUT DIRECTORIES
