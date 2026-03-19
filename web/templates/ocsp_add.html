@@ -1,0 +1,276 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="/ocsp_list.html">OCSP Responders</a></li>
+    <li class="breadcrumb-item active">Add Responder</li>
+  </ol>
+</nav>
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0">Add OCSP Responder</h4>
+</div>
+
+<div id="alertSection" class="d-none mb-3"></div>
+
+<!-- General -->
+<div class="card mb-4">
+  <div class="card-header fw-semibold"><i class="bi bi-shield-check me-2"></i>General</div>
+  <div class="card-body row g-3">
+    <div class="col-md-6">
+      <label class="form-label">Name <span class="text-danger">*</span></label>
+      <input type="text" class="form-control" id="responderName" placeholder="e.g. Root CA OCSP">
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Certification Authority <span class="text-danger">*</span></label>
+      <select id="caSelect" class="form-select"><option value="">Loading…</option></select>
+      <div class="form-text">The CA whose certificates this responder will sign status for.</div>
+    </div>
+  </div>
+</div>
+
+<!-- Key & Certificate -->
+<div class="card mb-4">
+  <div class="card-header fw-semibold"><i class="bi bi-key me-2"></i>Responder Key &amp; Certificate</div>
+  <div class="card-body">
+
+    <!-- Mode selector -->
+    <div class="mb-4">
+      <div class="btn-group" role="group">
+        <input type="radio" class="btn-check" name="keyMode" id="modePem" value="pem" checked>
+        <label class="btn btn-outline-primary btn-sm" for="modePem">
+          <i class="bi bi-file-text me-1"></i>PEM (paste or upload)
+        </label>
+        <input type="radio" class="btn-check" name="keyMode" id="modeP12" value="p12">
+        <label class="btn btn-outline-primary btn-sm" for="modeP12">
+          <i class="bi bi-archive me-1"></i>PKCS12 (.p12 / .pfx)
+        </label>
+      </div>
+    </div>
+
+    <!-- PEM section -->
+    <div id="pemSection">
+      <div class="row g-3">
+        <div class="col-md-6">
+          <label class="form-label">Responder Certificate (PEM) <span class="text-danger">*</span></label>
+          <div class="input-group input-group-sm mb-1">
+            <input type="file" class="form-control form-control-sm" id="certFile" accept=".pem,.crt,.cer" onchange="loadFile(this,'certPem')">
+          </div>
+          <textarea class="form-control font-monospace small" id="certPem" rows="8"
+            placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Private Key (PEM, unencrypted) <span class="text-danger">*</span></label>
+          <div class="input-group input-group-sm mb-1">
+            <input type="file" class="form-control form-control-sm" id="keyFile" accept=".pem,.key" onchange="loadFile(this,'keyPem')">
+          </div>
+          <textarea class="form-control font-monospace small" id="keyPem" rows="8"
+            placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"></textarea>
+        </div>
+      </div>
+    </div>
+
+    <!-- PKCS12 section -->
+    <div id="p12Section" class="d-none">
+      <div class="row g-3">
+        <div class="col-md-6">
+          <label class="form-label">PKCS12 File (.p12 / .pfx) <span class="text-danger">*</span></label>
+          <input type="file" class="form-control" id="p12File" accept=".p12,.pfx">
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Password <span class="text-muted small">(leave empty if not encrypted)</span></label>
+          <input type="password" class="form-control" id="p12Password" autocomplete="off">
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Response Settings -->
+<div class="card mb-4">
+  <div class="card-header fw-semibold"><i class="bi bi-gear me-2"></i>Response Settings</div>
+  <div class="card-body row g-3">
+    <div class="col-md-4">
+      <label class="form-label">Response Validity <span class="text-danger">*</span></label>
+      <div class="input-group">
+        <input type="number" class="form-control" id="validityHours" value="24" min="1" max="8760">
+        <span class="input-group-text">hours</span>
+      </div>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Hash Algorithm</label>
+      <select class="form-select" id="hashAlgorithm">
+        <option value="sha1">SHA-1 (RFC 2560 default)</option>
+        <option value="sha256">SHA-256 (recommended)</option>
+      </select>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Nonce Policy</label>
+      <select class="form-select" id="noncePolicy">
+        <option value="optional">Optional — reflect if present</option>
+        <option value="required">Required — reject if absent</option>
+        <option value="disabled">Disabled — never include nonce</option>
+      </select>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Responder ID Encoding</label>
+      <select class="form-select" id="responderIdEncoding">
+        <option value="hash">By key hash (byKey)</option>
+        <option value="name">By subject name (byName)</option>
+      </select>
+    </div>
+    <div class="col-md-4 d-flex align-items-end">
+      <div class="form-check form-switch">
+        <input class="form-check-input" type="checkbox" id="includeCert" role="switch" checked>
+        <label class="form-check-label" for="includeCert">Include cert in response</label>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Actions -->
+<div class="d-flex gap-2">
+  <button class="btn btn-primary btn-sm" id="saveBtn" onclick="save()">
+    <i class="bi bi-plus-circle me-1"></i>Add Responder
+  </button>
+  <a href="/ocsp_list.html" class="btn btn-outline-secondary btn-sm">Cancel</a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // ── Mode toggle ──────────────────────────────────────────────────────────────
+  document.querySelectorAll('input[name="keyMode"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      const isPem = radio.value === 'pem';
+      document.getElementById('pemSection').classList.toggle('d-none', !isPem);
+      document.getElementById('p12Section').classList.toggle('d-none', isPem);
+    });
+  });
+
+  // ── File → textarea helper ───────────────────────────────────────────────────
+  function loadFile(input, targetId) {
+    const file = input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = e => { document.getElementById(targetId).value = e.target.result; };
+    reader.readAsText(file);
+  }
+
+  // ── Read PKCS12 file as base64 ───────────────────────────────────────────────
+  function readP12AsBase64() {
+    return new Promise((resolve, reject) => {
+      const file = document.getElementById('p12File').files[0];
+      if (!file) { reject(new Error('No PKCS12 file selected')); return; }
+      const reader = new FileReader();
+      reader.onload = e => {
+        const bytes = new Uint8Array(e.target.result);
+        let binary = '';
+        bytes.forEach(b => binary += String.fromCharCode(b));
+        resolve(btoa(binary));
+      };
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  // ── Alert helper ─────────────────────────────────────────────────────────────
+  function showAlert(msg, type = 'danger') {
+    const el = document.getElementById('alertSection');
+    el.className = `alert alert-${type}`;
+    el.innerHTML = msg;
+    el.classList.remove('d-none');
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  // ── Load CA dropdown ─────────────────────────────────────────────────────────
+  async function loadCAs() {
+    try {
+      const res = await fetch(`${apiBase}/ca`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const cas = await res.json();
+      const sel = document.getElementById('caSelect');
+      sel.innerHTML = '<option value="">Select CA…</option>' +
+        cas.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+    } catch (err) {
+      document.getElementById('caSelect').innerHTML =
+        `<option value="">Failed to load CAs: ${err.message}</option>`;
+    }
+  }
+
+  // ── Submit ───────────────────────────────────────────────────────────────────
+  async function save() {
+    const name    = document.getElementById('responderName').value.trim();
+    const caId    = document.getElementById('caSelect').value;
+    const hours   = parseInt(document.getElementById('validityHours').value, 10);
+
+    if (!name)  { showAlert('Name is required.'); return; }
+    if (!caId)  { showAlert('Select a Certification Authority.'); return; }
+    if (!hours || hours < 1) { showAlert('Validity must be at least 1 hour.'); return; }
+
+    const mode = document.querySelector('input[name="keyMode"]:checked').value;
+    const payload = {
+      name,
+      ca_id:                    parseInt(caId, 10),
+      response_validity_hours:  hours,
+      hash_algorithm:           document.getElementById('hashAlgorithm').value,
+      nonce_policy:             document.getElementById('noncePolicy').value,
+      responder_id_encoding:    document.getElementById('responderIdEncoding').value,
+      include_cert_in_response: document.getElementById('includeCert').checked,
+    };
+
+    if (mode === 'pem') {
+      const cert = document.getElementById('certPem').value.trim();
+      const key  = document.getElementById('keyPem').value.trim();
+      if (!cert) { showAlert('Responder certificate (PEM) is required.'); return; }
+      if (!key)  { showAlert('Private key (PEM) is required.'); return; }
+      if (!cert.includes('-----BEGIN CERTIFICATE-----'))
+        { showAlert('The certificate field does not look like a PEM certificate.'); return; }
+      if (!key.includes('-----BEGIN') || !key.includes('PRIVATE KEY-----'))
+        { showAlert('The private key field does not look like a PEM private key.'); return; }
+      payload.certificate = cert;
+      payload.private_key = key;
+    } else {
+      try {
+        payload.pkcs12_b64      = await readP12AsBase64();
+        payload.pkcs12_password = document.getElementById('p12Password').value;
+      } catch (e) {
+        showAlert(e.message);
+        return;
+      }
+    }
+
+    const btn = document.getElementById('saveBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Adding…';
+
+    try {
+      const res = await fetch(`${apiBase}/ocsp`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+      showToast('OCSP responder added successfully.');
+      setTimeout(() => { window.location.href = `/ocsp_details.html?id=${data.responder_id}`; }, 1200);
+    } catch (e) {
+      showAlert(`Failed to add responder: ${e.message}`);
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-plus-circle me-1"></i>Add Responder';
+    }
+  }
+
+  window.onload = async () => {
+    if (!window._isAdmin) {
+      document.getElementById('main').innerHTML =
+        '<div class="alert alert-warning"><i class="bi bi-shield-exclamation me-2"></i>You do not have permission to manage OCSP responders.</div>';
+      return;
+    }
+    await loadCAs();
+  };
+</script>
+{% endblock %}

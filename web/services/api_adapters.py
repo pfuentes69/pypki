@@ -432,6 +432,21 @@ def revoke_certificate(cert_id, revocation_reason, user_id: int = 0):
 def get_ocsp_responder_by_issuer_ski(issuer_ski):
     return pki.get_ocsp_responder_by_issuer_ski(issuer_ski=issuer_ski)
 
+def get_ocsp_responders_list():
+    return pki.get_ocsp_responders_list()
+
+def get_ocsp_responder_by_id(responder_id):
+    return pki.get_ocsp_responder_by_id(responder_id)
+
+def update_ocsp_responder_settings(responder_id, settings):
+    pki.update_ocsp_responder_settings(responder_id, settings)
+
+def delete_ocsp_responder(responder_id):
+    pki.delete_ocsp_responder(responder_id)
+
+def create_ocsp_responder(data: dict) -> int:
+    return pki.create_ocsp_responder(data)
+
 
 def get_template_collection():
     template_list = pki.get_template_collection()

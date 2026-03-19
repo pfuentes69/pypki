@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item active">OCSP Responders</li>
+  </ol>
+</nav>
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0">OCSP Responders</h4>
+  <a href="/ocsp_add.html" class="btn btn-sm btn-primary" data-admin-only>
+    <i class="bi bi-plus-circle me-1"></i>Add Responder
+  </a>
+</div>
+
+<div id="responderTableWrapper">
+  <div class="table-responsive">
+    <table class="table table-bordered table-hover table-striped align-middle w-100">
+      <thead class="table-dark">
+        <tr>
+          <th style="width:5%">ID</th>
+          <th>Name</th>
+          <th>CA</th>
+          <th>Responder Certificate</th>
+          <th style="width:8%"></th>
+        </tr>
+      </thead>
+      <tbody id="responderTableBody">
+        <tr><td colspan="5" class="text-muted text-center">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function escHtml(str) {
+    if (str == null) return '—';
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function loadResponders() {
+    fetch(`${apiBase}/ocsp`)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(responders => {
+        const tbody = document.getElementById('responderTableBody');
+        if (!responders.length) {
+          tbody.innerHTML = '<tr><td colspan="5" class="text-muted text-center">No OCSP responders configured.</td></tr>';
+          return;
+        }
+        tbody.innerHTML = responders.map(r => `
+          <tr>
+            <td>${r.id}</td>
+            <td>${escHtml(r.name)}</td>
+            <td>${escHtml(r.ca_name)}</td>
+            <td>
+              <div class="small font-monospace">${escHtml(r.cert_subject)}</div>
+              ${r.cert_not_after ? `<div class="small text-muted">Expires: ${r.cert_not_after}</div>` : ''}
+            </td>
+            <td><a class="btn btn-sm btn-outline-primary" href="/ocsp_details.html?id=${r.id}">Details</a></td>
+          </tr>`).join('');
+      })
+      .catch(err => {
+        document.getElementById('responderTableBody').innerHTML =
+          `<tr><td colspan="5"><div class="alert alert-danger mb-0">Failed to load OCSP responders: ${err.message}</div></td></tr>`;
+      });
+  }
+
+  window.onload = loadResponders;
+</script>
+{% endblock %}

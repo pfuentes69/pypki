@@ -31,6 +31,7 @@ def require_auth():
         'main.download_ca_cert', 'main.download_ca_cert_der',
         'main.get_ca_crl', 'main.get_ca_crl_der',
         'main.download_crl',
+        'main.get_certificate_pem',
     }
     if request.endpoint in _PUBLIC:
         return None
@@ -1008,6 +1009,122 @@ def clear_app_log():
         return jsonify({"message": "App log cleared"}), 200
     except OSError as e:
         abort(500, description=f"Failed to clear log: {e}")
+
+
+@bp.route('/ocsp', methods=['POST'])
+def create_ocsp_responder():
+    logger.info("API - POST Create OCSP Responder")
+    err = _require_role('admin')
+    if err: return err
+
+    data = request.get_json() or {}
+
+    # PKCS12 path: decode base64, extract key + cert
+    if data.get('pkcs12_b64'):
+        import base64 as _b64
+        from cryptography.hazmat.primitives.serialization import pkcs12 as _pkcs12
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding, PrivateFormat, NoEncryption
+        )
+        try:
+            p12_bytes = _b64.b64decode(data['pkcs12_b64'])
+            password = data.get('pkcs12_password') or ''
+            p12 = _pkcs12.load_pkcs12(
+                p12_bytes,
+                password.encode('utf-8') if password else None
+            )
+        except Exception as e:
+            abort(400, description=f"Invalid PKCS12 file: {e}")
+        if not p12.key or not p12.cert:
+            abort(400, description="PKCS12 must contain a private key and a certificate")
+        data['private_key'] = p12.key.private_bytes(
+            Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()
+        ).decode()
+        data['certificate'] = p12.cert.certificate.public_bytes(Encoding.PEM).decode()
+
+    if not data.get('name', '').strip():
+        abort(400, description="Name is required")
+    if not data.get('ca_id'):
+        abort(400, description="CA is required")
+    if not data.get('certificate'):
+        abort(400, description="Responder certificate is required")
+    if not data.get('private_key'):
+        abort(400, description="Private key is required")
+
+    try:
+        new_id = api_adapters.create_ocsp_responder(data)
+    except ValueError as e:
+        abort(400, description=str(e))
+    except Exception as e:
+        logger.error(f"OCSP responder creation failed: {e}")
+        abort(500, description=f"Creation failed: {e}")
+
+    return jsonify({"message": "OCSP responder created", "responder_id": new_id}), 201
+
+
+@bp.route('/ocsp', methods=['GET'])
+def list_ocsp_responders():
+    logger.info("API - GET OCSP Responders")
+    responders = api_adapters.get_ocsp_responders_list()
+    return jsonify(api_adapters.convert_to_serializable(responders)), 200
+
+
+@bp.route('/ocsp/<int:responder_id>', methods=['GET'])
+def get_ocsp_responder(responder_id):
+    logger.info(f"API - GET OCSP Responder id={responder_id}")
+    row = api_adapters.get_ocsp_responder_by_id(responder_id)
+    if row is None:
+        abort(404, description="OCSP responder not found")
+    return jsonify(api_adapters.convert_to_serializable(row)), 200
+
+
+@bp.route('/ocsp/<int:responder_id>', methods=['DELETE'])
+def delete_ocsp_responder(responder_id):
+    logger.info(f"API - DELETE OCSP Responder id={responder_id}")
+    err = _require_role('admin')
+    if err: return err
+    row = api_adapters.get_ocsp_responder_by_id(responder_id)
+    if row is None:
+        abort(404, description="OCSP responder not found")
+    try:
+        api_adapters.delete_ocsp_responder(responder_id)
+    except Exception as e:
+        abort(500, description=str(e))
+    return jsonify({"message": "OCSP responder deleted"}), 200
+
+
+@bp.route('/ocsp/<int:responder_id>', methods=['PUT'])
+def update_ocsp_responder(responder_id):
+    logger.info(f"API - PUT OCSP Responder id={responder_id}")
+    err = _require_role('admin')
+    if err: return err
+    row = api_adapters.get_ocsp_responder_by_id(responder_id)
+    if row is None:
+        abort(404, description="OCSP responder not found")
+    body = request.get_json() or {}
+    allowed_fields = {
+        'name', 'response_validity_hours', 'nonce_policy',
+        'include_cert_in_response', 'responder_id_encoding', 'hash_algorithm',
+    }
+    settings = {k: v for k, v in body.items() if k in allowed_fields}
+    if 'response_validity_hours' in settings:
+        try:
+            settings['response_validity_hours'] = int(settings['response_validity_hours'])
+            if settings['response_validity_hours'] < 1:
+                abort(400, description="response_validity_hours must be >= 1")
+        except (ValueError, TypeError):
+            abort(400, description="response_validity_hours must be an integer")
+    if 'nonce_policy' in settings and settings['nonce_policy'] not in ('optional', 'required', 'disabled'):
+        abort(400, description="nonce_policy must be optional, required, or disabled")
+    if 'responder_id_encoding' in settings and settings['responder_id_encoding'] not in ('hash', 'name'):
+        abort(400, description="responder_id_encoding must be hash or name")
+    if 'hash_algorithm' in settings and settings['hash_algorithm'] not in ('sha1', 'sha256'):
+        abort(400, description="hash_algorithm must be sha1 or sha256")
+    try:
+        api_adapters.update_ocsp_responder_settings(responder_id, settings)
+    except Exception as e:
+        abort(500, description=str(e))
+    return jsonify({"message": "OCSP responder updated"}), 200
 
 
 @bp.route('/audit-logs/clear', methods=['POST'])

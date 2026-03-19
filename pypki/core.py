@@ -238,6 +238,47 @@ class PyPKI:
                 return responder
         return None
 
+    def get_ocsp_responders_list(self):
+        with self.__db.connection():
+            return self.__db.get_ocsp_responders_list()
+
+    def get_ocsp_responder_by_id(self, responder_id: int):
+        with self.__db.connection():
+            return self.__db.get_ocsp_responder_by_id(responder_id)
+
+    def update_ocsp_responder_settings(self, responder_id: int, settings: dict):
+        with self.__db.connection():
+            self.__db.update_ocsp_responder_settings(responder_id, settings)
+        self.load_ocsp_responders()
+
+    def delete_ocsp_responder(self, responder_id: int):
+        with self.__db.connection():
+            self.__db.delete_ocsp_responder(responder_id)
+        self.load_ocsp_responders()
+
+    def create_ocsp_responder(self, data: dict) -> int:
+        """
+        Create a new OCSP responder from web-form data.
+
+        Resolves issuer_ski and issuer_certificate from the given ca_id,
+        then delegates to db.insert_ocsp_responder_from_dict.
+        Returns the new responder id.
+        """
+        ca_id = data.get("ca_id")
+        if not ca_id:
+            raise ValueError("ca_id is required")
+        ca = self.get_ca_by_id(ca_id)
+        if not ca:
+            raise ValueError(f"CA id={ca_id} not found")
+        issuer_ski = ca.get("ski")
+        issuer_cert = ca.get("certificate")
+        if not issuer_ski or not issuer_cert:
+            raise ValueError("Selected CA is missing its SKI or certificate")
+        payload = {**data, "issuer_ski": issuer_ski, "issuer_certificate": issuer_cert}
+        with self.__db.connection():
+            new_id = self.__db.insert_ocsp_responder_from_dict(payload)
+        self.load_ocsp_responders()
+        return new_id
 
     def create_cert_template_from_json(self, config_json: str):
         cert_template = json.loads(config_json)

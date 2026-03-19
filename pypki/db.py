@@ -500,6 +500,84 @@ class PKIDataBase:
             cursor.close()
 
 
+    def insert_ocsp_responder_from_dict(self, data: dict) -> int:
+        """
+        Insert an OCSP Responder from a plain dict (web-form path).
+
+        Expected keys:
+            name, ca_id, issuer_ski, issuer_certificate,
+            certificate (responder cert PEM), private_key (PEM),
+            response_validity_hours, nonce_policy, include_cert_in_response,
+            responder_id_encoding, hash_algorithm.
+
+        Returns the new row id.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+
+            # Store private key in KeyStorage
+            private_key_reference = None
+            private_key_pem = data.get("private_key")
+            cert_pem = data.get("certificate")
+            if private_key_pem:
+                pub_key_pem = None
+                key_type = None
+                if cert_pem:
+                    cert = x509.load_pem_x509_certificate(cert_pem.encode("utf-8"))
+                    public_key = cert.public_key()
+                    pub_key_pem = public_key.public_bytes(
+                        Encoding.PEM, PublicFormat.SubjectPublicKeyInfo
+                    ).decode()
+                    if isinstance(public_key, ec.EllipticCurvePublicKey):
+                        key_type = f"ECDSA-{public_key.curve.name}"
+                    else:
+                        key_type = f"RSA-{public_key.key_size}"
+                cursor.execute(
+                    "INSERT INTO KeyStorage (private_key, storage_type, public_key, key_type)"
+                    " VALUES (%s, %s, %s, %s)",
+                    (private_key_pem, "Plain", pub_key_pem, key_type)
+                )
+                private_key_reference = cursor.lastrowid
+                logger.info(f"OCSP responder private key stored in KeyStorage id={private_key_reference}")
+
+            response_validity_hours = int(data.get("response_validity_hours") or 24)
+            cursor.execute("""
+                INSERT INTO OCSPResponders (
+                    name, ca_id, issuer_ski, issuer_certificate,
+                    private_key_reference, certificate,
+                    response_validity, response_validity_hours,
+                    nonce_policy, include_cert_in_response,
+                    responder_id_encoding, hash_algorithm
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                data["name"],
+                data.get("ca_id"),
+                data["issuer_ski"],
+                data["issuer_certificate"],
+                private_key_reference,
+                cert_pem,
+                max(1, response_validity_hours // 24),   # legacy days column
+                response_validity_hours,
+                data.get("nonce_policy") or "optional",
+                bool(data.get("include_cert_in_response", True)),
+                data.get("responder_id_encoding") or "hash",
+                data.get("hash_algorithm") or "sha1",
+            ))
+            new_id = cursor.lastrowid
+            self._local.connection.commit()
+            logger.info(f"OCSP Responder inserted with id={new_id}")
+            return new_id
+
+        except mysql.connector.Error as err:
+            logger.error(f"Error inserting OCSP Responder: {err}")
+            raise
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+
+
     def get_ocsp_responders_collection(self):
         """
         Retrieves a collection of OCSP Responders from the OCSPResponders table.
@@ -521,10 +599,14 @@ class PKIDataBase:
                     name=row['name'],
                     issuer_ski=row['issuer_ski'],
                     issuer_certificate=row['issuer_certificate'],
-                    response_validity=row['response_validity'],
+                    response_validity_hours=row.get('response_validity_hours') or (row['response_validity'] * 24),
                     certificate_pem=row['certificate'],
                     kms_key_id=row.get('private_key_reference'),
-                    ca_id=row.get('ca_id')
+                    ca_id=row.get('ca_id'),
+                    nonce_policy=row.get('nonce_policy') or 'optional',
+                    include_cert_in_response=bool(row.get('include_cert_in_response', True)),
+                    responder_id_encoding=row.get('responder_id_encoding') or 'hash',
+                    hash_algorithm=row.get('hash_algorithm') or 'sha1',
                 )
                 ocsp_responders.append(responder)
 
@@ -534,6 +616,122 @@ class PKIDataBase:
             logger.error(f"Database error: {e}")
             return []
 
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+
+
+    def get_ocsp_responders_list(self):
+        """
+        Returns a list of dicts with display fields for all OCSP responders
+        (no certificate/key material — suitable for the management UI).
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute("""
+                SELECT r.id, r.name, r.ca_id, r.issuer_ski,
+                       r.response_validity, r.response_validity_hours,
+                       r.nonce_policy, r.include_cert_in_response,
+                       r.responder_id_encoding, r.hash_algorithm,
+                       r.not_after, r.certificate,
+                       ca.name AS ca_name
+                FROM OCSPResponders r
+                LEFT JOIN CertificationAuthorities ca ON ca.id = r.ca_id
+                ORDER BY r.name
+            """)
+            rows = cursor.fetchall()
+            result = []
+            for row in rows:
+                # Extract subject CN from certificate PEM for display
+                cert_subject = None
+                cert_not_after = None
+                if row.get('certificate'):
+                    try:
+                        from cryptography import x509 as _x509
+                        cert = _x509.load_pem_x509_certificate(row['certificate'].encode())
+                        try:
+                            cert_subject = cert.subject.get_attributes_for_oid(
+                                _x509.oid.NameOID.COMMON_NAME)[0].value
+                        except Exception:
+                            cert_subject = str(cert.subject)
+                        cert_not_after = cert.not_valid_after_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+                    except Exception:
+                        pass
+                result.append({
+                    'id':                      row['id'],
+                    'name':                    row['name'],
+                    'ca_id':                   row['ca_id'],
+                    'ca_name':                 row.get('ca_name'),
+                    'issuer_ski':              row['issuer_ski'],
+                    'response_validity_hours': row.get('response_validity_hours') or (row['response_validity'] * 24),
+                    'nonce_policy':            row.get('nonce_policy') or 'optional',
+                    'include_cert_in_response': bool(row.get('include_cert_in_response', True)),
+                    'responder_id_encoding':   row.get('responder_id_encoding') or 'hash',
+                    'hash_algorithm':          row.get('hash_algorithm') or 'sha1',
+                    'cert_subject':            cert_subject,
+                    'cert_not_after':          cert_not_after,
+                })
+            return result
+        except mysql.connector.Error as e:
+            logger.error(f"Database error: {e}")
+            return []
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+
+
+    def get_ocsp_responder_by_id(self, responder_id: int):
+        """Returns a single responder row dict (same shape as get_ocsp_responders_list)."""
+        rows = self.get_ocsp_responders_list()
+        for row in rows:
+            if row['id'] == responder_id:
+                return row
+        return None
+
+
+    def update_ocsp_responder_settings(self, responder_id: int, settings: dict):
+        """Update the configurable settings for an OCSP responder."""
+        allowed = {
+            'name', 'response_validity_hours', 'nonce_policy',
+            'include_cert_in_response', 'responder_id_encoding', 'hash_algorithm',
+        }
+        updates = {k: v for k, v in settings.items() if k in allowed}
+        if not updates:
+            return
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+            set_clause = ', '.join(f"{k} = %s" for k in updates)
+            values = list(updates.values()) + [responder_id]
+            cursor.execute(
+                f"UPDATE OCSPResponders SET {set_clause} WHERE id = %s",
+                values
+            )
+            self._local.connection.commit()
+            logger.info(f"OCSP responder id={responder_id} settings updated: {list(updates.keys())}")
+        except mysql.connector.Error as e:
+            logger.error(f"Database error updating OCSP responder: {e}")
+            raise
+        finally:
+            if 'cursor' in locals():
+                cursor.close()
+
+
+    def delete_ocsp_responder(self, responder_id: int):
+        """Delete an OCSP responder row by ID."""
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute("DELETE FROM OCSPResponders WHERE id = %s", (responder_id,))
+            self._local.connection.commit()
+            logger.info(f"OCSP responder id={responder_id} deleted")
+        except mysql.connector.Error as e:
+            logger.error(f"Database error deleting OCSP responder: {e}")
+            raise
         finally:
             if 'cursor' in locals():
                 cursor.close()
@@ -1723,6 +1921,11 @@ class PKIDataBase:
                         issuer_certificate TEXT,
                         not_after DATETIME,
                         response_validity INT DEFAULT 1,
+                        response_validity_hours INT DEFAULT 24,
+                        nonce_policy ENUM('optional','required','disabled') DEFAULT 'optional',
+                        include_cert_in_response BOOLEAN DEFAULT TRUE,
+                        responder_id_encoding ENUM('hash','name') DEFAULT 'hash',
+                        hash_algorithm ENUM('sha1','sha256') DEFAULT 'sha1',
                         private_key TEXT,
                         private_key_reference INT,
                         certificate TEXT,

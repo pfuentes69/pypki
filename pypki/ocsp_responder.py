@@ -4,8 +4,10 @@ from datetime import datetime, timedelta, timezone
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature, decode_dss_signature
-from cryptography.x509.ocsp import OCSPResponseBuilder, OCSPResponderEncoding
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.x509.ocsp import OCSPResponseBuilder, OCSPResponderEncoding, OCSPCertStatus
 from cryptography import x509
+from cryptography.x509.oid import NameOID
 
 from asn1crypto import ocsp as asn1_ocsp
 from asn1crypto.core import OctetBitString
@@ -47,10 +49,14 @@ class OCSPResponder:
         name: str = "UNASSIGNED",
         issuer_ski: str = "",
         issuer_certificate: str = "",
-        response_validity: int = 1,
+        response_validity_hours: int = 24,
         certificate_pem: str = "",
         kms_key_id: int = None,
-        ca_id: int = None
+        ca_id: int = None,
+        nonce_policy: str = "optional",
+        include_cert_in_response: bool = True,
+        responder_id_encoding: str = "hash",
+        hash_algorithm: str = "sha1",
     ):
         """
         Initialise an OCSPResponder.
@@ -59,11 +65,20 @@ class OCSPResponder:
                     Set by db.get_ocsp_responders_collection() from private_key_reference.
         ca_id: the CertificationAuthorities.id of the issuing CA this responder serves.
                Used to scope certificate status queries to the correct CA.
+        nonce_policy: 'optional' (reflect if present), 'required' (reject if absent),
+                      'disabled' (never include nonce in response).
+        include_cert_in_response: embed the responder certificate in the response.
+        responder_id_encoding: 'hash' (by key hash) or 'name' (by subject DN).
+        hash_algorithm: 'sha1' or 'sha256' for the CertID hash algorithm.
         """
         self.__config = {}
         self.__name = name
         self.__issuer_ski = issuer_ski
-        self.__response_validity = response_validity
+        self.__response_validity_hours = response_validity_hours
+        self.__nonce_policy = nonce_policy
+        self.__include_cert_in_response = include_cert_in_response
+        self.__responder_id_encoding = responder_id_encoding
+        self.__hash_algorithm = hash_algorithm
         self.__kms = None
         self.__kms_key_id = kms_key_id
         self.__ca_id = ca_id
@@ -87,7 +102,12 @@ class OCSPResponder:
         self.__config = json.loads(ocsp_config_json)
         self.__name = self.__config["name"]
         self.__issuer_ski = self.__config["issuer_ski"]
-        self.__response_validity = self.__config["response_validity"]
+        self.__response_validity_hours = self.__config.get("response_validity_hours",
+            self.__config.get("response_validity", 1) * 24)
+        self.__nonce_policy = self.__config.get("nonce_policy", "optional")
+        self.__include_cert_in_response = self.__config.get("include_cert_in_response", True)
+        self.__responder_id_encoding = self.__config.get("responder_id_encoding", "hash")
+        self.__hash_algorithm = self.__config.get("hash_algorithm", "sha1")
 
         if self.__config.get("issuer_certificate"):
             self.__issuer_certificate = x509.load_pem_x509_certificate(
@@ -122,14 +142,19 @@ class OCSPResponder:
     def get_certificate(self) -> x509.Certificate:
         return self.__certificate
 
+    def get_nonce_policy(self) -> str:
+        return self.__nonce_policy
 
     def get_config(self) -> dict:
         return self.__config
 
 
-    def generate_response(self, cert_to_check, cert_status, revocation_time, revocation_reason):
+    def generate_response(self, cert_to_check, cert_status, revocation_time, revocation_reason,
+                          nonce_bytes: bytes = None):
         """
         Build and sign an OCSP response via the KMS.
+
+        nonce_bytes: raw nonce bytes from the request (pass None to omit nonce in response).
 
         Because OCSPResponseBuilder.sign() requires a private key object directly,
         we use the dummy-key + patch approach:
@@ -150,21 +175,33 @@ class OCSPResponder:
                 "Run the Phase 1 migration (migrate_keys_to_kms.py) first."
             )
 
+        hash_algo = hashes.SHA256() if self.__hash_algorithm == 'sha256' else hashes.SHA1()
+        id_encoding = (OCSPResponderEncoding.NAME
+                       if self.__responder_id_encoding == 'name'
+                       else OCSPResponderEncoding.HASH)
+        now = datetime.now(timezone.utc)
+
         builder = OCSPResponseBuilder()
         builder = builder.add_response(
             cert=cert_to_check,
             issuer=self.__issuer_certificate,
-            algorithm=hashes.SHA1(),
+            algorithm=hash_algo,
             cert_status=cert_status,
-            this_update=datetime.now(timezone.utc),
-            next_update=datetime.now(timezone.utc) + timedelta(days=self.__response_validity),
+            this_update=now,
+            next_update=now + timedelta(hours=self.__response_validity_hours),
             revocation_time=revocation_time,
             revocation_reason=revocation_reason,
         )
         builder = builder.responder_id(
-            encoding=OCSPResponderEncoding.HASH,
+            encoding=id_encoding,
             responder_cert=self.__certificate
         )
+
+        if self.__include_cert_in_response and self.__certificate:
+            builder = builder.certificates([self.__certificate])
+
+        if nonce_bytes is not None:
+            builder = builder.add_extension(x509.OCSPNonce(nonce_bytes), critical=False)
 
         # Generate a dummy key matching the responder certificate's algorithm
         # so the signatureAlgorithm field in the TBS is correct.
@@ -196,3 +233,30 @@ class OCSPResponder:
         )
         from cryptography.x509.ocsp import load_der_ocsp_response
         return load_der_ocsp_response(patched_der)
+
+
+    def generate_unknown_response(self, serial_number: int, nonce_bytes: bytes = None):
+        """
+        Build a signed OCSP response with UNKNOWN status for an unrecognised serial number.
+
+        A minimal Ed25519 placeholder certificate is generated on-the-fly so that
+        the CertID in the response carries the correct serial number and issuer hashes
+        (derived from self.__issuer_certificate).
+        """
+        dummy_key = Ed25519PrivateKey.generate()
+        dn = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "unknown")])
+        now = datetime.now(timezone.utc)
+        placeholder_cert = (
+            x509.CertificateBuilder()
+            .subject_name(dn)
+            .issuer_name(dn)
+            .public_key(dummy_key.public_key())
+            .serial_number(serial_number)
+            .not_valid_before(now)
+            .not_valid_after(now + timedelta(days=1))
+            .sign(dummy_key, None)
+        )
+        return self.generate_response(
+            placeholder_cert, OCSPCertStatus.UNKNOWN,
+            None, None, nonce_bytes
+        )

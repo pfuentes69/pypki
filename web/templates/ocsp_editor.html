@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="/ocsp_list.html">OCSP Responders</a></li>
+    <li class="breadcrumb-item active" id="breadcrumbCurrent">Edit Responder</li>
+  </ol>
+</nav>
+<h4 class="mb-4" id="pageTitle">OCSP Responder Settings</h4>
+
+<!-- Read-only identity card -->
+<div class="card mb-3" style="max-width: 700px;">
+  <div class="card-header"><i class="bi bi-info-circle me-2"></i>Responder Identity <span class="badge bg-secondary ms-2">Read-only</span></div>
+  <div class="card-body row g-3">
+    <div class="col-md-6">
+      <label class="form-label text-muted small">CA</label>
+      <div class="fw-semibold" id="infoCA">—</div>
+    </div>
+    <div class="col-md-6">
+      <label class="form-label text-muted small">Issuer Key Hash (SKI)</label>
+      <div class="font-monospace small text-break" id="infoSKI">—</div>
+    </div>
+    <div class="col-md-8">
+      <label class="form-label text-muted small">Responder Certificate Subject</label>
+      <div class="font-monospace small" id="infoCertSubject">—</div>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label text-muted small">Certificate Expires</label>
+      <div class="small" id="infoCertExpiry">—</div>
+    </div>
+  </div>
+</div>
+
+<!-- Editable settings -->
+<div class="card mb-3" style="max-width: 700px;">
+  <div class="card-header"><i class="bi bi-gear me-2"></i>Response Settings</div>
+  <div class="card-body row g-3">
+    <div class="col-12">
+      <label class="form-label">Name <span class="text-danger">*</span></label>
+      <input type="text" class="form-control" id="responderName">
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Response Validity <span class="text-danger">*</span></label>
+      <div class="input-group">
+        <input type="number" class="form-control" id="validityHours" min="1" max="8760">
+        <span class="input-group-text">hours</span>
+      </div>
+      <div class="form-text">Typical: 24 h (daily CRL) or 1 h (short-lived).</div>
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Hash Algorithm</label>
+      <select class="form-select" id="hashAlgorithm">
+        <option value="sha1">SHA-1 (RFC 2560 default)</option>
+        <option value="sha256">SHA-256 (recommended)</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+<div class="card mb-3" style="max-width: 700px;">
+  <div class="card-header"><i class="bi bi-fingerprint me-2"></i>Nonce &amp; Responder ID</div>
+  <div class="card-body row g-3">
+    <div class="col-md-6">
+      <label class="form-label">Nonce Policy</label>
+      <select class="form-select" id="noncePolicy">
+        <option value="optional">Optional — reflect if present</option>
+        <option value="required">Required — reject requests without nonce</option>
+        <option value="disabled">Disabled — never include nonce</option>
+      </select>
+      <div class="form-text">RFC 8954 nonce handling.</div>
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Responder ID Encoding</label>
+      <select class="form-select" id="responderIdEncoding">
+        <option value="hash">By key hash (byKey)</option>
+        <option value="name">By subject name (byName)</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+<div class="card mb-4" style="max-width: 700px;">
+  <div class="card-header"><i class="bi bi-envelope-paper me-2"></i>Response Content</div>
+  <div class="card-body">
+    <div class="form-check form-switch">
+      <input class="form-check-input" type="checkbox" id="includeCert" role="switch">
+      <label class="form-check-label" for="includeCert">
+        Include responder certificate in response
+      </label>
+    </div>
+    <div class="form-text mt-1">Allows clients to verify the response without a separate certificate fetch.</div>
+  </div>
+</div>
+
+<div class="d-flex gap-2 mb-5">
+  <button class="btn btn-primary" onclick="save()"><i class="bi bi-floppy me-1"></i>Save</button>
+  <a href="/ocsp_list.html" class="btn btn-outline-secondary">Cancel</a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let responderId = null;
+
+  function escHtml(str) {
+    if (str == null) return '—';
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  async function loadResponder(id) {
+    try {
+      const res = await fetch(`${apiBase}/ocsp/${id}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const r = await res.json();
+
+      // Read-only identity
+      document.getElementById('infoCA').textContent          = r.ca_name || `CA #${r.ca_id}` || '—';
+      document.getElementById('infoSKI').textContent         = r.issuer_ski || '—';
+      document.getElementById('infoCertSubject').textContent = r.cert_subject || '—';
+      document.getElementById('infoCertExpiry').textContent  = r.cert_not_after || '—';
+
+      // Editable fields
+      document.getElementById('responderName').value         = r.name || '';
+      document.getElementById('validityHours').value         = r.response_validity_hours ?? 24;
+      document.getElementById('hashAlgorithm').value         = r.hash_algorithm || 'sha1';
+      document.getElementById('noncePolicy').value           = r.nonce_policy || 'optional';
+      document.getElementById('responderIdEncoding').value   = r.responder_id_encoding || 'hash';
+      document.getElementById('includeCert').checked         = !!r.include_cert_in_response;
+
+      document.getElementById('breadcrumbCurrent').textContent = r.name || 'Edit';
+      document.getElementById('pageTitle').textContent         = `OCSP Responder: ${r.name}`;
+    } catch (err) {
+      showToast('Failed to load responder: ' + err.message, 'danger');
+    }
+  }
+
+  async function save() {
+    const name = document.getElementById('responderName').value.trim();
+    const validityHours = parseInt(document.getElementById('validityHours').value, 10);
+
+    if (!name) { showToast('Name is required.', 'warning'); return; }
+    if (!validityHours || validityHours < 1) { showToast('Validity must be at least 1 hour.', 'warning'); return; }
+
+    const body = {
+      name,
+      response_validity_hours:  validityHours,
+      hash_algorithm:           document.getElementById('hashAlgorithm').value,
+      nonce_policy:             document.getElementById('noncePolicy').value,
+      responder_id_encoding:    document.getElementById('responderIdEncoding').value,
+      include_cert_in_response: document.getElementById('includeCert').checked,
+    };
+
+    try {
+      const res = await fetch(`${apiBase}/ocsp/${responderId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      let data = {}; try { data = await res.json(); } catch (_) {}
+      if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+      showToast(`Responder <strong>${escHtml(name)}</strong> updated successfully.`);
+      setTimeout(() => { window.location.href = '/ocsp_list.html'; }, 1200);
+    } catch (err) {
+      showToast('Save failed: ' + err.message, 'danger');
+    }
+  }
+
+  window.onload = async () => {
+    if (!window._isAdmin) {
+      document.getElementById('main').innerHTML =
+        '<div class="alert alert-warning"><i class="bi bi-shield-exclamation me-2"></i>You do not have permission to manage OCSP responders.</div>';
+      return;
+    }
+    const params = new URLSearchParams(window.location.search);
+    const idParam = params.get('id');
+    if (!idParam) {
+      showToast('No responder ID specified.', 'danger');
+      return;
+    }
+    responderId = parseInt(idParam, 10);
+    await loadResponder(responderId);
+  };
+</script>
+{% endblock %}
