@@ -53,6 +53,7 @@ class PKIDataBase:
                 pool_name="pypki",
                 pool_size=pool_size,
                 pool_reset_session=True,
+                use_pure=True,
                 host=self.__config["host"],
                 port=self.__config["port"],
                 user=self.__config["user"],
