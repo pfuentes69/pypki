@@ -26,6 +26,45 @@
     return isNaN(d) ? val : d.toLocaleString();
   }
 
+  function renderExtensions(raw) {
+    let ext = {};
+    try { ext = typeof raw === 'string' ? JSON.parse(raw) : (raw || {}); } catch (_) {}
+
+    if (!Object.keys(ext).length) return '';
+
+    const rows = [];
+
+    if (ext.aia) {
+      const aia = ext.aia;
+      const critical = aia.critical ? '<span class="badge bg-danger ms-1">critical</span>' : '';
+      const access = aia.authorityInfoAccess || {};
+      if (access.OCSP)
+        rows.push(row('AIA – OCSP' + critical,
+          `<span class="font-monospace small">${access.OCSP.url}</span>`));
+      if (access.caIssuers)
+        rows.push(row('AIA – CA Issuers' + critical,
+          `<span class="font-monospace small">${access.caIssuers.url}</span>`));
+    }
+
+    if (ext.cdp) {
+      const critical = ext.cdp.critical ? '<span class="badge bg-danger ms-1">critical</span>' : '';
+      rows.push(row('CDP – CRL URL' + critical,
+        `<span class="font-monospace small">${ext.cdp.url}</span>`));
+    }
+
+    if (!rows.length) return '';
+
+    return `
+      <div class="card mb-4">
+        <div class="card-header fw-semibold">
+          <i class="bi bi-link-45deg me-2"></i>Default Extensions (injected into issued certificates)
+        </div>
+        <div class="card-body p-0">
+          <table class="table table-sm mb-0"><tbody>${rows.join('')}</tbody></table>
+        </div>
+      </div>`;
+  }
+
   function renderCA(ca) {
     const id = getIdFromUrl();
     const hasCrl = !!(ca.crl_issue_date);
@@ -71,6 +110,9 @@
             <a class="btn btn-sm btn-outline-secondary" href="${apiBase}/ca/${id}/cert/der" target="_blank">
               <i class="bi bi-download me-1"></i>DER
             </a>
+            ${window._isAdmin ? `<a class="btn btn-sm btn-outline-primary" href="/ca_editor.html?id=${id}">
+              <i class="bi bi-pencil me-1"></i>Edit
+            </a>` : ''}
           </div>
         </div>
         <div class="card-body p-0">
@@ -89,6 +131,7 @@
         </div>
       </div>
       ${crlSection}
+      ${renderExtensions(ca.extensions)}
       <div class="card">
         <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
           <span><i class="bi bi-file-earmark-lock me-2"></i>CA Certificate PEM</span>

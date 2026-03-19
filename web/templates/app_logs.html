@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+
+{% block head_extra %}
+<style>
+  #logPre {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    padding: 1rem;
+    border-radius: 0 0 0.375rem 0.375rem;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 78vh;
+    overflow-y: auto;
+  }
+  .log-info    { color: #9cdcfe; }
+  .log-warning { color: #dcdcaa; }
+  .log-error   { color: #f44747; }
+  .log-debug   { color: #b5cea8; }
+</style>
+{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item active">App Logs</li>
+  </ol>
+</nav>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">App Logs <span class="text-muted fw-normal fs-6">(last 100 lines)</span></h4>
+  <div class="d-flex gap-2">
+    <button class="btn btn-outline-secondary btn-sm" onclick="loadLog()">
+      <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+    </button>
+    <button class="btn btn-outline-danger btn-sm" id="clearBtn" data-superadmin-only onclick="clearLog()">
+      <i class="bi bi-trash me-1"></i>Clear App Log
+    </button>
+  </div>
+</div>
+
+<div class="card shadow-sm">
+  <div class="card-header d-flex justify-content-between align-items-center py-2">
+    <span class="font-monospace small text-muted" id="logMeta">Loading…</span>
+    <button class="btn btn-sm btn-outline-secondary py-0" onclick="scrollBottom()" title="Scroll to bottom">
+      <i class="bi bi-arrow-down"></i>
+    </button>
+  </div>
+  <pre id="logPre"></pre>
+</div>
+
+<!-- Toast -->
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:9999">
+  <div id="toast" class="toast align-items-center border-0" role="alert">
+    <div class="d-flex">
+      <div class="toast-body" id="toastMsg"></div>
+      <button type="button" class="btn-close me-2 m-auto" data-bs-dismiss="toast"></button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function showToast(msg, type = 'success') {
+    const el = document.getElementById('toast');
+    document.getElementById('toastMsg').textContent = msg;
+    el.className = `toast align-items-center text-bg-${type} border-0`;
+    bootstrap.Toast.getOrCreateInstance(el, { delay: 3500 }).show();
+  }
+
+  function levelClass(line) {
+    if (line.includes('[ERROR]'))   return 'log-error';
+    if (line.includes('[WARNING]')) return 'log-warning';
+    if (line.includes('[DEBUG]'))   return 'log-debug';
+    if (line.includes('[INFO]'))    return 'log-info';
+    return '';
+  }
+
+  function renderLines(lines) {
+    const pre = document.getElementById('logPre');
+    if (!lines.length) {
+      pre.innerHTML = '<span class="text-muted">— log is empty —</span>';
+      document.getElementById('logMeta').textContent = 'out/app.log — 0 lines';
+      return;
+    }
+    pre.innerHTML = lines.map(l => {
+      const cls = levelClass(l);
+      const escaped = l.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return cls ? `<span class="${cls}">${escaped}</span>` : escaped;
+    }).join('\n');
+    document.getElementById('logMeta').textContent =
+      `out/app.log — showing ${lines.length} line${lines.length !== 1 ? 's' : ''}`;
+    scrollBottom();
+  }
+
+  async function loadLog() {
+    document.getElementById('logMeta').textContent = 'Loading…';
+    try {
+      const res = await fetch(`${apiBase}/tools/app-log`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      renderLines(data.lines);
+    } catch (e) {
+      document.getElementById('logPre').textContent = `Failed to load log: ${e.message}`;
+      document.getElementById('logMeta').textContent = 'error';
+    }
+  }
+
+  async function clearLog() {
+    const ok = await confirmAction(
+      'The current app.log will be archived with a timestamp and a new empty log will be started.',
+      { title: 'Clear App Log', okLabel: 'Clear', okClass: 'btn-danger' }
+    );
+    if (!ok) return;
+
+    const btn = document.getElementById('clearBtn');
+    btn.disabled = true;
+    try {
+      const res = await fetch(`${apiBase}/tools/clear-app-log`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+      showToast('App log cleared and archived.');
+      loadLog();
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'danger');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function scrollBottom() {
+    const pre = document.getElementById('logPre');
+    pre.scrollTop = pre.scrollHeight;
+  }
+
+  window.onload = loadLog;
+</script>
+{% endblock %}

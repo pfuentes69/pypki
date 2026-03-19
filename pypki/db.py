@@ -275,6 +275,37 @@ class PKIDataBase:
             logger.error(f"Error: {err}")
             return None
 
+    def update_ca(self, ca_id: int, fields: dict):
+        """
+        Update editable fields of a CertificationAuthority row.
+
+        Allowed keys in `fields`: name, max_validity, serial_number_length,
+        crl_validity, extensions (must already be a JSON string).
+
+        Returns True on success, False otherwise.
+        """
+        ALLOWED = {"name", "max_validity", "serial_number_length", "crl_validity", "extensions"}
+        updates = {k: v for k, v in fields.items() if k in ALLOWED}
+        if not updates:
+            return False
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+            set_clause = ", ".join(f"{col} = %s" for col in updates)
+            values = list(updates.values()) + [ca_id]
+            cursor.execute(
+                f"UPDATE CertificationAuthorities SET {set_clause} WHERE id = %s",
+                values
+            )
+            self._local.connection.commit()
+            affected = cursor.rowcount
+            cursor.close()
+            return affected > 0
+        except mysql.connector.Error as err:
+            logger.error(f"Error updating CA: {err}")
+            return False
+
     def get_ca_collection(self):
         """
         Retrieves a collection of CA IDs and names from the CertificationAuthorities table.
@@ -979,6 +1010,18 @@ class PKIDataBase:
 
         cursor.execute("""
             SELECT
+                COUNT(*)                                                          AS total,
+                SUM(certificate IS NULL OR certificate = '')                      AS no_cert,
+                SUM(not_after IS NOT NULL AND not_after <= NOW())                 AS expired,
+                SUM(not_after IS NOT NULL
+                    AND not_after > NOW()
+                    AND not_after <= DATE_ADD(NOW(), INTERVAL 30 DAY))            AS expiring_soon
+            FROM OCSPResponders
+        """)
+        ocsp_row = cursor.fetchone()
+
+        cursor.execute("""
+            SELECT
                 ca.id,
                 ca.name,
                 COUNT(c.id)          AS issued,
@@ -990,6 +1033,17 @@ class PKIDataBase:
         """)
         ca_overview = cursor.fetchall()
         cursor.close()
+
+        ocsp_total        = int(ocsp_row["total"]        or 0)
+        ocsp_no_cert      = int(ocsp_row["no_cert"]      or 0)
+        ocsp_expired      = int(ocsp_row["expired"]      or 0)
+        ocsp_expiring     = int(ocsp_row["expiring_soon"] or 0)
+        if ocsp_total == 0:
+            ocsp_status = "none"
+        elif ocsp_no_cert + ocsp_expired + ocsp_expiring > 0:
+            ocsp_status = "warn"
+        else:
+            ocsp_status = "ok"
 
         return {
             "active":        int(cert_row["active"]        or 0),
@@ -1005,6 +1059,13 @@ class PKIDataBase:
                 }
                 for row in ca_overview
             ],
+            "ocsp": {
+                "status":       ocsp_status,
+                "total":        ocsp_total,
+                "expired":      ocsp_expired,
+                "expiring_soon": ocsp_expiring,
+                "no_cert":      ocsp_no_cert,
+            },
         }
 
 
@@ -1396,6 +1457,77 @@ class PKIDataBase:
         except mysql.connector.Error as err:
             logger.error(f"Database error: {err}")
 
+    # ── Audit Logs ────────────────────────────────────────────────────────────
+
+    def write_audit_log(self, resource_type: str, resource_id, action: str, user_id: int = 0):
+        """Insert an audit log entry. user_id=0 means automated/system action."""
+        if self._local.connection:
+            cursor = self._local.connection.cursor()
+            try:
+                cursor.execute(
+                    "INSERT INTO AuditLogs (resource_type, resource_id, action, user_id) VALUES (%s, %s, %s, %s)",
+                    (resource_type, resource_id, action, user_id)
+                )
+                self._local.connection.commit()
+            except mysql.connector.Error as err:
+                logger.error(f"Audit log write error: {err}")
+            finally:
+                cursor.close()
+
+    def dump_and_clear_audit_logs(self):
+        """
+        Fetch every row from AuditLogs (with username), delete them all, and
+        return the rows so the caller can write the CSV.  Both operations run
+        inside the same connection; the DELETE is only committed after the
+        SELECT succeeds.
+        """
+        if self._local.connection:
+            cursor = self._local.connection.cursor(dictionary=True)
+            try:
+                cursor.execute(
+                    "SELECT al.id, al.resource_type, al.resource_id, al.action, "
+                    "al.user_id, u.username, al.created_at "
+                    "FROM AuditLogs al "
+                    "LEFT JOIN Users u ON u.id = al.user_id "
+                    "ORDER BY al.id ASC"
+                )
+                rows = cursor.fetchall()
+                cursor.execute("DELETE FROM AuditLogs")
+                self._local.connection.commit()
+                return rows
+            except mysql.connector.Error as err:
+                logger.error(f"Audit log dump/clear error: {err}")
+                return []
+            finally:
+                cursor.close()
+        return []
+
+    def get_audit_logs(self, page: int = 1, per_page: int = 25):
+        """Return (total, list_of_rows) for the audit log, newest first."""
+        offset = (page - 1) * per_page
+        if self._local.connection:
+            cursor = self._local.connection.cursor(dictionary=True)
+            try:
+                cursor.execute("SELECT COUNT(*) AS cnt FROM AuditLogs")
+                total = cursor.fetchone()["cnt"]
+                cursor.execute(
+                    "SELECT al.id, al.resource_type, al.resource_id, al.action, "
+                    "al.user_id, u.username, al.created_at "
+                    "FROM AuditLogs al "
+                    "LEFT JOIN Users u ON u.id = al.user_id "
+                    "ORDER BY al.id DESC "
+                    "LIMIT %s OFFSET %s",
+                    (per_page, offset)
+                )
+                rows = cursor.fetchall()
+                return total, rows
+            except mysql.connector.Error as err:
+                logger.error(f"Audit log read error: {err}")
+                return 0, []
+            finally:
+                cursor.close()
+        return 0, []
+
     # ─────────────────────────────────────────────────────────────────────────
 
     def create_database(self):
@@ -1520,15 +1652,6 @@ class PKIDataBase:
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                     );
                 """,
-                "CertificateLogs": """
-                    CREATE TABLE IF NOT EXISTS CertificateLogs (
-                        id INT PRIMARY KEY AUTO_INCREMENT,
-                        certificate_id INT,
-                        action ENUM('Issued', 'Revoked', 'Renewed', 'Updated', 'Expired') NOT NULL,
-                        reason TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                """,
                 "CertificateRevocationLists": """
                     CREATE TABLE IF NOT EXISTS CertificateRevocationLists (
                         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -1543,9 +1666,10 @@ class PKIDataBase:
                 "AuditLogs": """
                     CREATE TABLE IF NOT EXISTS AuditLogs (
                         id INT PRIMARY KEY AUTO_INCREMENT,
-                        action_type VARCHAR(255),
-                        action_details JSON,
-                        user_id INT,
+                        resource_type VARCHAR(64) NOT NULL,
+                        resource_id INT,
+                        action VARCHAR(64) NOT NULL,
+                        user_id INT NOT NULL DEFAULT 0,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 """,
@@ -1606,11 +1730,6 @@ class PKIDataBase:
                 ALTER TABLE ESTAliases
                 ADD CONSTRAINT fk_estalias_template_id
                 FOREIGN KEY (template_id) REFERENCES CertificateTemplates(id);
-                """,
-                """
-                ALTER TABLE CertificateLogs
-                ADD CONSTRAINT fk_log_certificate_id
-                FOREIGN KEY (certificate_id) REFERENCES Certificates(id);
                 """,
                 """
                 ALTER TABLE CertificateRevocationLists

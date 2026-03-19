@@ -11,6 +11,7 @@ _PAGES = {
     'certificate_request.html': ('certificate_request', 'Request Certificate'),
     'cas_and_crls.html':        ('cas_and_crls',        'CAs & CRL'),
     'ca_details.html':          ('cas_and_crls',        'CA Details'),
+    'ca_editor.html':           ('cas_and_crls',        'Edit CA'),
     'template_list.html':       ('template_list',       'Certificate Templates'),
     'template_editor.html':     ('template_list',       'Template Editor'),
     'est_list.html':            ('est_list',            'EST Config'),
@@ -20,6 +21,8 @@ _PAGES = {
     'kms_keygen.html':          ('kms_keygen',          'KMS Key Generation'),
     'users_list.html':          ('users_list',          'Users'),
     'user_editor.html':         ('users_list',          'User Editor'),
+    'audit_logs.html':          ('audit_logs',          'Audit Logs'),
+    'app_logs.html':            ('app_logs',            'App Logs'),
     'tools.html':               ('tools',               'Tools'),
     'login.html':               (None,                  'PyPKI – Sign In'),
 }

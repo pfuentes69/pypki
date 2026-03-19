@@ -11,6 +11,7 @@
   .health-dot.ok   { background-color: #198754; }
   .health-dot.warn { background-color: #ffc107; }
   .health-dot.err  { background-color: #dc3545; }
+  .health-dot.none { background-color: #adb5bd; }
   .health-row { display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0; border-bottom: 1px solid #f0f0f0; }
   .health-row:last-child { border-bottom: none; }
   .health-name { font-size: 0.9rem; flex: 1; }
@@ -124,7 +125,21 @@
     document.getElementById('metricCAs').textContent          = s.cas;
   }
 
-  function renderHealth(apiOk) {
+  function renderHealth(apiOk, ocsp) {
+    let ocspDot = 'none', ocspText = 'Not configured';
+    if (ocsp) {
+      if (ocsp.status === 'ok') {
+        ocspDot = 'ok';
+        ocspText = `${ocsp.total} responder${ocsp.total !== 1 ? 's' : ''} operational`;
+      } else if (ocsp.status === 'warn') {
+        ocspDot = 'warn';
+        const issues = [];
+        if (ocsp.expired      > 0) issues.push(`${ocsp.expired} expired`);
+        if (ocsp.expiring_soon > 0) issues.push(`${ocsp.expiring_soon} expiring soon`);
+        if (ocsp.no_cert      > 0) issues.push(`${ocsp.no_cert} missing cert`);
+        ocspText = issues.join(', ');
+      }
+    }
     document.getElementById('healthList').innerHTML = `
       <div class="health-row">
         <span class="health-dot ${apiOk ? 'ok' : 'err'}"></span>
@@ -135,6 +150,11 @@
         <span class="health-dot ${apiOk ? 'ok' : 'err'}"></span>
         <span class="health-name">Database</span>
         <span class="health-status">${apiOk ? 'Operational' : 'Unknown'}</span>
+      </div>
+      <div class="health-row">
+        <span class="health-dot ${ocspDot}"></span>
+        <span class="health-name">OCSP</span>
+        <span class="health-status">${ocspText}</span>
       </div>`;
   }
 
@@ -161,9 +181,9 @@
       const stats = await res.json();
       renderMetrics(stats);
       renderCaOverview(stats.ca_overview);
-      renderHealth(true);
+      renderHealth(true, stats.ocsp);
     } catch (_) {
-      renderHealth(false);
+      renderHealth(false, null);
       ['metricActive','metricRevoked','metricExpiringSoon','metricCAs'].forEach(id => {
         document.getElementById(id).textContent = '–';
       });

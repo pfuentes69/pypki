@@ -1,0 +1,234 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="/cas_and_crls.html">CAs &amp; CRL</a></li>
+    <li class="breadcrumb-item" id="breadcrumbDetails"><a href="#" id="breadcrumbDetailsLink">Details</a></li>
+    <li class="breadcrumb-item active">Edit</li>
+  </ol>
+</nav>
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0" id="pageTitle">Edit CA</h4>
+</div>
+
+<div id="alertSection" class="d-none mb-3"></div>
+
+<!-- General -->
+<div class="card mb-4">
+  <div class="card-header fw-semibold"><i class="bi bi-building me-2"></i>General</div>
+  <div class="card-body row g-3">
+    <div class="col-md-6">
+      <label class="form-label">CA Name <span class="text-danger">*</span></label>
+      <input type="text" class="form-control" id="caName">
+    </div>
+    <div class="col-md-2">
+      <label class="form-label">Max Cert Validity (days)</label>
+      <input type="number" class="form-control" id="maxValidity" min="-1">
+      <div class="form-text">-1 = unlimited</div>
+    </div>
+    <div class="col-md-2">
+      <label class="form-label">Serial Number Length (bytes)</label>
+      <input type="number" class="form-control" id="serialNumberLength" min="1" max="20">
+    </div>
+    <div class="col-md-2">
+      <label class="form-label">CRL Validity (days)</label>
+      <input type="number" class="form-control" id="crlValidity" min="1">
+    </div>
+  </div>
+</div>
+
+<!-- Default Extensions -->
+<div class="card mb-4">
+  <div class="card-header fw-semibold"><i class="bi bi-link-45deg me-2"></i>Default Extensions</div>
+  <div class="card-body">
+    <p class="text-muted small mb-3">
+      These values are injected into every certificate issued by this CA unless the certificate template overrides them.
+    </p>
+
+    <!-- AIA -->
+    <h6 class="fw-semibold">Authority Information Access (AIA)</h6>
+    <div class="row g-3 mb-3">
+      <div class="col-md-6">
+        <label class="form-label">OCSP URL</label>
+        <input type="url" class="form-control font-monospace" id="aiaOcspUrl" placeholder="http://ocsp.example.com">
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">CA Issuers URL</label>
+        <input type="url" class="form-control font-monospace" id="aiaIssuersUrl" placeholder="http://ca.example.com/ca.crt">
+      </div>
+      <div class="col-auto align-self-end">
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="aiaCritical">
+          <label class="form-check-label" for="aiaCritical">Mark AIA as critical</label>
+        </div>
+      </div>
+    </div>
+
+    <hr>
+
+    <!-- CDP -->
+    <h6 class="fw-semibold">CRL Distribution Points (CDP)</h6>
+    <div class="row g-3">
+      <div class="col-md-8">
+        <label class="form-label">CRL URL</label>
+        <input type="url" class="form-control font-monospace" id="cdpUrl" placeholder="http://ca.example.com/crl.crl">
+      </div>
+      <div class="col-auto align-self-end">
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="cdpCritical">
+          <label class="form-check-label" for="cdpCritical">Mark CDP as critical</label>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Actions -->
+<div class="d-flex gap-2">
+  <button class="btn btn-primary btn-sm" id="saveBtn" onclick="save()">
+    <i class="bi bi-floppy me-1"></i>Save
+  </button>
+  <a id="cancelBtn" href="#" class="btn btn-outline-secondary btn-sm">Cancel</a>
+</div>
+
+<!-- Toast -->
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:9999">
+  <div id="toast" class="toast align-items-center text-bg-success border-0" role="alert">
+    <div class="d-flex">
+      <div class="toast-body" id="toastMsg"></div>
+      <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const caId = new URLSearchParams(window.location.search).get('id');
+
+  function detailsUrl() { return `/ca_details.html?id=${caId}`; }
+
+  function showToast(msg, type = 'success') {
+    const el = document.getElementById('toast');
+    document.getElementById('toastMsg').innerHTML = msg;
+    el.className = `toast align-items-center text-bg-${type} border-0`;
+    bootstrap.Toast.getOrCreateInstance(el, { delay: 3000 }).show();
+  }
+
+  function showAlert(msg, type = 'danger') {
+    const el = document.getElementById('alertSection');
+    el.className = `alert alert-${type}`;
+    el.textContent = msg;
+    el.classList.remove('d-none');
+  }
+
+  function populate(ca) {
+    document.getElementById('pageTitle').textContent = `Edit CA – ${ca.name}`;
+    document.getElementById('breadcrumbDetailsLink').href = detailsUrl();
+    document.getElementById('cancelBtn').href = detailsUrl();
+
+    document.getElementById('caName').value           = ca.name ?? '';
+    document.getElementById('maxValidity').value      = ca.max_validity ?? '';
+    document.getElementById('serialNumberLength').value = ca.serial_number_length ?? '';
+    document.getElementById('crlValidity').value      = ca.crl_validity ?? '';
+
+    let ext = {};
+    try { ext = typeof ca.extensions === 'string' ? JSON.parse(ca.extensions) : (ca.extensions || {}); } catch (_) {}
+
+    if (ext.aia) {
+      const access = ext.aia.authorityInfoAccess || {};
+      document.getElementById('aiaOcspUrl').value    = access.OCSP?.url ?? '';
+      document.getElementById('aiaIssuersUrl').value = access.caIssuers?.url ?? '';
+      document.getElementById('aiaCritical').checked = !!ext.aia.critical;
+    }
+    if (ext.cdp) {
+      document.getElementById('cdpUrl').value      = ext.cdp.url ?? '';
+      document.getElementById('cdpCritical').checked = !!ext.cdp.critical;
+    }
+  }
+
+  function buildExtensions() {
+    const ext = {};
+
+    const ocspUrl    = document.getElementById('aiaOcspUrl').value.trim();
+    const issuersUrl = document.getElementById('aiaIssuersUrl').value.trim();
+    if (ocspUrl || issuersUrl) {
+      ext.aia = {
+        critical: document.getElementById('aiaCritical').checked,
+        authorityInfoAccess: {},
+      };
+      if (ocspUrl)    ext.aia.authorityInfoAccess.OCSP       = { url: ocspUrl };
+      if (issuersUrl) ext.aia.authorityInfoAccess.caIssuers  = { url: issuersUrl };
+    }
+
+    const cdpUrl = document.getElementById('cdpUrl').value.trim();
+    if (cdpUrl) {
+      ext.cdp = {
+        critical: document.getElementById('cdpCritical').checked,
+        url: cdpUrl,
+      };
+    }
+
+    return ext;
+  }
+
+  async function save() {
+    const name = document.getElementById('caName').value.trim();
+    if (!name) { showAlert('CA Name is required.'); return; }
+
+    const maxValidity      = parseInt(document.getElementById('maxValidity').value, 10);
+    const serialLength     = parseInt(document.getElementById('serialNumberLength').value, 10);
+    const crlValidity      = parseInt(document.getElementById('crlValidity').value, 10);
+
+    if (isNaN(maxValidity))  { showAlert('Max certificate validity must be a number.'); return; }
+    if (isNaN(serialLength) || serialLength < 1) { showAlert('Serial number length must be a positive integer.'); return; }
+    if (isNaN(crlValidity)  || crlValidity < 1)  { showAlert('CRL validity must be a positive integer.'); return; }
+
+    const payload = {
+      name,
+      max_validity:          maxValidity,
+      serial_number_length:  serialLength,
+      crl_validity:          crlValidity,
+      extensions:            buildExtensions(),
+    };
+
+    const btn = document.getElementById('saveBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Saving…';
+
+    try {
+      const res = await fetch(`${apiBase}/ca/${caId}`, {
+        method:  'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+      showToast('CA saved successfully.');
+      setTimeout(() => { window.location.href = detailsUrl(); }, 1200);
+    } catch (e) {
+      showAlert(`Save failed: ${e.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-floppy me-1"></i>Save';
+    }
+  }
+
+  async function load() {
+    if (!caId) { showAlert('No CA ID in URL.'); return; }
+    try {
+      const res = await fetch(`${apiBase}/ca/${caId}/full`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const ca = await res.json();
+      populate(ca);
+    } catch (e) {
+      showAlert(`Failed to load CA: ${e.message}`);
+    }
+  }
+
+  window.onload = load;
+</script>
+{% endblock %}

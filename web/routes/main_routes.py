@@ -1,5 +1,8 @@
 import json
+import os
 import re
+import shutil
+from datetime import datetime
 
 from flask import Blueprint, jsonify, request, abort, Response, send_from_directory, g
 from cryptography.hazmat.primitives import serialization
@@ -97,6 +100,21 @@ def get_ca_details(ca_id):
         abort(404, description="Certification Authority not found")
     result = api_adapters.convert_to_serializable(ca_details)
     return jsonify(result)
+
+
+@bp.route('/ca/<int:ca_id>', methods=['PUT'])
+def update_ca(ca_id):
+    logger.info(f"API - PUT Update CA {ca_id}")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
+    data = request.get_json()
+    if not data:
+        abort(400, description="Missing JSON body")
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+    ok = api_adapters.update_ca(ca_id, data, user_id=user_id)
+    if not ok:
+        abort(404, description="CA not found or nothing to update")
+    return jsonify({"message": "CA updated successfully"}), 200
 
 
 @bp.route('/ca/<int:ca_id>/full', methods=['GET'])
@@ -303,7 +321,8 @@ def revoke_certificate(cert_id):
         abort(400, description="'revocation_reason' must be an integer")
 
     # Call adapter function to perform revocation
-    success = api_adapters.revoke_certificate(cert_id, revocation_reason)
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+    success = api_adapters.revoke_certificate(cert_id, revocation_reason, user_id=user_id)
     if not success:
         abort(404, description="Certificate not found or already revoked")
 
@@ -352,10 +371,12 @@ def issue_certificate_from_csr():
         "template_id": template_id
     }
 
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
     try:
         # Always get the cert_id so we can redirect the caller
         cert_id = api_adapters.generate_certificate_from_csr(
-            request_config, csr_pem, return_certificate=False, request_json=request_json
+            request_config, csr_pem, return_certificate=False, request_json=request_json,
+            user_id=user_id
         )
         if cert_id is None:
             abort(500, description="Certificate generation failed")
@@ -414,6 +435,7 @@ def issue_certificate_pkcs12():
         request_json = None
 
     request_config = {"ca_id": ca_id, "template_id": template_id}
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
 
     try:
         p12_bytes, cert_id = api_adapters.generate_pkcs12(
@@ -424,6 +446,7 @@ def issue_certificate_pkcs12():
             pfx_password=pfx_password,
             friendly_name=friendly_name,
             store_key=store_key,
+            user_id=user_id,
         )
     except (ValueError, TypeError) as e:
         logger.error(f"Error issuing PKCS12 (validation/build): {e}", exc_info=True)
@@ -525,7 +548,8 @@ def create_est_alias():
         if not data.get(field):
             abort(400, description=f"Missing required field: {field}")
 
-    result = api_adapters.create_est_alias(data)
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+    result = api_adapters.create_est_alias(data, user_id=user_id)
     if not result:
         abort(500, description="Failed to create EST alias")
     return jsonify(result), 201
@@ -552,7 +576,8 @@ def update_est_alias(alias_id):
         if not data.get(field):
             abort(400, description=f"Missing required field: {field}")
 
-    ok = api_adapters.update_est_alias(alias_id, data)
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+    ok = api_adapters.update_est_alias(alias_id, data, user_id=user_id)
     if not ok:
         abort(404, description="EST alias not found or update failed")
     return jsonify({"message": "EST alias updated successfully"}), 200
@@ -563,7 +588,8 @@ def delete_est_alias(alias_id):
     logger.info(f"API - DELETE EST Alias {alias_id}")
     err = _require_role('superadmin', 'admin')
     if err: return err
-    ok = api_adapters.delete_est_alias(alias_id)
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+    ok = api_adapters.delete_est_alias(alias_id, user_id=user_id)
     if not ok:
         abort(404, description="EST alias not found")
     return jsonify({"message": "EST alias deleted successfully"}), 200
@@ -634,7 +660,8 @@ def update_template(template_id):
     data = request.get_json()
     if not data or 'template_name' not in data:
         abort(400, description="Missing 'template_name' in request body")
-    success = api_adapters.update_template(template_id, data)
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+    success = api_adapters.update_template(template_id, data, user_id=user_id)
     if not success:
         abort(404, description="Template not found or update failed")
     return jsonify({"message": "Template updated successfully", "template_id": template_id}), 200
@@ -690,8 +717,9 @@ def create_user():
     if requested_role in ('superadmin', 'admin') and current_role != 'superadmin':
         return jsonify({"error": "Forbidden", "description": "Only superadmins can create admin or superadmin accounts"}), 403
 
+    actor_id = g.current_user.get('id', 0)
     try:
-        user_id = api_adapters.create_user(data)
+        user_id = api_adapters.create_user(data, actor_id=actor_id)
     except ValueError as e:
         if str(e) == "username_taken":
             abort(409, description="Username already exists")
@@ -745,8 +773,9 @@ def update_user(user_id):
             return jsonify({"error": "Forbidden", "description": "Only superadmins can modify admin or superadmin accounts"}), 403
     # user/auditor targets: both admin and superadmin can modify
 
+    actor_id = g.current_user.get('id', 0)
     try:
-        ok = api_adapters.update_user(user_id, data)
+        ok = api_adapters.update_user(user_id, data, actor_id=actor_id)
     except ValueError as e:
         if str(e) == "username_taken":
             abort(409, description="Username already exists")
@@ -773,7 +802,8 @@ def delete_user(user_id):
         if g.current_user.get('role') != 'superadmin':
             return jsonify({"error": "Forbidden", "description": "Only superadmins can delete admin or superadmin accounts"}), 403
 
-    ok = api_adapters.delete_user(user_id)
+    actor_id = g.current_user.get('id', 0)
+    ok = api_adapters.delete_user(user_id, actor_id=actor_id)
     if not ok:
         abort(404, description="User not found")
     return jsonify({"message": "User deleted successfully"}), 200
@@ -787,7 +817,8 @@ def create_template():
     data = request.get_json()
     if not data or 'template_name' not in data:
         abort(400, description="Missing 'template_name' in request body")
-    template_id = api_adapters.create_template(data)
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+    template_id = api_adapters.create_template(data, user_id=user_id)
     if template_id is None:
         abort(500, description="Failed to create template")
     return jsonify({"message": "Template created successfully", "template_id": template_id}), 201
@@ -846,3 +877,84 @@ def restore_db():
         logger.error(f"Restore failed: {e}")
         abort(500, description=f"Restore failed: {e}")
     return jsonify(result), 200
+
+
+# ── Audit Logs ────────────────────────────────────────────────────────────────
+
+@bp.route('/audit-logs', methods=['GET'])
+def list_audit_logs():
+    logger.info("API - GET Audit Logs")
+    err = _require_role('superadmin', 'admin', 'auditor')
+    if err: return err
+    page     = request.args.get('page', default=1, type=int)
+    per_page = request.args.get('per_page', default=25, type=int)
+    total, rows = api_adapters.get_audit_logs(page, per_page)
+    return jsonify(api_adapters.convert_to_serializable({
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "items": rows,
+    })), 200
+
+
+# ── App Log ───────────────────────────────────────────────────────────────────
+
+_APP_LOG = os.path.join("out", "app.log")
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mK]')
+
+
+@bp.route('/tools/app-log', methods=['GET'])
+def get_app_log():
+    logger.info("API - GET App Log")
+    err = _require_role('superadmin', 'admin', 'auditor')
+    if err: return err
+    lines = []
+    try:
+        with open(_APP_LOG, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        pass
+    cleaned = [_ANSI_RE.sub('', ln).rstrip('\n') for ln in lines[-100:]]
+    return jsonify({"lines": cleaned}), 200
+
+
+@bp.route('/tools/clear-app-log', methods=['POST'])
+def clear_app_log():
+    logger.info("API - POST Clear App Log")
+    err = _require_role('superadmin')
+    if err: return err
+    try:
+        if os.path.exists(_APP_LOG):
+            timestamp = datetime.now().strftime('%Y%m%d%H%M')
+            archive = os.path.join("out", f"app-log-{timestamp}.log")
+            shutil.copy2(_APP_LOG, archive)
+            open(_APP_LOG, 'w').close()
+        return jsonify({"message": "App log cleared"}), 200
+    except OSError as e:
+        abort(500, description=f"Failed to clear log: {e}")
+
+
+@bp.route('/audit-logs/clear', methods=['POST'])
+def clear_audit_logs():
+    logger.info("API - POST Clear Audit Logs")
+    err = _require_role('superadmin')
+    if err: return err
+    import csv, io
+    db = api_adapters.pki.get_db()
+    with db.connection():
+        rows = db.dump_and_clear_audit_logs()
+    if rows:
+        timestamp = datetime.now().strftime('%Y%m%d%H%M')
+        csv_path  = os.path.join("out", f"audit-log-{timestamp}.csv")
+        try:
+            with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=['id', 'resource_type', 'resource_id', 'action', 'user_id', 'username', 'created_at'],
+                    extrasaction='ignore',
+                )
+                writer.writeheader()
+                writer.writerows(rows)
+        except OSError as e:
+            abort(500, description=f"Cleared DB but failed to write CSV: {e}")
+    return jsonify({"message": "Audit log cleared", "rows_archived": len(rows)}), 200

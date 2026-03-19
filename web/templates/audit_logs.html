@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item active">Audit Logs</li>
+  </ol>
+</nav>
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0">Audit Logs</h4>
+  <div class="d-flex gap-2">
+    <button class="btn btn-outline-secondary btn-sm" onclick="loadPage(currentPage)">
+      <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+    </button>
+    <button class="btn btn-outline-danger btn-sm" data-superadmin-only onclick="clearAuditLog()">
+      <i class="bi bi-trash me-1"></i>Clear Audit Log
+    </button>
+  </div>
+</div>
+
+<div class="card shadow-sm">
+  <div class="card-body p-0">
+    <table class="table table-hover mb-0" id="auditTable">
+      <thead class="table-light">
+        <tr>
+          <th style="width:60px">#</th>
+          <th>Resource Type</th>
+          <th>Resource ID</th>
+          <th>Action</th>
+          <th>User</th>
+          <th>Timestamp</th>
+        </tr>
+      </thead>
+      <tbody id="auditBody">
+        <tr><td colspan="6" class="text-muted small p-3">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Pagination -->
+<nav class="mt-3" id="paginationNav" style="display:none">
+  <ul class="pagination pagination-sm justify-content-center" id="paginationList"></ul>
+</nav>
+
+<!-- Toast -->
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:9999">
+  <div id="toast" class="toast align-items-center border-0" role="alert">
+    <div class="d-flex">
+      <div class="toast-body" id="toastMsg"></div>
+      <button type="button" class="btn-close me-2 m-auto" data-bs-dismiss="toast"></button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const PER_PAGE = 25;
+  let currentPage = 1;
+  let totalItems  = 0;
+
+  const ACTION_COLORS = {
+    CREATE: 'success', UPDATE: 'primary', DELETE: 'danger',
+    REVOKE: 'warning',
+  };
+
+  function actionBadge(action) {
+    const cls = ACTION_COLORS[action] || 'secondary';
+    return `<span class="badge bg-${cls}">${action}</span>`;
+  }
+
+  function resourceBadge(type) {
+    return `<span class="badge bg-light text-dark border">${type}</span>`;
+  }
+
+  function formatDate(val) {
+    if (!val) return '<span class="text-muted">—</span>';
+    return new Date(val).toLocaleString();
+  }
+
+  async function loadPage(page) {
+    currentPage = page;
+    const tbody = document.getElementById('auditBody');
+    tbody.innerHTML = '<tr><td colspan="6" class="text-muted small p-3">Loading…</td></tr>';
+
+    try {
+      const res = await fetch(`${apiBase}/audit-logs?page=${page}&per_page=${PER_PAGE}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.description || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      totalItems = data.total;
+      renderTable(data.items);
+      renderPagination(data.total, page);
+    } catch (e) {
+      tbody.innerHTML =
+        `<tr><td colspan="6" class="text-danger small p-3">Failed to load audit logs: ${e.message}</td></tr>`;
+    }
+  }
+
+  function renderTable(items) {
+    const tbody = document.getElementById('auditBody');
+    if (!items || !items.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="text-muted small p-3">No audit log entries found.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = items.map(row => {
+      const username = row.user_id === 0
+        ? '<span class="text-muted">system</span>'
+        : (row.username || `#${row.user_id}`);
+      return `
+        <tr>
+          <td class="text-muted small">${row.id}</td>
+          <td>${resourceBadge(row.resource_type)}</td>
+          <td class="small">${row.resource_id ?? '<span class="text-muted">—</span>'}</td>
+          <td>${actionBadge(row.action)}</td>
+          <td class="small">${username}</td>
+          <td class="small text-muted">${formatDate(row.created_at)}</td>
+        </tr>`;
+    }).join('');
+  }
+
+  function renderPagination(total, page) {
+    const totalPages = Math.ceil(total / PER_PAGE);
+    const nav  = document.getElementById('paginationNav');
+    const list = document.getElementById('paginationList');
+
+    if (totalPages <= 1) { nav.style.display = 'none'; return; }
+    nav.style.display = '';
+
+    const pages = [];
+    pages.push(`<li class="page-item ${page === 1 ? 'disabled' : ''}">
+      <a class="page-link" href="#" onclick="loadPage(${page - 1});return false">&laquo;</a></li>`);
+    for (let i = 1; i <= totalPages; i++) {
+      if (i === 1 || i === totalPages || Math.abs(i - page) <= 2) {
+        pages.push(`<li class="page-item ${i === page ? 'active' : ''}">
+          <a class="page-link" href="#" onclick="loadPage(${i});return false">${i}</a></li>`);
+      } else if (Math.abs(i - page) === 3) {
+        pages.push(`<li class="page-item disabled"><span class="page-link">…</span></li>`);
+      }
+    }
+    pages.push(`<li class="page-item ${page === totalPages ? 'disabled' : ''}">
+      <a class="page-link" href="#" onclick="loadPage(${page + 1});return false">&raquo;</a></li>`);
+    list.innerHTML = pages.join('');
+  }
+
+  function showToast(msg, type = 'success') {
+    const el = document.getElementById('toast');
+    document.getElementById('toastMsg').textContent = msg;
+    el.className = `toast align-items-center text-bg-${type} border-0`;
+    bootstrap.Toast.getOrCreateInstance(el, { delay: 3500 }).show();
+  }
+
+  async function clearAuditLog() {
+    const ok = await confirmAction(
+      'All audit log entries will be deleted and exported to a CSV file in the out/ folder.',
+      { title: 'Clear Audit Log', okLabel: 'Clear', okClass: 'btn-danger' }
+    );
+    if (!ok) return;
+    try {
+      const res = await fetch(`${apiBase}/audit-logs/clear`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+      showToast(`Audit log cleared — ${data.rows_archived} row(s) archived to CSV.`);
+      loadPage(1);
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, 'danger');
+    }
+  }
+
+  window.onload = () => loadPage(1);
+</script>
+{% endblock %}

@@ -27,6 +27,20 @@ def convert_to_serializable(obj):
     else:
         return obj
 
+# ── Audit Logs ────────────────────────────────────────────────────────────────
+
+def write_audit_log(resource_type: str, resource_id, action: str, user_id: int = 0):
+    db = pki.get_db()
+    with db.connection():
+        db.write_audit_log(resource_type, resource_id, action, user_id)
+
+
+def get_audit_logs(page: int = 1, per_page: int = 25):
+    db = pki.get_db()
+    with db.connection():
+        return db.get_audit_logs(page, per_page)
+
+
 def process_input(data):
     # Transform input if needed, pass to core logic
     result = "SOMETHING"
@@ -86,6 +100,33 @@ def get_ca_full_details(ca_id):
     return ca_record
 
 
+def update_ca(ca_id: int, data: dict, user_id: int = 0):
+    """
+    Update editable CA fields. Returns True on success.
+
+    Accepted keys: name, max_validity, serial_number_length, crl_validity, extensions.
+    `extensions` should be a dict; it is serialised to JSON here.
+    """
+    fields = {}
+    if "name" in data and data["name"]:
+        fields["name"] = data["name"].strip()
+    for int_field in ("max_validity", "serial_number_length", "crl_validity"):
+        if int_field in data and data[int_field] is not None:
+            fields[int_field] = int(data[int_field])
+    if "extensions" in data:
+        ext = data["extensions"]
+        fields["extensions"] = json.dumps(ext) if isinstance(ext, dict) else ext
+    if not fields:
+        return False
+    db = pki.get_db()
+    with db.connection():
+        ok = db.update_ca(ca_id, fields)
+    if ok:
+        pki.load_ca_collection()
+        write_audit_log("cas", ca_id, "UPDATE", user_id)
+    return ok
+
+
 def generate_crl(ca_id):
     """Generate a fresh CRL for the given CA. Returns issue/next-update dates or None."""
     crl = pki.generate_crl(ca_id)
@@ -112,7 +153,7 @@ def get_est_alias(alias_id: int):
     return _strip_password(row) if row else None
 
 
-def create_est_alias(data: dict):
+def create_est_alias(data: dict, user_id: int = 0):
     """
     Create a new EST alias.
 
@@ -133,10 +174,12 @@ def create_est_alias(data: dict):
             password_hash=password_hash,
             cert_fingerprint=data.get("cert_fingerprint"),
         )
+    if new_id:
+        write_audit_log("est_aliases", new_id, "CREATE", user_id)
     return {"alias_id": new_id} if new_id else None
 
 
-def update_est_alias(alias_id: int, data: dict):
+def update_est_alias(alias_id: int, data: dict, user_id: int = 0):
     """
     Update an existing EST alias.
 
@@ -150,7 +193,7 @@ def update_est_alias(alias_id: int, data: dict):
     password_hash = generate_password_hash(password) if password else None
     db: PKIDataBase = pki.get_db()
     with db.connection():
-        return db.update_est_alias(
+        ok = db.update_est_alias(
             alias_id=alias_id,
             name=data["name"],
             ca_id=int(data["ca_id"]),
@@ -159,13 +202,19 @@ def update_est_alias(alias_id: int, data: dict):
             password_hash=password_hash,
             cert_fingerprint=data.get("cert_fingerprint"),
         )
+    if ok:
+        write_audit_log("est_aliases", alias_id, "UPDATE", user_id)
+    return ok
 
 
-def delete_est_alias(alias_id: int):
+def delete_est_alias(alias_id: int, user_id: int = 0):
     """Delete an EST alias. Returns True on success."""
     db: PKIDataBase = pki.get_db()
     with db.connection():
-        return db.delete_est_alias(alias_id)
+        ok = db.delete_est_alias(alias_id)
+    if ok:
+        write_audit_log("est_aliases", alias_id, "DELETE", user_id)
+    return ok
 
 
 def set_default_est_alias(alias_id: int):
@@ -206,7 +255,8 @@ def get_certificate_details_json(cert_id):
 
 def generate_certificate_from_csr(ca_template_config, csr_pem: bytes,
                                    return_certificate: bool = True,
-                                   request_json: str = None):
+                                   request_json: str = None,
+                                   user_id: int = 0):
     certificate_der = pki.generate_certificate_from_csr(
         csr_pem=csr_pem,
         ca_id=ca_template_config["ca_id"],
@@ -216,12 +266,15 @@ def generate_certificate_from_csr(ca_template_config, csr_pem: bytes,
         enforce_template=True,
         return_certificate=return_certificate
     )
+    # certificate_der is the cert_id when return_certificate=False
+    cert_id = certificate_der if not return_certificate else None
+    write_audit_log("certificates", cert_id, "CREATE", user_id)
     return certificate_der
 
 def generate_pkcs12(ca_template_config, request_json: str,
                     key_algorithm: str = "RSA", key_type: str = "2048",
                     pfx_password: bytes = b"", friendly_name: bytes = b"MyCert",
-                    store_key: bool = False):
+                    store_key: bool = False, user_id: int = 0):
     p12_bytes, cert_id = pki.generate_pkcs12(
         request_json=request_json,
         ca_id=ca_template_config["ca_id"],
@@ -233,6 +286,7 @@ def generate_pkcs12(ca_template_config, request_json: str,
         validity_days=PKITools.INFINITE_VALIDITY,
         store_key=store_key,
     )
+    write_audit_log("certificates", cert_id, "CREATE", user_id)
     return p12_bytes, cert_id
 
 
@@ -323,10 +377,13 @@ def parse_csr(csr_pem: str) -> dict:
     return {"subject": subject, "san": san}
 
 
-def revoke_certificate(cert_id, revocation_reason):
+def revoke_certificate(cert_id, revocation_reason, user_id: int = 0):
     try:
-        return pki.revoke_certificate(cert_id, revocation_reason)
-    except Exception as e:
+        ok = pki.revoke_certificate(cert_id, revocation_reason)
+        if ok:
+            write_audit_log("certificates", cert_id, "REVOKE", user_id)
+        return ok
+    except Exception:
         return False
 
 
@@ -357,12 +414,13 @@ def export_cert_template(template_id):
         return db.export_cert_template(template_id)
 
 
-def update_template(template_id, template_dict):
+def update_template(template_id, template_dict, user_id: int = 0):
     db = pki.get_db()
     with db.connection():
         success = db.update_cert_template(template_id, template_dict)
     if success:
         pki.load_template_collection()
+        write_audit_log("templates", template_id, "UPDATE", user_id)
     return success
 
 
@@ -371,12 +429,13 @@ def kms_generate_key(algorithm: str, persist: bool, **kwargs):
     return kms.generate_key(algorithm=algorithm, persist=persist, **kwargs)
 
 
-def create_template(template_dict):
+def create_template(template_dict, user_id: int = 0):
     db = pki.get_db()
     with db.connection():
         template_id = db.insert_cert_template(template_dict)
     if template_id:
         pki.load_template_collection()
+        write_audit_log("templates", template_id, "CREATE", user_id)
     return template_id
 
 
@@ -394,7 +453,7 @@ def get_user(user_id: int):
         return db.get_user(user_id)
 
 
-def create_user(data: dict):
+def create_user(data: dict, actor_id: int = 0):
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
     role     = data.get("role") or "user"
@@ -403,10 +462,13 @@ def create_user(data: dict):
     password_hash = generate_password_hash(password)
     db = pki.get_db()
     with db.connection():
-        return db.create_user(username, password_hash, role)
+        new_id = db.create_user(username, password_hash, role)
+    if new_id:
+        write_audit_log("users", new_id, "CREATE", actor_id)
+    return new_id
 
 
-def update_user(user_id: int, data: dict):
+def update_user(user_id: int, data: dict, actor_id: int = 0):
     fields = {}
     if "username" in data and data["username"]:
         fields["username"] = data["username"].strip()
@@ -420,13 +482,19 @@ def update_user(user_id: int, data: dict):
         return False
     db = pki.get_db()
     with db.connection():
-        return db.update_user(user_id, fields)
+        ok = db.update_user(user_id, fields)
+    if ok:
+        write_audit_log("users", user_id, "UPDATE", actor_id)
+    return ok
 
 
-def delete_user(user_id: int):
+def delete_user(user_id: int, actor_id: int = 0):
     db = pki.get_db()
     with db.connection():
-        return db.delete_user(user_id)
+        ok = db.delete_user(user_id)
+    if ok:
+        write_audit_log("users", user_id, "DELETE", actor_id)
+    return ok
 
 
 # ── Authentication ─────────────────────────────────────────────────────────────
