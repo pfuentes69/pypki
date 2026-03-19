@@ -296,8 +296,7 @@ SyslogIdentifier=pypki
 PrivateTmp=true
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=${APP_DIR}/out ${APP_DIR}/config
+ReadWritePaths=${APP_DIR}
 
 [Install]
 WantedBy=multi-user.target
