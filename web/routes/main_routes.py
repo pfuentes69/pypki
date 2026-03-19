@@ -336,12 +336,12 @@ def list_certificates():
             status=status, expiring_soon=expiring_soon
         )
 
-        return jsonify({
+        return jsonify(api_adapters.convert_to_serializable({
             "page": page,
             "per_page": per_page,
             "total": total,
             "certificates": results
-        }), 200
+        })), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -378,8 +378,7 @@ def get_certificate_status(cert_id):
     cert_status = api_adapters.get_certificate_status(cert_id)
     if not cert_status:
         abort(404, description="Certificate not found")
-#    result = api_adapters.convert_to_serializable(cert_details)
-    return jsonify(cert_status)
+    return jsonify(api_adapters.convert_to_serializable(cert_status))
 
 
 @bp.route('/certificate/revoke/<int:cert_id>', methods=['POST'])

@@ -22,8 +22,7 @@
 
   function formatDate(val) {
     if (!val) return '—';
-    const d = new Date(val);
-    return isNaN(d) ? val : d.toLocaleString();
+    return String(val).slice(0, 20);
   }
 
   function renderExtensions(raw) {

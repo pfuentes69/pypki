@@ -238,10 +238,13 @@
     </div>
   </div>
   <div class="card-body d-none" id="cdpBody">
-    <div class="row g-3 align-items-end">
-      <div class="col-md-8">
-        <label class="form-label">CRL URL</label>
-        <input type="url" class="form-control" id="cdpUrl" placeholder="http://crl.example.com/root.crl">
+    <div class="row g-3 align-items-center mb-2">
+      <div class="col-auto">
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="cdpUseCADefault"
+            onchange="toggleSection('cdpUrlRow', !this.checked)">
+          <label class="form-check-label" for="cdpUseCADefault">Use CA default</label>
+        </div>
       </div>
       <div class="col-auto">
         <div class="form-check">
@@ -250,32 +253,78 @@
         </div>
       </div>
     </div>
+    <div class="row g-3" id="cdpUrlRow">
+      <div class="col-md-8">
+        <label class="form-label">CRL URL <span class="text-danger">*</span></label>
+        <input type="url" class="form-control" id="cdpUrl" placeholder="http://crl.example.com/root.crl">
+      </div>
+    </div>
   </div>
 </div>
 
 <div class="card">
   <div class="card-header d-flex justify-content-between align-items-center">
     Authority Information Access (AIA)
-    <div class="form-check form-switch mb-0">
-      <input class="form-check-input" type="checkbox" id="aiaEnabled"
-        onchange="toggleSection('aiaBody', this.checked)">
-      <label class="form-check-label" for="aiaEnabled">Include</label>
+    <div class="form-check">
+      <input class="form-check-input" type="checkbox" id="aiaCritical">
+      <label class="form-check-label" for="aiaCritical">Critical</label>
     </div>
   </div>
-  <div class="card-body d-none" id="aiaBody">
-    <div class="row g-3 align-items-end">
-      <div class="col-md-6">
-        <label class="form-label">CA Issuers URL</label>
-        <input type="url" class="form-control" id="aiaIssuers" placeholder="http://ca.example.com/ca.crt">
-      </div>
-      <div class="col-md-6">
-        <label class="form-label">OCSP URL</label>
-        <input type="url" class="form-control" id="aiaOcsp" placeholder="http://ocsp.example.com">
-      </div>
+  <div class="card-body">
+    <div class="row g-3 align-items-center mb-1">
+      <div class="col-auto fw-semibold small text-uppercase text-muted" style="width:6rem">OCSP</div>
       <div class="col-auto">
-        <div class="form-check">
-          <input class="form-check-input" type="checkbox" id="aiaCritical">
-          <label class="form-check-label" for="aiaCritical">Critical</label>
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="aiaOcspInclude"
+            onchange="toggleSection('aiaOcspOptions', this.checked)">
+          <label class="form-check-label" for="aiaOcspInclude">Include</label>
+        </div>
+      </div>
+    </div>
+    <div class="d-none ms-4 mb-3" id="aiaOcspOptions">
+      <div class="row g-3 align-items-center mb-2">
+        <div class="col-auto">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="aiaOcspUseCADefault"
+              onchange="toggleSection('aiaOcspUrlRow', !this.checked)">
+            <label class="form-check-label" for="aiaOcspUseCADefault">Use CA default</label>
+          </div>
+        </div>
+      </div>
+      <div class="row g-3" id="aiaOcspUrlRow">
+        <div class="col-md-8">
+          <label class="form-label">OCSP URL <span class="text-danger">*</span></label>
+          <input type="url" class="form-control" id="aiaOcsp" placeholder="http://ocsp.example.com">
+        </div>
+      </div>
+    </div>
+
+    <hr class="my-2">
+
+    <div class="row g-3 align-items-center mb-1">
+      <div class="col-auto fw-semibold small text-uppercase text-muted" style="width:6rem">CA Issuers</div>
+      <div class="col-auto">
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="aiaIssuersInclude"
+            onchange="toggleSection('aiaIssuersOptions', this.checked)">
+          <label class="form-check-label" for="aiaIssuersInclude">Include</label>
+        </div>
+      </div>
+    </div>
+    <div class="d-none ms-4" id="aiaIssuersOptions">
+      <div class="row g-3 align-items-center mb-2">
+        <div class="col-auto">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="aiaIssuersUseCADefault"
+              onchange="toggleSection('aiaIssuersUrlRow', !this.checked)">
+            <label class="form-check-label" for="aiaIssuersUseCADefault">Use CA default</label>
+          </div>
+        </div>
+      </div>
+      <div class="row g-3" id="aiaIssuersUrlRow">
+        <div class="col-md-8">
+          <label class="form-label">CA Issuers URL <span class="text-danger">*</span></label>
+          <input type="url" class="form-control" id="aiaIssuers" placeholder="http://ca.example.com/ca.crt">
         </div>
       </div>
     </div>
@@ -470,11 +519,28 @@
     if (chk('akiInclude')) template.extensions.authorityKeyIdentifier = { include: true, critical: chk('akiCritical') };
     if (chk('ocspNoCheck')) template.extensions.OCSPNoCheck = { include: true };
     if (chk('policyEnabled')) { const oids = getPolicyOids(); template.extensions.policyIdentifiers = { critical: chk('policyCritical'), values: oids }; }
-    if (chk('cdpEnabled') && val('cdpUrl')) template.extensions.cdp = { url: val('cdpUrl'), critical: chk('cdpCritical') };
-    if (chk('aiaEnabled') && (val('aiaIssuers') || val('aiaOcsp'))) {
-      const aia = { authorityInfoAccess: {}, critical: chk('aiaCritical') };
-      if (val('aiaIssuers')) aia.authorityInfoAccess.caIssuers = { url: val('aiaIssuers') };
-      if (val('aiaOcsp'))    aia.authorityInfoAccess.OCSP = { url: val('aiaOcsp') };
+    if (chk('cdpEnabled')) {
+      const useCA = chk('cdpUseCADefault');
+      const url   = val('cdpUrl');
+      if (!useCA && !url) throw new Error('CRL URL is required when CDP is included and not using CA default.');
+      template.extensions.cdp = { include: true, useCADefault: useCA, url: useCA ? '' : url, critical: chk('cdpCritical') };
+    }
+    const aiaOcspInclude    = chk('aiaOcspInclude');
+    const aiaIssuersInclude = chk('aiaIssuersInclude');
+    if (aiaOcspInclude || aiaIssuersInclude) {
+      const aia = { critical: chk('aiaCritical'), ocsp: { include: false }, caIssuers: { include: false } };
+      if (aiaOcspInclude) {
+        const useCA = chk('aiaOcspUseCADefault');
+        const url   = val('aiaOcsp');
+        if (!useCA && !url) throw new Error('OCSP URL is required when OCSP is included and not using CA default.');
+        aia.ocsp = { include: true, useCADefault: useCA, url: useCA ? '' : url };
+      }
+      if (aiaIssuersInclude) {
+        const useCA = chk('aiaIssuersUseCADefault');
+        const url   = val('aiaIssuers');
+        if (!useCA && !url) throw new Error('CA Issuers URL is required when CA Issuers is included and not using CA default.');
+        aia.caIssuers = { include: true, useCADefault: useCA, url: useCA ? '' : url };
+      }
       template.extensions.aia = aia;
     }
     if (chk('cryptoRsa')) template.allowed_cryptography.keyAlgorithms.push({ name: 'RSA', min_size: parseInt(val('rsaMin')), default_size: parseInt(val('rsaDefault')), max_size: parseInt(val('rsaMax')) });
@@ -514,10 +580,26 @@
     setChk('ocspNoCheck', !!ext.OCSPNoCheck?.include);
     const hasPol = !!ext.policyIdentifiers; setChk('policyEnabled', hasPol); toggleSection('policyBody', hasPol);
     if (hasPol) { setChk('policyCritical', ext.policyIdentifiers.critical); (ext.policyIdentifiers.values || []).forEach(oid => addPolicyOid(oid)); }
-    const hasCdp = !!ext.cdp; setChk('cdpEnabled', hasCdp); toggleSection('cdpBody', hasCdp);
-    if (hasCdp) { setVal('cdpUrl', ext.cdp.url); setChk('cdpCritical', ext.cdp.critical); }
-    const hasAia = !!ext.aia; setChk('aiaEnabled', hasAia); toggleSection('aiaBody', hasAia);
-    if (hasAia) { setChk('aiaCritical', ext.aia.critical); setVal('aiaIssuers', ext.aia.authorityInfoAccess?.caIssuers?.url || ''); setVal('aiaOcsp', ext.aia.authorityInfoAccess?.OCSP?.url || ''); }
+    const hasCdp = !!(ext.cdp?.include); setChk('cdpEnabled', hasCdp); toggleSection('cdpBody', hasCdp);
+    if (hasCdp) {
+      const useCA = !!ext.cdp.useCADefault;
+      setChk('cdpUseCADefault', useCA); toggleSection('cdpUrlRow', !useCA);
+      setVal('cdpUrl', ext.cdp.url || ''); setChk('cdpCritical', !!ext.cdp.critical);
+    }
+    const aiaExt = ext.aia || {};
+    setChk('aiaCritical', !!aiaExt.critical);
+    const ocspInc = !!(aiaExt.ocsp?.include); setChk('aiaOcspInclude', ocspInc); toggleSection('aiaOcspOptions', ocspInc);
+    if (ocspInc) {
+      const useCA = !!aiaExt.ocsp.useCADefault;
+      setChk('aiaOcspUseCADefault', useCA); toggleSection('aiaOcspUrlRow', !useCA);
+      setVal('aiaOcsp', aiaExt.ocsp.url || '');
+    }
+    const issuersInc = !!(aiaExt.caIssuers?.include); setChk('aiaIssuersInclude', issuersInc); toggleSection('aiaIssuersOptions', issuersInc);
+    if (issuersInc) {
+      const useCA = !!aiaExt.caIssuers.useCADefault;
+      setChk('aiaIssuersUseCADefault', useCA); toggleSection('aiaIssuersUrlRow', !useCA);
+      setVal('aiaIssuers', aiaExt.caIssuers.url || '');
+    }
     const algos = t.allowed_cryptography?.keyAlgorithms || [];
     const rsa = algos.find(a => a.name === 'RSA');
     const ecdsa = algos.find(a => a.name === 'ECDSA');

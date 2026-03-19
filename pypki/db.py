@@ -9,7 +9,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from cryptography.hazmat.primitives.asymmetric import ec
-from datetime import datetime
+from datetime import datetime, timezone
 from werkzeug.security import generate_password_hash
 from .ca import CertificationAuthority
 from .ocsp_responder import OCSPResponder
@@ -90,6 +90,7 @@ class PKIDataBase:
         """
         self.connect_to_db()
         conn = self._pool.get_connection()
+        conn.cmd_query("SET time_zone = '+00:00'")
         self._local.connection = conn
         try:
             yield self
@@ -986,7 +987,7 @@ class PKIDataBase:
         """
 
         # Get the current timestamp
-        revoked_at = datetime.now()
+        revoked_at = datetime.now(timezone.utc)
 
         query = """
             UPDATE Certificates

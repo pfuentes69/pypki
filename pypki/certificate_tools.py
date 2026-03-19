@@ -227,77 +227,53 @@ class CertificateTools:
                 ocsp_nocheck_present = True
 
 
-            # AIA extension can include OCSP URI and/or CA Issuers URI
-            aia_ca_present = False
-            aia_template_present = False
-
-            # Check if the template defines the AIA extension
-            if "aia" in self.__template__["extensions"]:
-                aia_template_present = True
-                aia_critical_template = self.__template__["extensions"]["aia"]["critical"]
-                aia_template_list =[]
-                if "OCSP" in self.__template__["extensions"]["aia"]["authorityInfoAccess"]:
-                    aia_template_list.append(x509.AccessDescription(x509.ObjectIdentifier('1.3.6.1.5.5.7.48.1'), x509.UniformResourceIdentifier(self.__template__["extensions"]["aia"]["authorityInfoAccess"]["OCSP"]["url"])))
-                if "caIssuers" in self.__template__["extensions"]["aia"]["authorityInfoAccess"]:
-                    aia_template_list.append(x509.AccessDescription(x509.ObjectIdentifier('1.3.6.1.5.5.7.48.2'), x509.UniformResourceIdentifier(self.__template__["extensions"]["aia"]["authorityInfoAccess"]["caIssuers"]["url"])))
-
-            # Check if the CA config defines the AIA extension
-            if (issuing_ca is not None) and ("aia" in issuing_ca.get_config()["extensions"]):
-                aia_ca_present = True
-                aia_critical_ca = issuing_ca.get_config()["extensions"]["aia"]["critical"]
-                aia_ca_list =[]
-                if "OCSP" in issuing_ca.get_config()["extensions"]["aia"]["authorityInfoAccess"]:
-                    aia_ca_list.append(x509.AccessDescription(x509.ObjectIdentifier('1.3.6.1.5.5.7.48.1'), x509.UniformResourceIdentifier(issuing_ca.get_config()["extensions"]["aia"]["authorityInfoAccess"]["OCSP"]["url"])))
-                if "caIssuers" in issuing_ca.get_config()["extensions"]["aia"]["authorityInfoAccess"]:
-                    aia_ca_list.append(x509.AccessDescription(x509.ObjectIdentifier('1.3.6.1.5.5.7.48.2'), x509.UniformResourceIdentifier(issuing_ca.get_config()["extensions"]["aia"]["authorityInfoAccess"]["caIssuers"]["url"])))
-
-            if aia_template_present is True and ocsp_nocheck_present is False:
-                # The template takes precedence
-                aia = x509.AuthorityInformationAccess(aia_template_list)
-                builder = builder.add_extension(aia, critical = aia_critical_template)
-            elif aia_ca_present is True and ocsp_nocheck_present is False:
-                # Defaults to the CA config, if present
-                aia = x509.AuthorityInformationAccess(aia_ca_list)
-                builder = builder.add_extension(aia, critical = aia_critical_ca)
-
-            # Add CDP (Certificate Distribution Points)
-            cdp_ca_present = False
-            cdp_template_present = False
-
-            # Check if the template defines the CDP extension
-            if "cdp" in self.__template__["extensions"]:
-                cdp_template_present = True
-                cdp_uri_template = self.__template__["extensions"]["cdp"]["url"]
-                cdp_template = x509.CRLDistributionPoints([
-                    x509.DistributionPoint(
-                        full_name=[x509.UniformResourceIdentifier(cdp_uri_template)],
-                        relative_name=None,
-                        reasons=None,
-                        crl_issuer=None
+            # AIA — each sub-field (ocsp, caIssuers) is controlled independently
+            _aia_ext = self.__template__["extensions"].get("aia", {})
+            if _aia_ext:
+                _aia_critical = _aia_ext.get("critical", False)
+                _ca_aia = (issuing_ca.get_config()["extensions"].get("aia", {})
+                           if issuing_ca else {})
+                _aia_list = []
+                for _sub_key, _access_oid, _ca_key in [
+                    ("ocsp",      ObjectIdentifier('1.3.6.1.5.5.7.48.1'), "OCSP"),
+                    ("caIssuers", ObjectIdentifier('1.3.6.1.5.5.7.48.2'), "caIssuers"),
+                ]:
+                    _sub = _aia_ext.get(_sub_key, {})
+                    if not _sub.get("include", False):
+                        continue
+                    if _sub.get("useCADefault", False):
+                        _url = (_ca_aia.get("authorityInfoAccess", {})
+                                       .get(_ca_key, {}).get("url"))
+                    else:
+                        _url = _sub.get("url", "")
+                    if _url:
+                        _aia_list.append(x509.AccessDescription(
+                            _access_oid, x509.UniformResourceIdentifier(_url)
+                        ))
+                if _aia_list:
+                    builder = builder.add_extension(
+                        x509.AuthorityInformationAccess(_aia_list), critical=_aia_critical
                     )
-                ])
-                cdp_critical_template = self.__template__["extensions"]["cdp"]["critical"]
 
-            # Check if the CA config defines the CDP extension
-            if (issuing_ca is not None) and ("cdp" in issuing_ca.get_config()["extensions"]):
-                cdp_ca_present = True
-                cdp_uri_ca = issuing_ca.get_config()["extensions"]["cdp"]["url"]
-                cdp_ca = x509.CRLDistributionPoints([
-                    x509.DistributionPoint(
-                        full_name=[x509.UniformResourceIdentifier(cdp_uri_ca)],
-                        relative_name=None,
-                        reasons=None,
-                        crl_issuer=None
+            # CDP — template controls include/useCADefault/url
+            _cdp_ext = self.__template__["extensions"].get("cdp", {})
+            if _cdp_ext.get("include", False):
+                if _cdp_ext.get("useCADefault", False):
+                    _ca_cdp = (issuing_ca.get_config()["extensions"].get("cdp", {})
+                               if issuing_ca else {})
+                    _cdp_url      = _ca_cdp.get("url")
+                    _cdp_critical = _ca_cdp.get("critical", False)
+                else:
+                    _cdp_url      = _cdp_ext.get("url", "")
+                    _cdp_critical = _cdp_ext.get("critical", False)
+                if _cdp_url:
+                    builder = builder.add_extension(
+                        x509.CRLDistributionPoints([x509.DistributionPoint(
+                            full_name=[x509.UniformResourceIdentifier(_cdp_url)],
+                            relative_name=None, reasons=None, crl_issuer=None,
+                        )]),
+                        critical=_cdp_critical,
                     )
-                ])
-                cdp_critical_ca = issuing_ca.get_config()["extensions"]["cdp"]["critical"]
-            
-            if cdp_template_present is True and ocsp_nocheck_present is False:
-                # The template takes precedence
-                builder = builder.add_extension(cdp_template, critical=cdp_critical_template)
-            elif cdp_ca_present is True and ocsp_nocheck_present is False:
-                # Defaults to the CA config, if present
-                builder = builder.add_extension(cdp_ca, critical=cdp_critical_ca)
 
             # Extended Key Usage
             if "extendedKeyUsage" in self.__template__["extensions"]:

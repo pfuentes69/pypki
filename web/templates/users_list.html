@@ -88,7 +88,7 @@
 
   function formatDate(val) {
     if (!val) return '<span class="text-muted">—</span>';
-    return new Date(val).toLocaleString();
+    return String(val).slice(0, 20);
   }
 
   function roleBadge(role) {

@@ -172,6 +172,44 @@
       </tr>`).join('');
   }
 
+  function renderActivity(items) {
+    if (!items.length) {
+      document.getElementById('activityList').innerHTML =
+        '<div class="text-muted small">No activity yet.</div>';
+      return;
+    }
+    const iconMap = {
+      'CREATE': { icon: 'bi-plus-circle-fill', bg: 'bg-success' },
+      'UPDATE': { icon: 'bi-pencil-fill',       bg: 'bg-primary' },
+      'DELETE': { icon: 'bi-trash-fill',         bg: 'bg-danger'  },
+      'REVOKE': { icon: 'bi-x-circle-fill',      bg: 'bg-warning' },
+    };
+    const typeMap = {
+      'certificates': 'Certificate',
+      'cas':          'CA',
+      'est_aliases':  'EST Alias',
+      'templates':    'Template',
+      'users':        'User',
+    };
+    document.getElementById('activityList').innerHTML = items.map(r => {
+      const m    = iconMap[r.action]  || { icon: 'bi-circle-fill', bg: 'bg-secondary' };
+      const type = typeMap[r.resource_type] || r.resource_type;
+      const who  = r.username || `user #${r.user_id}`;
+      const ts   = String(r.created_at).slice(0, 20);
+      const label = r.action.charAt(0) + r.action.slice(1).toLowerCase();
+      return `
+      <div class="activity-item">
+        <div class="activity-icon text-white ${m.bg}">
+          <i class="bi ${m.icon}"></i>
+        </div>
+        <div>
+          <div class="activity-text">${label} ${type} #${r.resource_id}</div>
+          <div class="activity-time">${ts} &middot; ${who}</div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
   async function loadDashboard() {
     document.getElementById('lastRefresh').textContent =
       'Last updated: ' + new Date().toLocaleTimeString();
@@ -190,8 +228,21 @@
       document.getElementById('caOverviewBody').innerHTML =
         '<tr><td colspan="3" class="text-muted small p-3">Could not reach API.</td></tr>';
     }
-    document.getElementById('activityList').innerHTML =
-      '<div class="text-muted small">Not yet implemented.</div>';
+    try {
+      const res = await fetch(`${apiBase}/audit-logs?page=1&per_page=10`);
+      if (res.status === 403) {
+        document.getElementById('activityList').innerHTML =
+          '<div class="text-muted small">Insufficient permissions to view activity.</div>';
+      } else if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      } else {
+        const data = await res.json();
+        renderActivity(data.items || []);
+      }
+    } catch (_) {
+      document.getElementById('activityList').innerHTML =
+        '<div class="text-muted small">Could not load activity.</div>';
+    }
   }
 
   window.onload = loadDashboard;

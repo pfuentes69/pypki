@@ -23,7 +23,7 @@ def convert_to_serializable(obj):
         except UnicodeDecodeError:
             return base64.b64encode(obj).decode('utf-8')
     elif isinstance(obj, datetime.datetime):
-        return obj.isoformat()
+        return obj.strftime('%Y-%m-%dT%H:%M:%SZ')
     else:
         return obj
 

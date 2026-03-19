@@ -30,13 +30,14 @@
     },
     "subjectKeyIdentifier": { "include": true },
     "authorityKeyIdentifier": { "include": true, "critical": false },
-    "cdp": {"url": "http://crl.example.com/customcdp.crl", "critical": false },
+    "cdp": {
+      "include": true, "useCADefault": false,
+      "url": "http://crl.example.com/customcdp.crl", "critical": false
+    },
     "aia": {
-      "authorityInfoAccess": {
-        "caIssuers": { "url": "http://ca.example.com/customaia.crt"},
-        "OCSP": { "url": "http://ca.example.com/customocsp"}
-      },
-      "critical": false
+      "critical": false,
+      "ocsp":      { "include": true, "useCADefault": false, "url": "http://ca.example.com/customocsp" },
+      "caIssuers": { "include": true, "useCADefault": false, "url": "http://ca.example.com/customaia.crt" }
     }
   },
   "allowed_cryptography": {
