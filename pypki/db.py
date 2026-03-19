@@ -53,7 +53,6 @@ class PKIDataBase:
                 pool_name="pypki",
                 pool_size=pool_size,
                 pool_reset_session=True,
-                use_pure=True,
                 host=self.__config["host"],
                 port=self.__config["port"],
                 user=self.__config["user"],
@@ -1817,8 +1816,6 @@ class PKIDataBase:
         if self._local.connection:
             cursor = self._local.connection.cursor()
 
-            cursor.execute(f"GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' IDENTIFIED BY 'Password1$' WITH GRANT OPTION")
-            cursor.execute(f"FLUSH PRIVILEGES;")
             cursor.execute(f"DROP DATABASE IF EXISTS {db_name}")  # Drop the database if it exists
             cursor.execute(f"CREATE DATABASE {db_name}")         # Create the database
 
