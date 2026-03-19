@@ -283,6 +283,7 @@ Type=simple
 User=${APP_USER}
 Group=${APP_USER}
 WorkingDirectory=${APP_DIR}
+Environment=PYTHONPATH=${APP_DIR}
 ExecStart=${APP_DIR}/venv/bin/python3 web/app.py
 Restart=on-failure
 RestartSec=5s
