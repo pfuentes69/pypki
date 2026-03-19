@@ -138,15 +138,28 @@ else
 fi
 
 # Run the SQL as root (works with both socket-auth and password-auth)
-mariadb --batch -u root <<SQL
+# Try mariadb first, fall back to mysql
+DB_CLIENT=""
+for cmd in mariadb mysql; do
+    if command -v "$cmd" &>/dev/null; then DB_CLIENT="$cmd"; break; fi
+done
+[[ -n "$DB_CLIENT" ]] || die "No MariaDB/MySQL client found (mariadb or mysql)"
+
+$DB_CLIENT --batch -u root <<SQL
 CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
-ALTER USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
+DROP USER IF EXISTS '${DB_USER}'@'localhost';
+CREATE USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
 GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';
 FLUSH PRIVILEGES;
 SQL
 ok "Database '$DB_NAME' and user '$DB_USER' ready"
+
+# Verify the credentials work before proceeding
+if ! $DB_CLIENT -u "$DB_USER" -p"$DB_PASS" -h 127.0.0.1 "$DB_NAME" -e "SELECT 1" &>/dev/null; then
+    die "Cannot connect to MariaDB as $DB_USER — credential verification failed"
+fi
+ok "DB credentials verified"
 
 # =============================================================================
 #  5. WRITE config/config.json
