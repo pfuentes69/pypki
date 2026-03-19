@@ -15,9 +15,12 @@ KeyStorage ◄─── CertificationAuthorities
                     │
              CertificateTemplates
                     │
-               Certificates ──► CertificateLogs
+               Certificates
                     │
       CertificateRevocationLists (via CertificationAuthorities)
+
+AuditLogs (system-wide, references Users)
+Users
 ```
 
 ---
@@ -38,6 +41,7 @@ Stores cryptographic keys, either in plain text, encrypted, or as a reference to
 | `storage_type` | ENUM | NOT NULL | `Encrypted`, `Plain`, or `HSM` |
 | `hsm_slot` | INT | | PKCS#11 slot number (HSM only) |
 | `hsm_token_id` | VARCHAR(255) | | HSM token identifier (HSM only) |
+| `token_password` | VARCHAR(255) | | PKCS#11 token PIN (HSM only) |
 | `created_at` | TIMESTAMP | DEFAULT NOW | |
 
 ---
@@ -56,11 +60,8 @@ One row per Certification Authority loaded into the system.
 | `public_key` | TEXT | | PEM-encoded CA public key |
 | `ski` | VARCHAR(64) | | Subject Key Identifier (hex SHA-1 of public key) |
 | `private_key` | TEXT | | PEM-encoded private key (null when using HSM) |
-| `private_key_reference` | INT | FK → KeyStorage | Used when the key is stored in KeyStorage |
+| `private_key_reference` | INT | FK → KeyStorage | Reference to the key in KeyStorage |
 | `certificate_chain` | TEXT | | PEM bundle of the full chain up to the root |
-| `token_slot` | INT | | PKCS#11 slot number |
-| `token_key_id` | VARCHAR(64) | | PKCS#11 key ID |
-| `token_password` | VARCHAR(64) | | PKCS#11 token PIN |
 | `max_validity` | INT | | Maximum certificate validity in days this CA may issue |
 | `serial_number_length` | INT | | Byte length used when generating random serial numbers |
 | `crl_validity` | INT | DEFAULT 365 | How many days a generated CRL remains valid |
@@ -118,6 +119,10 @@ Every certificate issued by the system, regardless of CA or template.
 - `template_id` → `CertificateTemplates(id)`
 - `private_key_reference` → `KeyStorage(id)`
 
+**Unique constraints**
+- `fingerprint` — globally unique across all CAs
+- `uq_ca_serial (ca_id, serial_number)` — serial numbers are unique per issuing CA (RFC 5280). The DB constraint is the authoritative uniqueness check; serial generation retries on collision (practically impossible with the default random byte length).
+
 **Revocation reason codes** (RFC 5280)
 
 | Code | Meaning |
@@ -172,33 +177,14 @@ Configuration for OCSP responder instances. Each responder is tied to a specific
 | `not_after` | DATETIME | | Expiry of the OCSP responder certificate |
 | `response_validity` | INT | DEFAULT 1 | How many days an OCSP response remains valid |
 | `private_key` | TEXT | | PEM-encoded OCSP responder private key |
-| `private_key_reference` | INT | | Reference to KeyStorage (when applicable) |
+| `private_key_reference` | INT | FK → KeyStorage | Reference to the key in KeyStorage |
 | `certificate` | TEXT | | PEM-encoded OCSP responder certificate |
-| `token_slot` | INT | | PKCS#11 slot number |
-| `token_key_id` | VARCHAR(64) | | PKCS#11 key ID |
-| `token_password` | VARCHAR(64) | | PKCS#11 token PIN |
 | `created_at` | TIMESTAMP | DEFAULT NOW | |
 | `updated_at` | TIMESTAMP | ON UPDATE NOW | |
 
 **Foreign keys**
 - `ca_id` → `CertificationAuthorities(id)`
-
----
-
-### CertificateLogs
-
-Audit trail for lifecycle events on individual certificates.
-
-| Column | Type | Constraints | Description |
-|---|---|---|---|
-| `id` | INT | PK, AUTO_INCREMENT | |
-| `certificate_id` | INT | FK → Certificates | The affected certificate |
-| `action` | ENUM | NOT NULL | `Issued`, `Revoked`, `Renewed`, `Updated`, or `Expired` |
-| `reason` | TEXT | | Free-text description of the action |
-| `created_at` | TIMESTAMP | DEFAULT NOW | |
-
-**Foreign keys**
-- `certificate_id` → `Certificates(id)`
+- `private_key_reference` → `KeyStorage(id)`
 
 ---
 
@@ -223,15 +209,18 @@ Stores generated CRL data alongside validity metadata.
 
 ### AuditLogs
 
-General-purpose audit log for system-level actions (not tied to a specific certificate).
+System-wide audit trail. Every CREATE, UPDATE, DELETE, and REVOKE operation writes a row here.
 
 | Column | Type | Constraints | Description |
 |---|---|---|---|
 | `id` | INT | PK, AUTO_INCREMENT | |
-| `action_type` | VARCHAR(255) | | Category or type of the action |
-| `action_details` | JSON | | Arbitrary JSON payload describing the action |
-| `user_id` | INT | | Identifier of the user who triggered the action |
+| `resource_type` | VARCHAR(64) | NOT NULL | Table or logical object affected (e.g. `CA`, `Certificate`, `Template`, `User`) |
+| `resource_id` | INT | | Primary key of the affected row (NULL for bulk or non-row actions) |
+| `action` | VARCHAR(64) | NOT NULL | Verb: `CREATE`, `UPDATE`, `DELETE`, `REVOKE`, etc. |
+| `user_id` | INT | NOT NULL, DEFAULT 0 | ID of the authenticated user; 0 for system/anonymous actions |
 | `created_at` | TIMESTAMP | DEFAULT NOW | |
+
+The web UI surfaces this table on the **Audit Logs** administration page with pagination, colour-coded action badges, and the ability to export the current contents to a timestamped CSV file (`out/audit-log-yyyymmddHHMM.csv`).
 
 ---
 
@@ -246,8 +235,22 @@ General-purpose audit log for system-level actions (not tied to a specific certi
 | ESTAliases | ca_id | CertificationAuthorities(id) |
 | ESTAliases | template_id | CertificateTemplates(id) |
 | OCSPResponders | ca_id | CertificationAuthorities(id) |
-| CertificateLogs | certificate_id | Certificates(id) |
+| OCSPResponders | private_key_reference | KeyStorage(id) |
 | CertificateRevocationLists | ca_id | CertificationAuthorities(id) |
+
+---
+
+## Migration Scripts
+
+Applied incrementally to existing installations. Each script is idempotent.
+
+| Script | What it does |
+|---|---|
+| `utils/migrate_keys_to_kms.py` | Moves CA and OCSP private keys into `KeyStorage`; sets `private_key_reference` on source rows |
+| `utils/migrate_hsm_fields.py` | Copies `token_password` from CA/OCSP rows to `KeyStorage`; drops `token_slot`, `token_key_id`, `token_password` from `CertificationAuthorities` and `OCSPResponders`. **Run after** `migrate_keys_to_kms.py` |
+| `utils/migrate_audit_logs.py` | Drops `CertificateLogs` and the old `AuditLogs`; creates the new `AuditLogs` schema |
+| `utils/migrate_serial_uniqueness.py` | Adds `UNIQUE KEY uq_ca_serial (ca_id, serial_number)` to `Certificates` |
+| `utils/migrate_est_auth_fields.py` | Adds `username`, `password_hash`, `cert_fingerprint` to `ESTAliases` |
 
 ---
 

@@ -80,7 +80,7 @@ Key methods:
 - `generate_pkcs12()` — packages certificate + key as PKCS#12
 
 ### `ca.py` — `CertificationAuthority`
-Represents a CA with its certificate, private key, and chain. Supports both software keys (PEM) and HSM-based keys (PKCS#11). Generates collision-free serial numbers.
+Represents a CA with its certificate and chain. Signing is delegated to the injected `KeyManagementService` via a `kms_key_id`. Generates random serial numbers; uniqueness is enforced by the `uq_ca_serial` DB constraint with automatic retry on collision.
 
 ### `db.py` — `PKIDataBase`
 All database operations against MySQL. Uses a `MySQLConnectionPool` (configurable pool size via `"pool_size"` in `db_config`, default 5) with `threading.local()` for per-thread connection checkout, making it safe for multi-threaded Flask deployments.
@@ -88,15 +88,15 @@ All database operations against MySQL. Uses a `MySQLConnectionPool` (configurabl
 Tables:
 | Table | Purpose |
 |---|---|
-| `CertificationAuthorities` | CA records with cert, chain, HSM config |
-| `Certificates` | Issued certificates with status (Active / Revoked / Expired) |
+| `CertificationAuthorities` | CA records with cert, chain, and reference to key in KeyStorage |
+| `Certificates` | Issued certificates with status (Active / Revoked / Expired); unique per CA by serial |
 | `CertificateTemplates` | JSON-encoded certificate templates |
 | `OCSPResponders` | OCSP responder configs |
-| `KeyStorage` | Asymmetric and symmetric keys (plain/encrypted/HSM) |
+| `KeyStorage` | Asymmetric and symmetric keys (plain/encrypted/HSM); HSM entries include `token_password` |
 | `ESTAliases` | EST alias → CA + template mapping, with optional Basic Auth credentials |
-| `CertificateLogs` | Certificate lifecycle audit log |
 | `CertificateRevocationLists` | Stored CRL records |
-| `AuditLogs` | Security audit trail |
+| `AuditLogs` | System-wide audit trail (resource_type, resource_id, action, user_id) |
+| `Users` | Authenticated users with role-based access control |
 
 ### `ocsp_responder.py` — `OCSPResponder`
 Generates signed OCSP responses. Matches requests by issuer SKI. Supports Good, Revoked, and Unknown statuses. Includes nonce handling for replay protection.
@@ -244,7 +244,8 @@ A legacy Flask app (`web/app.py`) provides a minimal Jinja2 UI on port 5000 for 
 ## HSM Integration
 
 - PKCS#11 support via `pykcs11`
-- Configured per CA and OCSP responder via `token_slot`, `token_key_id`, `token_password`
+- HSM keys are stored in `KeyStorage` with `storage_type = 'HSM'`; the slot, token ID, and PIN (`token_password`) are columns on that row
+- All signing goes through `KeyManagementService`; HSM and software keys are transparent to callers
 - Deferred signing flow: TBS Certificate is constructed, hash is sent to HSM, returned signature is patched into the certificate via `patch_certificate_signature()`
 
 ---
@@ -257,3 +258,8 @@ Recent work:
 - **CSR Tool** — browser-side key and CSR generation (`csr_tool.html`), no server round-trip; supports ECC P-256 and RSA 2048 with SAN
 - **DB connection pool** — `PKIDataBase` replaced single shared connection with `MySQLConnectionPool` + `threading.local()` for thread-safe multi-request handling
 - **EST admin API** — full CRUD REST endpoints at `/api/est` for alias management
+- **KMS integration** — all private keys centralised in `KeyStorage`; signing routed through `KeyManagementService`; HSM token PIN stored in `KeyStorage.token_password`; `token_slot/token_key_id/token_password` removed from CA and OCSP tables
+- **Audit log** — new `AuditLogs` table replaces `CertificateLogs`; every CRUD operation writes an entry; admin Audit Logs page with pagination, CSV export, and clear function
+- **CA editor** — web UI for editing CA name, validity, serial length, CRL validity, and default extensions (AIA/CDP)
+- **App logs page** — admin page showing last 100 lines of `out/app.log` with archive-and-clear function
+- **Serial uniqueness** — DB-level `UNIQUE KEY uq_ca_serial (ca_id, serial_number)` on `Certificates`; in-memory serial set and full-table `fetch_used_serials()` removed; issuance methods retry on the (essentially impossible) collision

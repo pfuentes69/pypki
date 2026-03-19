@@ -4,15 +4,15 @@
 
 This document describes the strategy for introducing a Key Management Service (KMS) layer into PyPKI. The goal is to centralise all private key storage and all signing operations behind a single internal service so that future security improvements (encrypted storage, remote KMS, HSM consolidation, key generation, key export) can be made without touching the signing callers.
 
-The implementation is split into three phases:
+The implementation was split into three phases, all now complete:
 
-| Phase | Scope | Risk |
+| Phase | Scope | Status |
 |---|---|---|
-| 1 | DB migration: move keys into `KeyStorage` | Low — data migration only |
-| 2 | KMS module: new internal service class | Low — additive |
-| 3 | Sign-through: route all signing calls via KMS | Medium — replaces existing signing paths |
+| 1 | DB migration: move keys into `KeyStorage` | Done — `utils/migrate_keys_to_kms.py` |
+| 2 | KMS module: new internal service class | Done — `pypki/kms.py` |
+| 3 | Sign-through: route all signing calls via KMS | Done |
 
-Keys remain in clear text throughout all three phases. Security hardening is out of scope and will follow in a separate initiative.
+Keys remain in clear text. Security hardening (encrypted storage, remote KMS) is out of scope and will follow in a separate initiative.
 
 ---
 
@@ -25,7 +25,7 @@ CertificationAuthorities.private_key  (TEXT, PEM)
 OCSPResponders.private_key            (TEXT, PEM)
 ```
 
-Both tables also have `private_key_reference INT` (FK → `KeyStorage`) and HSM fields (`token_slot`, `token_key_id`, `token_password`), but `private_key_reference` is never populated today — the PEM key is always taken from the `private_key` column in the same row.
+Both tables also had `private_key_reference INT` (FK → `KeyStorage`) and HSM fields (`token_slot`, `token_key_id`, `token_password`). After the migration: `private_key_reference` is always populated; `token_slot/token_key_id/token_password` have been dropped from both tables (HSM PIN is now in `KeyStorage.token_password`).
 
 ### Current signing paths
 

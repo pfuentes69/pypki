@@ -686,7 +686,6 @@ class PKIDataBase:
             logger.info(f"Certificate inserted successfully! New ID: {new_id}")
 
         except IntegrityError as err:
-            cursor.close()
             if err.errno == 1062 and 'uq_ca_serial' in str(err):
                 raise DuplicateSerialError(
                     f"Serial number collision for ca_id={ca_id}: {serial_number}"
@@ -699,8 +698,7 @@ class PKIDataBase:
         except Exception as e:
             logger.error(f"Problem processing certificate: {e}")
         finally:
-            if not cursor.is_closed():
-                cursor.close()
+            cursor.close()
 
         return new_id
 
