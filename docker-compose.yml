@@ -1,0 +1,43 @@
+services:
+
+  db:
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MARIADB_DATABASE:      ${DB_NAME:-pypki_db}
+      MARIADB_USER:          ${DB_USER:-pypki_user}
+      MARIADB_PASSWORD:      ${DB_PASSWORD}
+    volumes:
+      - ./data/mariadb:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/app/config                                # configuration — edit on host, restart to apply
+      - ./out:/app/out                                      # generated output (certs, CRLs, logs, backups)
+      - ./data/softhsm/tokens:/var/lib/softhsm/tokens       # SoftHSM2 dev-token storage — survives restarts
+    environment:
+      PYPKI_CONFIG: config/config.json
+      # SoftHSM2 — a development token is initialised on first boot.
+      # CHANGE THESE for any non-dev deployment, or set SOFTHSM2_AUTO_INIT=false to skip.
+      SOFTHSM2_AUTO_INIT: "true"
+      SOFTHSM2_TOKEN_LABEL: pypki-dev
+      SOFTHSM2_PIN: "1234"
+      SOFTHSM2_SO_PIN: "5678"
+      # Consumed by `pkcs11-tool` inside the container and by the HSM provider
+      # once Gap 4 of doc/hsm-gap-analysis.md is closed.
+      PKCS11_MODULE: /usr/lib/softhsm/libsofthsm2.so
+      PKCS11_TOKEN_LABEL: pypki-dev
+      PKCS11_PIN: "1234"

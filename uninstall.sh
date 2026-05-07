@@ -1,24 +1,29 @@
 #!/usr/bin/env bash
-# uninstall.sh — Remove the pyPKI systemd service installed by setup.sh
-# Usage: sudo bash uninstall.sh
+# uninstall.sh — Stop and remove the Docker Compose stack created by setup.sh
+# Usage: bash uninstall.sh
 set -euo pipefail
 
-SERVICE="pypki"
-SERVICE_FILE="/etc/systemd/system/${SERVICE}.service"
+APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$APP_DIR"
 
-if [[ $EUID -ne 0 ]]; then
-    echo "Run with sudo: sudo bash uninstall.sh" >&2
+if ! command -v docker >/dev/null 2>&1; then
+    echo "Docker is not installed or not in PATH." >&2
     exit 1
 fi
 
-if [[ ! -f "$SERVICE_FILE" ]]; then
-    echo "Service file $SERVICE_FILE not found — nothing to remove."
-    exit 0
+if ! docker compose version >/dev/null 2>&1; then
+    echo "Docker Compose plugin is not available." >&2
+    exit 1
 fi
 
-systemctl stop    "$SERVICE" 2>/dev/null && echo "Stopped $SERVICE"    || true
-systemctl disable "$SERVICE" 2>/dev/null && echo "Disabled $SERVICE"   || true
-rm -f "$SERVICE_FILE"
-systemctl daemon-reload
-echo "Removed $SERVICE_FILE"
-echo "Done. App files and database are untouched."
+echo "Stopping and removing the pyPKI containers..."
+docker compose down --remove-orphans
+
+echo
+echo "pyPKI containers removed."
+echo "Persistent data was preserved in:"
+echo "  - config/"
+echo "  - out/"
+echo "  - data/mariadb/"
+echo
+echo "To permanently delete the MariaDB data, remove data/mariadb manually."

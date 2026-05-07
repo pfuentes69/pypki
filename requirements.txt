@@ -8,3 +8,4 @@ pykcs11==1.5.17
 Requests==2.32.3
 flask_cors
 PyJWT>=2.8.0
+gunicorn>=22.0.0

@@ -8,7 +8,7 @@ The implementation was split into three phases, all now complete:
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | DB migration: move keys into `KeyStorage` | Done — `utils/migrate_keys_to_kms.py` |
+| 1 | DB migration: move keys into `KeyStorage` | Done — historical one-off migration, not shipped as a standalone script in the current repo |
 | 2 | KMS module: new internal service class | Done — `pypki/kms.py` |
 | 3 | Sign-through: route all signing calls via KMS | Done |
 
@@ -46,7 +46,7 @@ Both callers hold the `KeyTools` object directly. The KMS will sit between calle
 
 Populate `KeyStorage` with the existing private keys of all CAs and OCSP responders, then update `private_key_reference` in both tables to point to the new rows. The `private_key` column in each table is left intact for now and nulled out in Phase 3.
 
-### Migration script — `utils/migrate_keys_to_kms.py`
+### Historical migration logic
 
 ```
 For each row in CertificationAuthorities:
@@ -256,7 +256,7 @@ ca.set_kms(pki.get_kms())
 
 | File | Change |
 |---|---|
-| `utils/migrate_keys_to_kms.py` | **New** — migration script (Phase 1) |
+| Historical one-off migration | Populated `KeyStorage` and wired `private_key_reference` during the KMS rollout |
 | `pypki/db.py` | **Add** `get_private_key_record(key_id)` (Phase 2) |
 | `pypki/kms.py` | **New** — `KeyManagementService` class (Phase 2) |
 | `pypki/core.py` | Instantiate KMS; pass `kms_key_id` when loading CAs/OCSP responders (Phase 3) |

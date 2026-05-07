@@ -43,6 +43,10 @@ class PyPKI:
     def load_config_json(self, config_json: str):
         self.__config = json.loads(config_json)
         self.__db.load_config(self.__config["db_config"])
+        # Apply idempotent schema migrations for existing deployments.
+        # No-op on fresh installs (the database doesn't exist until reset_pki
+        # runs) and on installs already at the latest schema.
+        self.__db.migrate_schema()
 
 
     def reset_pki(self):
@@ -100,6 +104,10 @@ class PyPKI:
             cursor.close()
         finally:
             conn.close()
+
+        # Re-apply schema migrations: a backup taken before a schema change
+        # would otherwise roll the schema back to its pre-migration state.
+        self.__db.migrate_schema()
 
         # Reload in-memory state to reflect the restored data
         self.load_template_collection()

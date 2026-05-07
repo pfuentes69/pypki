@@ -142,11 +142,15 @@ def create_ca():
         abort(400, description="CA name is required")
     if not data.get('certificate'):
         abort(400, description="CA certificate is required")
-    if not data.get('private_key'):
-        abort(400, description="Private key is required")
+    if not data.get('private_key') and not data.get('kms_key_id'):
+        abort(400, description="Either private_key or kms_key_id is required")
+    if data.get('private_key') and data.get('kms_key_id'):
+        abort(400, description="Provide only one of private_key or kms_key_id, not both")
 
     try:
         new_id = api_adapters.create_ca(data, user_id=user_id)
+    except ValueError as e:
+        abort(400, description=str(e))
     except Exception as e:
         logger.error(f"CA creation failed: {e}")
         abort(500, description=f"CA creation failed: {e}")

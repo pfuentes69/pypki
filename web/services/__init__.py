@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives import serialization
 from pypki import CertificationAuthority, PyPKI, logger
 
 CRL_PUBLICATION_FREQ = 10 * 60
+CONFIG_PATH = os.environ.get("PYPKI_CONFIG", "config/config.json")
 
 crl_task_enabled = True
 
@@ -20,7 +21,7 @@ with open("/Users/pedro/Development/Python/pypki/config/ca_store/ca1_config.json
 ca.load_config_json(ca_config_json)
 """
 
-pki = PyPKI("config/config.json")
+pki = PyPKI(CONFIG_PATH)
 
 pki.load_ocsp_responders()
 pki.load_template_collection()

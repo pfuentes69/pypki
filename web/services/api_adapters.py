@@ -127,12 +127,64 @@ def update_ca(ca_id: int, data: dict, user_id: int = 0):
     return ok
 
 
+def _verify_kms_key_for_ca(kms_key_id: int, cert_pem: str) -> None:
+    """
+    Validate that an existing KMS key is suitable for binding to a new CA.
+
+    Raises ValueError if:
+      - the key id does not exist in KeyStorage
+      - the stored public key does not match the certificate's SPKI
+      - the key is already referenced by another CA
+    """
+    db: PKIDataBase = pki.get_db()
+    with db.connection():
+        record = db.get_key_record(kms_key_id)
+        existing_ca_id = db.get_ca_id_by_key_reference(kms_key_id)
+
+    if not record:
+        raise ValueError(f"kms_key_id {kms_key_id} not found in KeyStorage")
+    if existing_ca_id is not None:
+        raise ValueError(
+            f"kms_key_id {kms_key_id} is already referenced by CA id {existing_ca_id}"
+        )
+
+    stored_pub_pem = record.get("public_key")
+    if not stored_pub_pem:
+        raise ValueError(
+            f"kms_key_id {kms_key_id} has no public_key in KeyStorage; "
+            "it cannot be bound to a CA"
+        )
+
+    try:
+        cert = x509.load_pem_x509_certificate(cert_pem.encode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"Invalid CA certificate PEM: {e}")
+
+    cert_spki_der = cert.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    try:
+        stored_pub = serialization.load_pem_public_key(stored_pub_pem.encode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"Stored public key for kms_key_id {kms_key_id} is unreadable: {e}")
+    stored_spki_der = stored_pub.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    if cert_spki_der != stored_spki_der:
+        raise ValueError(
+            "Certificate public key does not match the public key stored "
+            f"for kms_key_id {kms_key_id}"
+        )
+
+
 def create_ca(data: dict, user_id: int = 0) -> int:
     """
     Create a new CA from a validated data dict.
 
     Required keys:
-        name, certificate (PEM), private_key (PEM)
+        name, certificate (PEM), and either private_key (PEM) or kms_key_id (int)
     Optional keys:
         certificate_chain (PEM), max_validity (int, default -1),
         serial_number_length (int, default 10), crl_validity (int, default 365),
@@ -140,6 +192,15 @@ def create_ca(data: dict, user_id: int = 0) -> int:
 
     Returns the new CA's database ID.
     """
+    raw_kms_key_id = data.get("kms_key_id")
+    kms_key_id = None
+    if raw_kms_key_id is not None and raw_kms_key_id != "":
+        try:
+            kms_key_id = int(raw_kms_key_id)
+        except (TypeError, ValueError):
+            raise ValueError("kms_key_id must be an integer")
+        _verify_kms_key_for_ca(kms_key_id, data["certificate"])
+
     config = {
         "ca_name": data["name"],
         "max_validity": int(data.get("max_validity", -1)),
@@ -148,7 +209,8 @@ def create_ca(data: dict, user_id: int = 0) -> int:
         "extensions": data.get("extensions") or {},
         "crypto": {
             "certificate": data["certificate"],
-            "private_key": data["private_key"],
+            "private_key": data.get("private_key"),
+            "kms_key_id": kms_key_id,
             "certificate_chain": data.get("certificate_chain") or "",
         },
     }

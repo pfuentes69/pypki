@@ -7,7 +7,7 @@ pypki/
 │   ├── __init__.py
 │   ├── core.py                     # PyPKI main class (orchestrator)
 │   ├── ca.py                       # CertificationAuthority class
-│   ├── db.py                       # PKIDataBase class (MariaDB/MySQL backend)
+│   ├── db.py                       # PKIDataBase class (MariaDB backend via mysql-connector)
 │   ├── certificate_tools.py        # Certificate generation logic
 │   ├── key_tools.py                # Key generation and management
 │   ├── kms.py                      # KeyManagementService (KMS signing)
@@ -23,7 +23,7 @@ pypki/
 │   │   ├── main_routes.py          # /api/* endpoints (CAs, certs, CRLs, OCSP, templates, users, tools)
 │   │   ├── auth_routes.py          # /api/auth/* endpoints (login, logout)
 │   │   ├── est_routes.py           # /.well-known/est/* endpoints (RFC 7030)
-│   │   └── ocsp_routes.py          # /ocsp/* endpoints (RFC 6960 OCSP responder)
+│   │   └── ocsp_routes.py          # POST /ocsp and GET /ocsp/<base64> (RFC 6960 OCSP responder)
 │   ├── services/
 │   │   ├── __init__.py             # Shared PyPKI instance + background scheduler
 │   │   └── api_adapters.py         # Adapter layer between routes and core library
@@ -58,7 +58,7 @@ pypki/
 │       ├── app_logs.html           # Application log viewer
 │       └── tools.html              # DB backup / restore / reset
 │
-├── config/                         # Runtime configuration (not committed to git)
+├── config/                         # Shipped defaults plus runtime configuration
 │   ├── config.json                 # Active config (DB connection, folder paths, secret key)
 │   ├── ca_store/                   # CA configuration files (one JSON per CA)
 │   ├── cert_templates/             # Certificate template definitions (JSON)
@@ -85,9 +85,11 @@ pypki/
 │
 ├── doc/                            # Documentation
 │   ├── database.md                 # Full database schema reference
-│   ├── certificate_templates.md    # Certificate template JSON format
-│   ├── kms_strategy.md             # KMS integration strategy and phases
-│   ├── project_notes.md            # Development notes
+│   ├── certificate-templates.md    # Certificate template JSON format
+│   ├── kms-strategy.md             # KMS integration strategy and phases
+│   ├── project-notes.md            # Development notes
+│   ├── rest-api.md                 # REST API reference
+│   ├── roadmap.md                  # Future evolution ideas
 │   ├── structure.md                # This file
 │   ├── request_examples/           # Sample request JSONs, CSR, and key files
 │   └── learning/                   # Reference notes (architecture, patterns)
@@ -98,8 +100,9 @@ pypki/
 │   ├── crl/
 │   └── backup/
 │
-├── venv/                           # Python virtual environment (gitignored)
-├── setup.sh                        # Full server setup (installs MariaDB, systemd service)
+├── setup.sh                        # Docker-based setup: writes config, builds image, starts Compose stack
+├── setup_venv.sh                   # Creates the local .venv and installs Python dependencies
+├── uninstall.sh                    # Stops and removes the Docker Compose stack (preserves data)
 ├── requirements.txt
 └── README.md
 ```

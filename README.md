@@ -14,8 +14,8 @@ A Python PKI (Public Key Infrastructure) management service. pyPKI provides cert
 - EST server (RFC 7030, `/.well-known/est/`)
 - Key Management Service (KMS) — centralised key storage; supports software keys and PKCS#11 HSM tokens
 - PKCS#12 export
-- MariaDB / MySQL backend
-- Flask REST API
+- MariaDB backend
+- Flask + Gunicorn REST API
 - Bootstrap 5 browser management interface
 - Audit log, application log, and database backup/restore tools
 
@@ -23,27 +23,22 @@ A Python PKI (Public Key Infrastructure) management service. pyPKI provides cert
 
 ## Requirements
 
+**For Docker deployment on Linux (servers):**
+- Docker Engine 24+
+- Docker Compose plugin
+
+**For Docker deployment on macOS / Windows:**
+- Docker Desktop (includes Compose)
+
+**For local/development setup (without Docker):**
 - Python 3.11+
-- MariaDB 10.6+ or MySQL 8.0+
-- A PKCS#11 library only if using HSM keys (e.g. SoftHSM, SafeNet)
-
-Python dependencies are in `requirements.txt`. Key packages:
-
-| Package | Purpose |
-|---|---|
-| `cryptography` | Core X.509 / key operations |
-| `asn1crypto` | Low-level DER patching |
-| `Flask` | REST API and web interface |
-| `mysql-connector-python` | Database access |
-| `pykcs11` | PKCS#11 / HSM support |
-| `APScheduler` | Background task scheduling |
-| `PyJWT` | Authentication tokens |
+- MariaDB 10.6+
 
 ---
 
-## Quick Start (Linux server)
+## Quick Start — Docker On Linux (recommended for servers)
 
-The included `setup.sh` installs all dependencies, configures MariaDB, creates the database, and sets up a systemd service in one step.
+The included `setup.sh` installs Docker (if needed), generates credentials, and starts the full stack in one command.
 
 ```bash
 git clone <repo-url>
@@ -53,51 +48,187 @@ sudo bash setup.sh
 
 The script will:
 
-1. Install system packages (Python, MariaDB, dev headers) via `apt` or `dnf`
-2. Create a `pypki_user` database user with a randomly generated password
-3. Generate `config/config.json` with the DB credentials and a random JWT secret key
-4. Create a Python virtual environment and install `requirements.txt`
-5. Initialise the database schema and seed data (`utils/reset_pki.py`)
-6. Install and start a `pypki` systemd service
+1. Install Docker and the Compose plugin via the official Docker repository
+2. Generate random passwords and write them to `.env` and `config/config.json`
+3. Create `out/` and `data/mariadb/` directories for persistent data
+4. Build the application image and start the `app` + `db` containers
 
 After setup the interface is available at `http://<server-ip>:8080`.
 
-**Default credentials: `admin` / `admin` — change immediately after first login.**
+**Default credentials: `superadmin` / `password` — change immediately after first login.**
 
-Credentials generated during setup are saved to `.setup_credentials` (chmod 600). Delete that file once you have noted the database password.
+Generated passwords are saved to `.setup_credentials` (chmod 600). Delete that file once you have noted the values.
 
 > Supported distros: Ubuntu 22.04/24.04, Debian 11/12, Rocky/Alma/RHEL 9.
-> Run `sudo bash setup.sh` again at any time — it is safe to re-run (skips already-done steps).
+> Safe to re-run — existing `.env` passwords and `secret_key` are preserved across re-runs.
+
+`setup.sh` is Linux-only. On macOS with Docker Desktop, use the Docker Desktop flow below instead of `setup.sh`.
+
+### Common commands
+
+```bash
+docker compose ps               # status of all containers
+docker compose logs -f app      # tail application logs
+docker compose logs -f db       # tail database logs
+docker compose restart app      # restart the app (e.g. after editing config)
+docker compose down             # stop the stack (data is preserved)
+docker compose down -v          # stop containers and Compose-managed volumes; data/mariadb is preserved
+```
+
+To fully remove the database contents from a Docker deployment, stop the stack and delete `data/mariadb/` manually.
+
+### Where data lives
+
+All persistent data is stored on the host as plain directories — easy to back up, inspect, and migrate:
+
+| Host path | Contents |
+|---|---|
+| `config/` | Configuration — edit on the host, `docker compose restart app` to apply |
+| `out/` | Generated output: certificates, CRLs, logs, backups |
+| `data/mariadb/` | Raw MariaDB data files — for routine backups prefer the built-in backup/restore tools; copy this directory only with MariaDB stopped |
+| `data/softhsm/tokens/` | SoftHSM2 PKCS#11 token files — the dev-token created on first boot, plus any keys generated against it |
+
+### SoftHSM2 development token
+
+A SoftHSM2 software token (`pypki-dev`, user PIN `1234`, SO PIN `5678`) is initialised inside the container on first boot for HSM development and testing. The token state lives in `data/softhsm/tokens/` so it survives container restarts.
+
+> The default PIN is intentionally weak — change `SOFTHSM2_PIN`, `SOFTHSM2_SO_PIN`, and `SOFTHSM2_TOKEN_LABEL` in `docker-compose.yml` for any non-dev deployment, or set `SOFTHSM2_AUTO_INIT=false` to skip the auto-init entirely.
+
+Verify the token is present from the host:
+
+```bash
+docker compose exec app pkcs11-tool --module "$PKCS11_MODULE" --list-slots
+```
+
+End-to-end app integration with the HSM path is in progress — see [doc/hsm-gap-analysis.md](doc/hsm-gap-analysis.md).
 
 ---
 
-## Manual Setup
+## Quick Start — macOS With Docker Desktop
+
+Use this path when developing on a Mac. It does not use `setup.sh`.
+
+For this Docker Desktop workflow, you do **not** need to create a local Python virtual environment just to run the application. Python dependencies are installed inside the Docker image during `docker compose build` from `requirements.txt`.
+
+If you also want to run project scripts or tests directly on your Mac outside Docker, create a local `.venv` separately with:
+
+```bash
+bash setup_venv.sh
+```
+
+### 1. Install and start Docker Desktop
+
+Install Docker Desktop for Mac and make sure it is running before you start the stack.
+
+### 2. Create `.env`
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and set strong values for:
+
+- `DB_ROOT_PASSWORD`
+- `DB_PASSWORD`
+
+`DB_NAME` and `DB_USER` can usually stay at their defaults.
+
+### 3. Update `config/config.json`
+
+Open `config/config.json` and confirm:
+- `db_config.host` is `"db"` (the Compose service name — already the shipped default)
+- `db_config.password` matches the `DB_PASSWORD` you set in `.env`
+- `secret_key` is replaced with a real random value and not left as the shipped placeholder
+
+The shipped `config/config.json` uses `"change_me_app"` as the password. If you changed `DB_PASSWORD` in `.env`, set `db_config.password` to the same value here.
+
+Generate a `secret_key` with:
+
+```bash
+openssl rand -base64 48 | tr -dc 'A-Za-z0-9_-' | head -c 64
+```
+
+### 4. Start the stack
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+On first boot, the container entrypoint initialises an empty database automatically. Watch progress with:
+
+```bash
+docker compose logs -f app
+```
+
+### 5. Open the application
+
+Open `http://localhost:8080`.
+
+Default credentials on a fresh database are `superadmin` / `password`.
+
+Useful commands:
+
+```bash
+docker compose ps
+docker compose logs -f app
+docker compose logs -f db
+docker compose restart app
+docker compose down
+```
+
+Persistent data is stored in `config/`, `out/`, and `data/mariadb/` on the host.
+
+---
+
+## Manual / Development Setup
 
 ### 1. Install system dependencies
 
+macOS:
+```bash
+brew install python@3.13 mariadb pkg-config openssl libmariadb softhsm opensc
+brew services start mariadb
+```
+
 Debian/Ubuntu:
 ```bash
-sudo apt-get install python3.12 python3.12-venv python3.12-dev \
-    mariadb-server libmariadb-dev pkg-config openssl
+sudo apt-get install python3.13 python3.13-venv python3.13-dev \
+    mariadb-server libmariadb-dev pkg-config openssl \
+    softhsm2 opensc
+sudo systemctl enable --now mariadb
 ```
 
 RHEL/Rocky/Alma:
 ```bash
-sudo dnf install python3 python3-devel mariadb-server mariadb-devel openssl
+sudo dnf install python3 python3-devel mariadb-server mariadb-devel openssl \
+    softhsm opensc
+sudo systemctl enable --now mariadb
 ```
+
+`softhsm2` and `opensc` are needed for HSM development against the SoftHSM2 software token. They are optional for software-only signing but pyPKI's HSM gap-closure work assumes they are installed (see [doc/hsm-gap-analysis.md](doc/hsm-gap-analysis.md)).
 
 ### 2. Create the virtual environment
 
+Convenience script:
+
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+bash setup_venv.sh
+```
+
+Manual equivalent:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Create a MariaDB database and user
+### 3. Create the MariaDB user
+
+`utils/reset_pki.py` (Step 5) creates the database itself — only the user and grant are needed here:
 
 ```sql
-CREATE DATABASE pypki_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER 'pypki_user'@'localhost' IDENTIFIED BY 'your_strong_password';
 GRANT ALL PRIVILEGES ON pypki_db.* TO 'pypki_user'@'localhost';
 FLUSH PRIVILEGES;
@@ -123,24 +254,54 @@ FLUSH PRIVILEGES;
 }
 ```
 
-Generate a secret key with:
+> **Note:** in Docker, `host` must be `db` (the Compose service name). For a local setup use `localhost`.
+
+Generate a `secret_key` with:
 ```bash
 openssl rand -base64 48 | tr -dc 'A-Za-z0-9_-' | head -c 64
 ```
 
+The secret key is used to sign JWT authentication tokens. Keep it stable across restarts to avoid invalidating active sessions.
+
 ### 5. Initialise the database
 
-> **Warning:** this drops and recreates the entire database. All existing data is lost.
+> **Note:** Creates the database schema and seeds initial data. Safe on a fresh installation; on an existing installation all data is lost.
 
 ```bash
-venv/bin/python utils/reset_pki.py
+PYTHONPATH=. .venv/bin/python utils/reset_pki.py
 ```
 
-### 6. Start the server
+### 6. (Optional) Initialise a SoftHSM2 development token
+
+Skip this step if you are not working on the HSM integration.
+
+Initialise a software PKCS#11 token once — it persists in `~/.config/softhsm2/tokens/` (macOS, default user-mode config) or `/var/lib/softhsm/tokens/` (Linux, default system-wide config) across reboots:
 
 ```bash
-source venv/bin/activate
-python web/app.py
+softhsm2-util --init-token --free \
+    --label pypki-dev --pin 1234 --so-pin 5678
+```
+
+Verify with `pkcs11-tool` — the module path differs by platform:
+
+```bash
+# macOS (Homebrew)
+pkcs11-tool --module "$(brew --prefix)/lib/softhsm/libsofthsm2.so" --list-slots
+
+# Debian/Ubuntu
+pkcs11-tool --module /usr/lib/softhsm/libsofthsm2.so --list-slots
+
+# RHEL/Rocky/Alma
+pkcs11-tool --module /usr/lib64/pkcs11/libsofthsm2.so --list-slots
+```
+
+End-to-end app integration with the HSM path is in progress — see [doc/hsm-gap-analysis.md](doc/hsm-gap-analysis.md). The token can be exercised today with `pkcs11-tool` for environment validation.
+
+### 7. Start the server
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=. python web/app.py
 ```
 
 The server starts on `http://0.0.0.0:8080`. Logs are written to `out/app.log` and stdout.
@@ -162,7 +323,7 @@ pypki/                          # Core Python library
 │   └── pki_tools.py            # Shared constants and helpers
 
 web/                            # Flask application
-│   ├── app.py                  # Entry point
+│   ├── app.py                  # Entry point (also gunicorn target: web.app:app)
 │   ├── routes/                 # Blueprint route handlers
 │   │   ├── main_routes.py      # Main REST API
 │   │   ├── auth_routes.py      # Login / JWT
@@ -172,8 +333,8 @@ web/                            # Flask application
 │   ├── static/                 # Client-side JS (auth.js, pypki_ui.js)
 │   └── templates/              # Jinja2/Bootstrap 5 pages
 
-config/                         # Runtime configuration (not committed to git)
-│   ├── config.json             # DB connection, folder paths, secret key
+config/                         # Shipped defaults plus runtime configuration
+│   ├── config.json             # Active config written/used at runtime
 │   ├── ca_store/               # CA config JSON files
 │   ├── cert_templates/         # Certificate template JSON files
 │   └── ocsp_responders/        # OCSP responder config JSON files
@@ -181,7 +342,7 @@ config/                         # Runtime configuration (not committed to git)
 utils/                          # Command-line utilities
 │   ├── reset_pki.py            # Drop and recreate database, reload all config
 │   ├── restore_backup.py       # Restore database from a SQL backup file
-│   ├── generate_crls.py        # Generate and publish CRLs for all active CAs
+│   ├── generate_crls.py        # Generate and export CRLs for all active CAs
 │   ├── generate_sample_certs.py
 │   ├── migrate_ocsp_settings.py    # Add OCSP settings columns to existing DB
 │   └── migrate_template_cdp_aia.py # Migrate CDP/AIA template schema
@@ -190,8 +351,17 @@ tests/                          # Offline test scripts (no running server needed
 │   ├── __main__.py             # Interactive test menu: python -m tests
 │   └── …
 
+Dockerfile                      # Application container image
+docker-compose.yml              # Stack definition (app + db)
+docker-entrypoint.sh            # Container startup: waits for DB, initialises schema, starts gunicorn
+.env.example                    # Docker Compose env template — copy to .env before running
+setup.sh                        # Linux server bootstrap: installs Docker, writes credentials, starts stack
+setup_venv.sh                   # Local Python virtualenv bootstrap (.venv)
+
 doc/                            # Documentation
 out/                            # Generated output (certs, CRLs, logs, backups)
+data/                           # Persistent container data (created automatically on first run)
+│   └── mariadb/                # MariaDB data files
 ```
 
 ---
@@ -227,106 +397,7 @@ Open `http://localhost:8080` in a browser. The interface is organised into sideb
 
 ## REST API
 
-All authenticated endpoints require `Authorization: Bearer <token>` obtained from `POST /api/auth/login`.
-
-### Authentication
-
-| Method | Path | Description |
-|---|---|---|
-| POST | `/api/auth/login` | Log in, returns JWT |
-| POST | `/api/auth/logout` | Invalidate token |
-| GET | `/api/auth/me` | Current user info |
-
-### Certification Authorities
-
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/ca` | List all CAs |
-| POST | `/api/ca` | Add a CA (PEM or PKCS#12) |
-| GET | `/api/ca/<id>` | CA summary |
-| PUT | `/api/ca/<id>` | Update CA settings |
-| DELETE | `/api/ca/<id>` | Delete a CA |
-| GET | `/api/ca/<id>/full` | CA details with parsed certificate fields |
-| GET | `/api/ca/<id>/cert` | CA certificate PEM — public, no auth |
-| GET | `/api/ca/<id>/cert/der` | CA certificate DER — public, no auth |
-| GET | `/api/ca/<id>/crl` | Current CRL PEM — public, no auth |
-| GET | `/api/ca/<id>/crl/der` | Current CRL DER — public, no auth |
-| POST | `/api/ca/<id>/crl` | Issue a new CRL |
-
-### Certificates
-
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/certificate` | List certificates (paginated, filterable) |
-| GET | `/api/certificate/<id>` | Certificate details |
-| GET | `/api/certificate/pem/<id>` | Download certificate PEM — public, no auth |
-| GET | `/api/certificate/status/<id>` | Revocation status |
-| POST | `/api/certificate/issue` | Issue certificate from JSON request |
-| POST | `/api/certificate/issue-pkcs12` | Issue certificate + key as PKCS#12 |
-| POST | `/api/certificate/revoke/<id>` | Revoke a certificate |
-| POST | `/api/certificate/pkcs12/<id>` | Download existing certificate + key as PKCS#12 |
-| GET | `/api/certificate/private-key/<id>` | Get private key PEM (admin only) |
-| POST | `/api/certificate/parse-csr` | Parse a CSR and return JSON fields |
-
-### Certificate Templates
-
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/template` | List templates |
-| POST | `/api/template` | Create a template |
-| GET | `/api/template/<id>` | Template details |
-| PUT | `/api/template/<id>` | Update a template |
-| GET | `/api/template/<id>/export` | Export template as JSON |
-
-### OCSP Responders
-
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/ocsp` | List OCSP responders |
-| POST | `/api/ocsp` | Add a responder (PEM or PKCS#12) |
-| GET | `/api/ocsp/<id>` | Responder details |
-| PUT | `/api/ocsp/<id>` | Update responder settings |
-| DELETE | `/api/ocsp/<id>` | Delete a responder |
-
-OCSP protocol requests are handled at `/ocsp/<issuer-ski>` (POST for RFC 6960, GET with base64-encoded request appended to path).
-
-### EST Service
-
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/est` | List EST aliases |
-| POST | `/api/est` | Create an alias |
-| GET | `/api/est/<id>` | Alias details |
-| PUT | `/api/est/<id>` | Update an alias |
-| DELETE | `/api/est/<id>` | Delete an alias |
-| POST | `/api/est/<id>/set-default` | Set as default alias |
-| GET | `/.well-known/est[/<label>]/cacerts` | CA certificate (public) |
-| POST | `/.well-known/est[/<label>]/simpleenroll` | Enroll via CSR → PKCS#7 |
-| POST | `/.well-known/est[/<label>]/simpleenrollpem` | Enroll via CSR → PEM |
-
-### Users
-
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/users` | List users |
-| POST | `/api/users` | Create user |
-| GET | `/api/users/<id>` | User details |
-| PUT | `/api/users/<id>` | Update user |
-| DELETE | `/api/users/<id>` | Delete user |
-
-### KMS and Tools
-
-| Method | Path | Description |
-|---|---|---|
-| POST | `/api/kms/generate-key` | Generate a key |
-| GET | `/api/audit-logs` | Query audit log (paginated) |
-| POST | `/api/audit-logs/clear` | Clear audit log |
-| GET | `/api/tools/app-log` | Application log tail |
-| POST | `/api/tools/clear-app-log` | Clear application log |
-| POST | `/api/tools/backup-db` | Create a database backup |
-| GET | `/api/tools/backups` | List available backups |
-| POST | `/api/tools/restore-db` | Restore from a backup |
-| POST | `/api/tools/reset-pki` | Full database reset (destructive) |
+The full REST API reference lives in [doc/rest-api.md](/Users/pedro/Development/Python/pypki/doc/rest-api.md).
 
 ---
 
@@ -341,13 +412,15 @@ OCSP protocol requests are handled at `/ocsp/<issuer-ski>` (POST for RFC 6960, G
 | `utils/migrate_ocsp_settings.py` | Add OCSP settings columns to an existing database |
 | `utils/migrate_template_cdp_aia.py` | Migrate CDP/AIA template schema to the explicit format |
 
-All scripts accept an optional config file path as the first argument (default: `config/config.json`):
+Most operational scripts accept an optional config file path as the first argument (default: `config/config.json`). `generate_sample_certs.py` is intentionally environment-specific sample data tooling.
 
+> Migration scripts are only needed when upgrading an existing installation. Fresh installs via `setup.sh` include all current schema changes.
+
+**Running utilities against a Docker deployment:**
 ```bash
-python utils/reset_pki.py config/config.local.json
+docker compose exec app python utils/reset_pki.py
+docker compose exec app python utils/generate_crls.py
 ```
-
-> Migration scripts are only needed when upgrading an existing installation. Fresh installs created by `setup.sh` or `reset_pki.py` include all current schema changes.
 
 ---
 
@@ -356,18 +429,9 @@ python utils/reset_pki.py config/config.local.json
 Interactive test menu (operates directly on the library — no running server required):
 
 ```bash
-source venv/bin/activate
-python -m tests
+source .venv/bin/activate
+PYTHONPATH=. python -m tests
 ```
-
-Or run a single test:
-
-```bash
-python tests/generate_self_signed_cert.py
-python tests/generate_ca_signed_cert.py
-```
-
-Generated output is written to `out/`.
 
 ---
 
@@ -376,7 +440,10 @@ Generated output is written to `out/`.
 | File | Contents |
 |---|---|
 | `doc/database.md` | Full schema — all tables, columns, and foreign keys |
-| `doc/certificate_templates.md` | Template JSON format and all supported fields |
-| `doc/kms_strategy.md` | KMS integration design and migration phases |
+| `doc/certificate-templates.md` | Template JSON format and all supported fields |
+| `doc/kms-strategy.md` | KMS integration design and migration phases |
+| `doc/softhsm2-manual.md` | SoftHSM2 operator manual — install, init, key ops, backup/restore |
+| `doc/rest-api.md` | REST API reference |
+| `doc/roadmap.md` | Proposed future evolutions and improvement areas |
 | `doc/structure.md` | Detailed project structure |
 | `doc/request_examples/` | Sample request JSON files and example CSR |

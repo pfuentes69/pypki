@@ -1,6 +1,6 @@
 # Database Structure
 
-PyPKI uses MySQL as its backend. The schema is created by `PKIDataBase.create_database()` in `pypki/db.py`. All tables are created in a single named database defined in the configuration file.
+PyPKI uses MariaDB as its backend, accessed through the MySQL-compatible `mysql-connector-python` driver. The schema is created by `PKIDataBase.create_database()` in `pypki/db.py`. All tables are created in a single named database defined in the configuration file.
 
 ---
 
@@ -83,7 +83,7 @@ Policy documents that control certificate issuance. The full template definition
 |---|---|---|---|
 | `id` | INT | PK, AUTO_INCREMENT | |
 | `name` | VARCHAR(255) | NOT NULL | Template display name (mirrors `template_name` inside `definition`) |
-| `definition` | JSON | NOT NULL | Complete template JSON (see `doc/certificate_templates.md`) |
+| `definition` | JSON | NOT NULL | Complete template JSON (see `doc/certificate-templates.md`) |
 | `is_default` | BOOLEAN | DEFAULT FALSE | Whether this is the default template |
 | `created_at` | TIMESTAMP | DEFAULT NOW | |
 | `updated_at` | TIMESTAMP | ON UPDATE NOW | |
@@ -159,7 +159,7 @@ Named aliases for the EST (Enrollment over Secure Transport, RFC 7030) service. 
 - `ca_id` → `CertificationAuthorities(id)`
 - `template_id` → `CertificateTemplates(id)`
 
-> **Note:** The `cacerts` endpoint is always public (no auth required per RFC 7030). Authentication is enforced only on `simpleenroll` and `simpleenrollpem`. Existing databases need `utils/migrate_est_auth_fields.py` to add the new columns.
+> **Note:** The `cacerts` endpoint is always public (no auth required per RFC 7030). Authentication is enforced only on `simpleenroll` and `simpleenrollpem`.
 
 ---
 
@@ -175,7 +175,12 @@ Configuration for OCSP responder instances. Each responder is tied to a specific
 | `issuer_ski` | VARCHAR(128) | NOT NULL, UNIQUE | Subject Key Identifier of the issuing CA (used to route OCSP requests) |
 | `issuer_certificate` | TEXT | | PEM-encoded issuer certificate |
 | `not_after` | DATETIME | | Expiry of the OCSP responder certificate |
-| `response_validity` | INT | DEFAULT 1 | How many days an OCSP response remains valid |
+| `response_validity` | INT | DEFAULT 1 | Legacy response-validity value in days |
+| `response_validity_hours` | INT | DEFAULT 24 | Response-validity value used by the current UI/API |
+| `nonce_policy` | ENUM | DEFAULT `optional` | `optional`, `required`, or `disabled` |
+| `include_cert_in_response` | BOOLEAN | DEFAULT TRUE | Whether to include the responder cert in the OCSP response |
+| `responder_id_encoding` | ENUM | DEFAULT `hash` | Whether responder ID is encoded as `hash` or `name` |
+| `hash_algorithm` | ENUM | DEFAULT `sha1` | Hash algorithm used in generated responses |
 | `private_key` | TEXT | | PEM-encoded OCSP responder private key |
 | `private_key_reference` | INT | FK → KeyStorage | Reference to the key in KeyStorage |
 | `certificate` | TEXT | | PEM-encoded OCSP responder certificate |
@@ -242,15 +247,14 @@ The web UI surfaces this table on the **Audit Logs** administration page with pa
 
 ## Migration Scripts
 
-Applied incrementally to existing installations. Each script is idempotent.
+The current repository ships only the migration scripts below. They are intended for incremental upgrades of existing installations.
 
 | Script | What it does |
 |---|---|
-| `utils/migrate_keys_to_kms.py` | Moves CA and OCSP private keys into `KeyStorage`; sets `private_key_reference` on source rows |
-| `utils/migrate_hsm_fields.py` | Copies `token_password` from CA/OCSP rows to `KeyStorage`; drops `token_slot`, `token_key_id`, `token_password` from `CertificationAuthorities` and `OCSPResponders`. **Run after** `migrate_keys_to_kms.py` |
-| `utils/migrate_audit_logs.py` | Drops `CertificateLogs` and the old `AuditLogs`; creates the new `AuditLogs` schema |
-| `utils/migrate_serial_uniqueness.py` | Adds `UNIQUE KEY uq_ca_serial (ca_id, serial_number)` to `Certificates` |
-| `utils/migrate_est_auth_fields.py` | Adds `username`, `password_hash`, `cert_fingerprint` to `ESTAliases` |
+| `utils/migrate_ocsp_settings.py` | Adds the newer OCSP responder settings columns (`response_validity_hours`, `nonce_policy`, `include_cert_in_response`, `responder_id_encoding`, `hash_algorithm`) |
+| `utils/migrate_template_cdp_aia.py` | Migrates certificate-template CDP/AIA fields to the explicit `include`/`useCADefault` format |
+
+Older one-off migrations referenced in historical design notes are not shipped in the current repo. Fresh installs should use `utils/reset_pki.py`, which recreates the schema from the current code.
 
 ---
 
@@ -266,6 +270,6 @@ with db.connection():
     db.create_database()
 ```
 
-The utility script `utils/reset_pki.py` wraps this call and is used to drop and reinitialise the entire database during development or deployment.
+The utility script `utils/reset_pki.py` wraps this call and is used to drop and reinitialise the entire database during development or deployment. It also recreates the built-in `superadmin` account with the default password `password`.
 
 > **Warning:** `create_database()` drops the existing database before recreating it. All data is lost.

@@ -8,12 +8,18 @@ import time
 from cryptography.hazmat.primitives import serialization
 from pypki.core import PyPKI
 
+DEFAULT_CONFIG = os.environ.get(
+    "PYPKI_CONFIG",
+    os.path.join(os.path.dirname(__file__), '..', 'config', 'config.json')
+)
+config_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_CONFIG
 
 start_time = time.time()  # Record start time
 
 print("Generate CRLs for all CAs")
 
-pki = PyPKI("config/config.json")
+pki = PyPKI(config_path)
+pki.load_ca_collection()
 
 ca_collection = pki.get_ca_collection()
 

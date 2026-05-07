@@ -25,6 +25,9 @@ Network Trash Folder
 Temporary Items
 .apdisk
 __pycache__
+.venv/
+venv/
 temp
 out
 config/config.aws.json
+config/config.local.json

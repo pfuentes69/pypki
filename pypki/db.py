@@ -195,25 +195,41 @@ class PKIDataBase:
                 digest.update(key_bytes)
                 ski = digest.finalize().hex()
 
-            # Insert private key into KeyStorage; store the returned id as
-            # private_key_reference so the KMS can load it at runtime.
-            private_key_reference = None
-            private_key_pem = ca.get_config()["crypto"].get("private_key")
-            if private_key_pem:
+            # Resolve private_key_reference and key ownership. Two paths:
+            #   1. kms_key_id supplied → reuse an existing KeyStorage row (key_owned=False).
+            #      The key existed before the CA, so deleting the CA must NOT delete it.
+            #   2. private_key PEM supplied → insert a new KeyStorage row (key_owned=True).
+            #      The key was created with the CA, so deleting the CA cascades to it.
+            # Validation that the kms_key_id exists, matches the cert's public key,
+            # and is not already used by another CA is performed by the caller
+            # (see web.services.api_adapters._verify_kms_key_for_ca).
+            crypto = ca.get_config()["crypto"]
+            kms_key_id = crypto.get("kms_key_id")
+            private_key_pem = crypto.get("private_key")
+
+            if kms_key_id is not None:
+                private_key_reference = int(kms_key_id)
+                key_owned = False
+                logger.info(f"CA bound to existing KeyStorage id={private_key_reference} (not owned)")
+            elif private_key_pem:
                 pub_key_pem = public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
                 cursor.execute(
                     "INSERT INTO KeyStorage (private_key, storage_type, public_key, key_type) VALUES (%s, %s, %s, %s)",
                     (private_key_pem, "Plain", pub_key_pem, key_type)
                 )
                 private_key_reference = cursor.lastrowid
+                key_owned = True
                 logger.info(f"CA private key stored in KeyStorage id={private_key_reference}")
+            else:
+                private_key_reference = None
+                key_owned = True
 
             insert_query = """
                 INSERT INTO CertificationAuthorities (
-                    name, certificate, ski, private_key_reference, certificate_chain,
+                    name, certificate, ski, private_key_reference, key_owned, certificate_chain,
                     max_validity, serial_number_length,
                     crl_validity, extensions
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
 
             data = (
@@ -221,6 +237,7 @@ class PKIDataBase:
                 ca.get_config()["crypto"]["certificate"],
                 ski,
                 private_key_reference,
+                key_owned,
                 ca.get_config()["crypto"]["certificate_chain"],
                 ca.get_config()["max_validity"],
                 ca.get_config()["serial_number_length"],
@@ -239,6 +256,27 @@ class PKIDataBase:
             raise
         finally:
             cursor.close()
+
+
+    def get_ca_id_by_key_reference(self, key_id: int):
+        """
+        Return the id of the CA that already references the given KeyStorage
+        row, or None if no CA references it.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute(
+                "SELECT id FROM CertificationAuthorities WHERE private_key_reference = %s",
+                (key_id,)
+            )
+            result = cursor.fetchone()
+            cursor.close()
+            return result[0] if result else None
+        except mysql.connector.Error as err:
+            logger.error(err)
+            return None
 
 
     def get_ca_id_by_name(self, ca_name: str):
@@ -341,7 +379,9 @@ class PKIDataBase:
           3. CertificateRevocationLists WHERE ca_id = ? → deleted
           4. Certificates         WHERE ca_id = ?   → ca_id set to NULL (records preserved)
           5. CertificationAuthorities WHERE id = ?  → deleted
-          6. KeyStorage           WHERE id = private_key_reference → deleted
+          6. KeyStorage           WHERE id = private_key_reference → deleted only
+                                  if key_owned = TRUE (CAs bound to a pre-existing
+                                  KMS key keep the key on delete)
 
         Returns a dict with counts of affected rows per table, or raises on error.
         """
@@ -350,9 +390,9 @@ class PKIDataBase:
             cursor = self._local.connection.cursor(buffered=True, dictionary=True)
             cursor.execute(f"USE {db_name}")
 
-            # Capture private_key_reference before deletion
+            # Capture private_key_reference and ownership flag before deletion
             cursor.execute(
-                "SELECT private_key_reference FROM CertificationAuthorities WHERE id = %s",
+                "SELECT private_key_reference, key_owned FROM CertificationAuthorities WHERE id = %s",
                 (ca_id,)
             )
             ca_row = cursor.fetchone()
@@ -360,6 +400,7 @@ class PKIDataBase:
                 cursor.close()
                 return None
             key_ref = ca_row["private_key_reference"]
+            key_owned = bool(ca_row["key_owned"])
 
             stats = {}
 
@@ -382,11 +423,13 @@ class PKIDataBase:
             )
             stats["ca_deleted"] = cursor.rowcount
 
-            if key_ref:
+            if key_ref and key_owned:
                 cursor.execute("DELETE FROM KeyStorage WHERE id = %s", (key_ref,))
                 stats["key_deleted"] = cursor.rowcount
+                stats["key_preserved"] = 0
             else:
                 stats["key_deleted"] = 0
+                stats["key_preserved"] = 1 if key_ref else 0
 
             self._local.connection.commit()
             logger.info(f"CA id={ca_id} deleted: {stats}")
@@ -1810,6 +1853,56 @@ class PKIDataBase:
 
     # ─────────────────────────────────────────────────────────────────────────
 
+    def migrate_schema(self):
+        """
+        Apply idempotent schema migrations to an existing database.
+
+        Safe to call on every startup. Each migration checks current schema
+        state via INFORMATION_SCHEMA before applying, so re-runs are no-ops.
+        Tolerates a missing database or table (e.g. before reset_pki has
+        ever been run) by logging and returning silently.
+        """
+        try:
+            with self.connection():
+                db_name = self.__config["database"]
+                cursor = self._local.connection.cursor(buffered=True)
+
+                # Bail out silently if the database hasn't been created yet.
+                cursor.execute(
+                    "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = %s",
+                    (db_name,)
+                )
+                if cursor.fetchone() is None:
+                    cursor.close()
+                    logger.info(f"migrate_schema: database '{db_name}' does not exist yet; skipping")
+                    return
+
+                cursor.execute(f"USE {db_name}")
+
+                # Migration: add CertificationAuthorities.key_owned (introduced when
+                # CAs gained support for binding to a pre-existing KMS key).
+                cursor.execute(
+                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+                    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'CertificationAuthorities' "
+                    "AND COLUMN_NAME = 'key_owned'",
+                    (db_name,)
+                )
+                row = cursor.fetchone()
+                if row is not None and row[0] == 0:
+                    logger.info("migrate_schema: adding CertificationAuthorities.key_owned")
+                    cursor.execute(
+                        "ALTER TABLE CertificationAuthorities "
+                        "ADD COLUMN key_owned BOOLEAN NOT NULL DEFAULT TRUE "
+                        "AFTER private_key_reference"
+                    )
+                    self._local.connection.commit()
+
+                cursor.close()
+        except mysql.connector.Error as err:
+            logger.error(f"Schema migration failed: {err}")
+            raise
+
+
     def create_database(self):
         db_name = self.__config["database"]
 
@@ -1817,7 +1910,7 @@ class PKIDataBase:
             cursor = self._local.connection.cursor()
 
             cursor.execute(f"DROP DATABASE IF EXISTS {db_name}")  # Drop the database if it exists
-            cursor.execute(f"CREATE DATABASE {db_name}")         # Create the database
+            cursor.execute(f"CREATE DATABASE {db_name} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
 
             # Now connect to the actual database
             self._local.connection.database = db_name
@@ -1854,6 +1947,7 @@ class PKIDataBase:
                         ski VARCHAR(64),
                         private_key TEXT,
                         private_key_reference INT,
+                        key_owned BOOLEAN NOT NULL DEFAULT TRUE,
                         certificate_chain TEXT,
                         max_validity INT,
                         serial_number_length INT,

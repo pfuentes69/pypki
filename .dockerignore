@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.git/
+out/
+data/
+.env
+.env.*
+!.env.example
+*.log
+.setup_credentials

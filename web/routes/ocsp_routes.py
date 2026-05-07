@@ -16,18 +16,32 @@ OCSP_NONCE_OID = ObjectIdentifier("1.3.6.1.5.5.7.48.1.2")
 
 bp = Blueprint('ocsp', __name__)
 
-@bp.route("", methods=["POST", "GET"])
-def ocsp_responder():
+
+def _decode_ocsp_get_request(encoded_request: str) -> bytes:
+    """Decode an OCSP GET path segment.
+
+    RFC 6960 lightweight profile clients commonly send URL-safe base64 without
+    padding. Accept both padded and unpadded input to maximize interoperability.
+    """
+    decoded = urllib.parse.unquote(encoded_request or "")
+    decoded += "=" * (-len(decoded) % 4)
+    return base64.urlsafe_b64decode(decoded)
+
+@bp.route("", methods=["POST"])
+@bp.route("/<path:encoded_request>", methods=["GET"])
+def ocsp_responder(encoded_request=None):
 
     if request.method == "POST":
         logger.info("OCSP POST Request")
+        if request.mimetype != "application/ocsp-request":
+            logger.warning(f"OCSP POST - unexpected Content-Type: {request.content_type}")
+            return Response(status=415)
         ocsp_req_data = request.data
     else:
         logger.info("OCSP GET Request")
-        # GET: base64-encoded DER appended to the URL path (RFC 2560 §A.1.1)
+        # GET: base64-encoded DER appended to the URL path (RFC 6960 §4.1.1)
         # The path segment may be URL-encoded, so decode it first.
-        encoded = request.path.split("/ocsp/")[-1]
-        ocsp_req_data = base64.b64decode(urllib.parse.unquote(encoded))
+        ocsp_req_data = _decode_ocsp_get_request(encoded_request)
 
     try:
         ocsp_request = load_der_ocsp_request(ocsp_req_data)
