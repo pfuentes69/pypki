@@ -1,282 +1,705 @@
-# KMS Integration Strategy
+# KMS Strategy & Specification
 
-## Overview
+This is the consolidated specification for the Key Management Service (KMS)
+layer in pyPKI. It describes the current state of the KMS, the target
+architecture for first-class HSM support coexisting with software keys, the
+data model, the REST API and management UI, the development environment, and
+the order in which the work is to be carried out.
 
-This document describes the strategy for introducing a Key Management Service (KMS) layer into PyPKI. The goal is to centralise all private key storage and all signing operations behind a single internal service so that future security improvements (encrypted storage, remote KMS, HSM consolidation, key generation, key export) can be made without touching the signing callers.
+This document supersedes the prior phased migration plan (Phase 1–3 are done
+— DB migration, `KeyManagementService` module, and routing all signing
+through it). The remaining work is captured here and cross-referenced from
+[hsm-gap-analysis.md](hsm-gap-analysis.md), which keeps the punch-list of
+concrete defects to fix.
 
-The implementation was split into three phases, all now complete:
+A developer reading only this document should have everything needed to start
+implementation.
 
-| Phase | Scope | Status |
+---
+
+## 1. Goals
+
+1. A single signing entry point — `KeyManagementService` — through which all
+   X.509 issuance, OCSP signing, and key generation must pass. Already in
+   place; preserved.
+2. **Software keys and HSM keys treated symmetrically** at the abstraction
+   layer the operator interacts with. Operators see "providers" (software
+   cryptotokens or PKCS#11-backed HSM tokens). Keys belong to providers.
+3. **Multi-HSM support out of the box** — a deployment can host a Luna
+   partition for the root CA, a YubiHSM for an issuing CA, and a SoftHSM2
+   fixture for development simultaneously, configured by data, not by code.
+4. **Defensible secret-handling story** — no plaintext PINs in the database,
+   no plaintext PEMs in the database, with a per-provider activation
+   lifecycle and an explicit auto-activation choice.
+5. **Portable PKCS#11 implementation** — code that works against SoftHSM2 in
+   CI must work against YubiHSM 2 and Thales Luna without rewrites; the
+   conservative subset of PKCS#11 the implementation uses is part of this
+   spec.
+6. **End-to-end management surface** — REST endpoints and management-UI
+   pages to create, edit, activate/deactivate, and inspect providers, and to
+   list, generate, and delete keys within them.
+
+---
+
+## 2. Status
+
+### What is already in place
+
+- `KeyManagementService` ([pypki/kms.py](../pypki/kms.py)) is the single
+  signing entry point. CAs and OCSP responders no longer hold key material
+  — they call `kms.sign_digest(key_id, digest)`.
+- `KeyStorage` rows with `storage_type='HSM'` are loadable by the KMS and
+  produce a `KeyTools` whose `sign_digest()` dispatches to PyKCS11.
+- The DER-patching flow (build with a dummy key → extract TBS → sign via KMS
+  → splice signature) works for both X.509 issuance and OCSP responses, so
+  the "software vs HSM" branch is hidden from the higher-level callers.
+
+### What is broken or missing
+
+The HSM path has 12 concrete defects ranging from "RSA signatures are
+malformed" to "no API to generate a key on the token." Multi-HSM support, an
+operator-facing provider concept, and software-key encryption-at-rest do not
+exist. The full punch-list is in [hsm-gap-analysis.md](hsm-gap-analysis.md);
+this document specifies the design that closes them.
+
+---
+
+## 3. Architecture
+
+### 3.1 Layered model
+
+```
+   web routes / CA / OCSP / EST
+              │
+              ▼
+     KeyManagementService                ← public signing API
+              │
+              ▼
+     CryptoProviders row                 ← which provider owns the key?
+     (kind = software | pkcs11)
+              │
+   ┌──────────┴───────────┐
+   ▼                      ▼
+SoftwareBackend       PKCS11Backend      ← siblings under one contract
+(libcrypto;           (one shared session
+ PEM blob in           per (module, slot,
+ KeyStorage,           auth) tuple;
+ encrypted at rest     SoftHSM2 / Luna /
+ under provider KEK)   YubiHSM / cloud HSM)
+```
+
+- Callers (CAs, OCSP responders, web routes) only ever touch
+  `KeyManagementService`. They never see PKCS#11.
+- `KeyManagementService` looks up the `KeyStorage` row, resolves its
+  provider, dispatches to the matching backend, returns the signature.
+- Backends are siblings of the same internal contract (Section 5).
+
+### 3.2 Two design decisions, recorded
+
+These decisions reshape the data model and several of the gaps. They are not
+re-litigated in implementation discussions.
+
+**Decision A — sibling backends, not unified PKCS#11.** Software keys go
+through libcrypto in-process; HSM keys go through PKCS#11. Both are reached
+via a `CryptoProviders` row of the matching kind. The alternative considered
+(routing software keys through SoftHSM2 too, single PKCS#11 path) was
+rejected because:
+
+- Performance overhead of routing every signature through `softhsm2`'s `.so`
+  boundary is unjustified when libcrypto is already linked into the process.
+- Making `softhsm2` a hard dependency in every environment (CI, contributor
+  laptops, minimal Docker bases) adds operational friction with no
+  user-visible benefit.
+- Existing PEM and PKCS#12 import flows ([web/routes/main_routes.py:108-139](../web/routes/main_routes.py#L108-L139))
+  assume libcrypto-shaped keys; PKCS#11 import + `CKA_EXTRACTABLE` semantics
+  make these strictly harder.
+- Migration cost: every existing software CA would need re-homing into a
+  SoftHSM token.
+
+The test-parity argument for unification ("HSM bugs surface on every test
+run") is recovered without unifying — the same test suite is run a second
+time in CI configured against a SoftHSM2 `pkcs11` provider. Same tests, two
+backends, same class of regression caught.
+
+This is the same shape EJBCA uses (`SoftCryptoToken` / `PKCS11CryptoToken`
+siblings under one `CryptoToken` interface).
+
+**Decision B — providers are the unit of operator-visible isolation.** Both
+kinds of providers carry a PIN, an activation lifecycle, and an
+`auto_activate` setting. Software providers encrypt their keys at rest under
+a per-provider KEK derived from the PIN; HSM providers use the PIN to
+authenticate to the token. This gives software keys the same security
+properties as HSM keys: PIN compromise unlocks only that provider's keys, an
+idle (deactivated) provider has its keys sealed, multiple providers give
+real isolation between CAs.
+
+Migrating a software CA to a real HSM later is a config-time operation:
+change the provider's `kind` from `software` to `pkcs11`, point at the
+module, re-issue the keys on the token. CA records, audit trails, and the
+keys' identity in pyPKI are preserved.
+
+---
+
+## 4. Data model
+
+### 4.1 `CryptoProviders` (new table)
+
+```
+CryptoProviders
+├── id                   INT PRIMARY KEY AUTO_INCREMENT
+├── label                VARCHAR(255) NOT NULL UNIQUE
+├── kind                 ENUM('software', 'pkcs11') NOT NULL
+├── module_path          VARCHAR(1024) NULL    -- absolute path to the .so/.dylib
+│                                              -- NULL when kind='software'
+├── slot_label           VARCHAR(255) NULL     -- token label or numeric slot
+│                                              -- NULL when kind='software'
+├── auth_kind            ENUM('pin','luna_role','yubihsm_authkey') NOT NULL DEFAULT 'pin'
+├── auto_activate        BOOLEAN NOT NULL DEFAULT FALSE
+├── auth_secret_ref      VARCHAR(512) NOT NULL    -- "db:encrypted" | "env:NAME" |
+│                                                  -- "vault:path"   | "operator:prompt"
+├── auth_secret_blob     VARBINARY(1024) NULL     -- encrypted PIN, only when
+│                                                  -- auth_secret_ref='db:encrypted'
+├── extra_json           JSON NOT NULL DEFAULT '{}'  -- vendor-specific (authkey id,
+│                                                     -- crypto-officer role, …)
+├── description          TEXT NULL
+├── is_default           BOOLEAN NOT NULL DEFAULT FALSE
+├── created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+└── updated_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+```
+
+Constraints:
+
+- Exactly one provider may have `is_default = TRUE` at a time. The seeded
+  `software-default` provider holds it on a fresh install.
+- `auto_activate = TRUE` requires `auth_secret_ref` to resolve without
+  human interaction (`db:encrypted`, `env:`, `vault:`). Enforced by
+  application validation.
+- `auth_secret_blob IS NOT NULL` iff `auth_secret_ref = 'db:encrypted'`.
+  Enforced by application validation.
+- Deletion is rejected by application validation if any `KeyStorage` row
+  references the provider.
+
+### 4.2 `KeyStorage` (changed)
+
+Existing columns, new columns, and removals:
+
+```
+KeyStorage
+├── id                   INT PRIMARY KEY AUTO_INCREMENT
+├── provider_id          INT NOT NULL
+│                            FK → CryptoProviders(id)
+│                            (was: NULLABLE; now required)
+├── storage_type         ENUM('Plain','Encrypted','HSM','Symmetric') NOT NULL
+│                            -- 'Encrypted' means software, encrypted at rest under
+│                            --   the provider's KEK (the new normal for software)
+│                            -- 'Plain' is preserved only for the migration window
+│                            --   and removed once all rows are converted
+│                            -- 'HSM' means the key lives on the token;
+│                            --   private_key column is unused
+│                            -- 'Symmetric' (new) means an AES key, stored b64
+├── private_key          MEDIUMTEXT NULL
+│                            -- For Encrypted/Symmetric: the encrypted blob
+│                            -- For HSM: NULL
+├── public_key           TEXT NULL
+│                            -- Always populated for asymmetric keys, regardless
+│                            -- of where the private material lives
+├── key_type             VARCHAR(32) NOT NULL
+│                            -- "RSA-3072" | "ECDSA-P-256" | "Ed25519" | "AES-256" | …
+├── hsm_token_id         VARBINARY(255) NULL
+│                            -- CKA_ID on the token, raw bytes (was: hex VARCHAR)
+│                            -- Validated as well-formed at insert
+├── label                VARCHAR(255) NULL
+│                            -- CKA_LABEL on the token; arbitrary tag for software
+├── created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+└── updated_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+```
+
+Removed columns: `hsm_slot`, `token_password`. Their data moves to the
+provider record. The `private_key` column for `'Plain'` software rows is
+re-encrypted under the default provider's KEK as part of the migration and
+the `storage_type` is updated to `'Encrypted'`.
+
+### 4.3 Migration plan
+
+Idempotent, runs at app startup via the existing `migrate_schema()` hook:
+
+1. Create `CryptoProviders` table if absent.
+2. Insert the seeded `software-default` provider (label, kind=software,
+   `auto_activate=TRUE`, `auth_secret_ref='env:HSM_PIN_KEK'`, `is_default=TRUE`)
+   if no row has `is_default=TRUE`.
+3. Add `KeyStorage.provider_id` (nullable for the migration step).
+4. For each `KeyStorage` row with `storage_type='Plain'` and
+   `provider_id IS NULL`:
+   - Encrypt `private_key` (PEM) under the default provider's KEK.
+   - Set `provider_id` to the default provider's id.
+   - Set `storage_type='Encrypted'`.
+5. For each `KeyStorage` row with `storage_type='HSM'`:
+   - Find or create the matching `pkcs11` provider — first migration creates
+     a `legacy-hsm` provider populated from the (then-still-present)
+     `hsm_slot` / `token_password` columns and a configured `module_path`.
+   - Set `provider_id` to that provider's id.
+6. Make `KeyStorage.provider_id` NOT NULL.
+7. Drop `KeyStorage.hsm_slot` and `KeyStorage.token_password`.
+8. Validate that every row now has a non-null `provider_id`; if not, the
+   migration aborts and logs the offending rows.
+
+Step 4's KEK comes from `HSM_PIN_KEK` env-var. If the env var is missing,
+the migration fails fast with a clear error pointing at the install
+documentation. **The migration never falls back to the application
+`secret_key`.**
+
+---
+
+## 5. Internal backend contract
+
+`KeyManagementService` dispatches to one of two backend implementations
+based on the provider's `kind`:
+
+```python
+class CryptoBackend(Protocol):
+    def open(self, provider: ProviderRecord, secret: bytes) -> None: ...
+    def close(self) -> None: ...
+    def is_active(self) -> bool: ...
+    def generate_key(self, key_type: str, label: str, **kwargs) -> KeyHandle: ...
+    def import_key(self, public_key_pem: str, label: str, **kwargs) -> KeyHandle: ...
+    def find_key(self, key_id_or_label: bytes | str) -> KeyHandle | None: ...
+    def list_keys(self) -> list[KeyHandle]: ...
+    def delete_key(self, handle: KeyHandle) -> None: ...
+    def sign(self, handle: KeyHandle, mechanism: SignMech, data: bytes) -> bytes: ...
+    def get_public_key_der(self, handle: KeyHandle) -> bytes: ...
+```
+
+- `SoftwareBackend` — wraps `cryptography` / libcrypto. `open(secret)`
+  derives the KEK from the PIN, used to decrypt PEMs from `KeyStorage` on
+  demand; held in a memory cache keyed by `KeyStorage.id` until `close()`.
+- `PKCS11Backend` — wraps PyKCS11. `open(secret)` opens one session against
+  the configured `(module_path, slot, auth)` tuple, logs in, and stays open
+  until `close()`. **One backend instance per provider** (not per cached
+  key) — closes Gap 6.
+
+`KeyHandle` is an opaque object that carries enough information to identify
+a key within the backend (PKCS#11 object handle for HSM, dict-cache key for
+software). Never returned to callers above KMS.
+
+---
+
+## 6. Activation lifecycle
+
+A provider has two operational states, independent of its database row, and
+the same shape applies to both kinds.
+
+| State | Meaning |
+|---|---|
+| **inactive** | Row exists; backend not opened. For `pkcs11`, no PKCS#11 session is open. For `software`, the per-provider KEK is not in memory and encrypted PEMs cannot be decrypted. CAs / OCSP responders bound to keys on this provider cannot sign. A first sign attempt returns a clear "provider is inactive" error, not a backend-specific error. |
+| **active** | Backend opened. For `pkcs11`, session open and logged-in. For `software`, KEK loaded; per-key plaintext is decrypted on demand and held in memory. |
+
+Transitions:
+
+- **Startup:** every provider with `auto_activate=TRUE` is activated. Failure
+  to activate any one of them is logged loudly but does not block app
+  startup; CAs bound to the failing provider report "provider unavailable"
+  on first sign. This is intentional — a bad PIN must not take down the
+  whole service.
+- **Operator activate (`auto_activate=FALSE`):** `POST
+  /api/crypto-providers/{id}/activate` with the PIN in the body. PIN held in
+  memory only, discarded on shutdown or explicit deactivate.
+- **Operator deactivate:** `POST /api/crypto-providers/{id}/deactivate`.
+  Backend is closed; cached keys are evicted; for `pkcs11`, the session is
+  closed.
+
+Toggling `auto_activate` is an audit-logged action. The default for
+operator-created providers is `FALSE`. The seeded `software-default` is the
+only provider that ships with `auto_activate=TRUE` so out-of-the-box
+deployments work without operator configuration.
+
+---
+
+## 7. Secret resolution backends (`auth_secret_ref`)
+
+The reference is opaque text with a small set of supported prefixes. The
+resolver runs at activation time:
+
+| Backend | Form | Behavior |
 |---|---|---|
-| 1 | DB migration: move keys into `KeyStorage` | Done — historical one-off migration, not shipped as a standalone script in the current repo |
-| 2 | KMS module: new internal service class | Done — `pypki/kms.py` |
-| 3 | Sign-through: route all signing calls via KMS | Done |
+| `db:encrypted` | `db:encrypted` | PIN encrypted in `auth_secret_blob` on the provider row. Decrypted at activation using the `HSM_PIN_KEK` env var. **Never the application `secret_key`.** Enables auto-activation. |
+| `env:NAME` | `env:HSM_PIN_PROD` | Read from the named environment variable at activation time. |
+| `vault:path` | `vault:secret/pki/hsm/prod-root` | Fetched from a configured secret store (Vault, AWS Secrets Manager, k8s secret) at activation time. Implementation pluggable; out-of-scope for first cut. |
+| `operator:prompt` | `operator:prompt` | Operator submits PIN via `POST /api/crypto-providers/{id}/activate`. Held in memory only. Used when `auto_activate=FALSE`. |
 
-Keys remain in clear text. Security hardening (encrypted storage, remote KMS) is out of scope and will follow in a separate initiative.
+There is no fully zero-input form of auto-activation that also protects the
+PIN against database-only compromise. `db:encrypted` makes the
+"something out of band" explicit (the KEK), and lets the operator decide
+where it lives (env var, systemd `EnvironmentFile`, secret manager).
 
----
+The `HSM_PIN_KEK` env var is used:
 
-## Current State
+- For `db:encrypted` PINs (HSM and software providers alike).
+- As the seeded `software-default` provider's resolved PIN
+  (`auth_secret_ref='env:HSM_PIN_KEK'`).
+- To derive the KEK for software-key PEM at-rest encryption.
 
-Private keys are stored in two separate tables and loaded directly by the objects that use them:
-
-```
-CertificationAuthorities.private_key  (TEXT, PEM)
-OCSPResponders.private_key            (TEXT, PEM)
-```
-
-Both tables also had `private_key_reference INT` (FK → `KeyStorage`) and HSM fields (`token_slot`, `token_key_id`, `token_password`). After the migration: `private_key_reference` is always populated; `token_slot/token_key_id/token_password` have been dropped from both tables (HSM PIN is now in `KeyStorage.token_password`).
-
-### Current signing paths
-
-**Certificate issuance** (`pypki/certificate_tools.py`)
-- Software: `cert_builder.sign(private_key=signing_private_key.get_private_key(), algorithm=hashes.SHA256())`
-- HSM: build with dummy key → extract TBS bytes → hash → `KeyTools.sign_digest(tbs_digest)` → patch DER
-
-**OCSP response** (`pypki/ocsp_responder.py`)
-- `builder.sign(private_key=self.get_private_key(), algorithm=hashes.SHA256())`
-
-Both callers hold the `KeyTools` object directly. The KMS will sit between callers and `KeyTools`.
+This is intentional: there is exactly **one** deployment-wide secret to
+manage out-of-band, regardless of how many providers exist. Operators who
+want stronger isolation can configure separate `env:` references per
+provider.
 
 ---
 
-## Phase 1 — Database Migration
+## 8. PKCS#11 conformance
 
-### Objective
+To keep SoftHSM2-tested code portable to YubiHSM 2 and Thales Luna, the
+implementation restricts itself to the intersection of what all three
+support.
 
-Populate `KeyStorage` with the existing private keys of all CAs and OCSP responders, then update `private_key_reference` in both tables to point to the new rows. The `private_key` column in each table is left intact for now and nulled out in Phase 3.
+### 8.1 Conservative algorithm subset
 
-### Historical migration logic
+- **Asymmetric:** RSA 2048 / 3072 / 4096; ECDSA P-256 / P-384.
+- **Hash:** SHA-256 / SHA-384.
+- **Mechanisms:** `CKM_SHA256_RSA_PKCS`, `CKM_SHA384_RSA_PKCS`, `CKM_ECDSA`
+  (with pre-computed digest). PSS variants only on providers that explicitly
+  declare support — YubiHSM 2 does not implement `CKM_RSA_PKCS_PSS` in all
+  configurations.
+- **Symmetric (if added):** AES-256 with `CKM_AES_KEY_WRAP_PAD` (AES-KWP).
 
-```
-For each row in CertificationAuthorities:
-    1. Read private_key (PEM string)
-    2. Determine storage_type:
-         - if token_key_id is not empty → "HSM"
-         - else → "Plain"
-    3. INSERT INTO KeyStorage (private_key, storage_type, hsm_slot, hsm_token_id)
-    4. UPDATE CertificationAuthorities SET private_key_reference = <new_id> WHERE id = <ca_id>
+Any mechanism outside this list is gated behind an explicit feature check
+performed against the provider's `C_GetMechanismList` at activation time.
 
-For each row in OCSPResponders:
-    Same four steps as above.
-```
+### 8.2 Mandatory private-key attributes (PKCS#11 backend)
 
-The migration is idempotent: if `private_key_reference` is already set, skip the row.
+Every CA / OCSP signing key generated on a token must be created with:
 
-### Schema changes needed
+- `CKA_PRIVATE = TRUE`
+- `CKA_SENSITIVE = TRUE`
+- `CKA_EXTRACTABLE = FALSE`
+- `CKA_TOKEN = TRUE`
+- `CKA_SIGN = TRUE`
+- `CKA_DECRYPT = FALSE`, `CKA_ENCRYPT = FALSE`
 
-None — both `private_key_reference` columns already exist. No `ALTER TABLE` is required.
+Luna rejects keys missing these flags; SoftHSM2 silently accepts weaker
+combinations. Code that relies on SoftHSM2 defaults breaks on first contact
+with real hardware. The attribute set is hard-coded in
+`PKCS11Backend.generate_key` and asserted by the test fixture.
 
-### Rollback
+### 8.3 Vendor portability constraints
 
-Set `private_key_reference = NULL` on affected rows. The application will continue to read from `private_key` as it does today until Phase 3 is deployed.
+The implementation must isolate each of these behind a config knob, not
+hard-code SoftHSM behavior:
 
----
-
-## Phase 2 — KMS Module
-
-### Objective
-
-Introduce `pypki/kms.py` — a new class `KeyManagementService` that owns all interactions with `KeyStorage`. This class is the single entry point for:
-- Loading a key by its `KeyStorage` ID
-- Signing a digest (the only signing primitive needed by callers today)
-
-Future operations (key generation, key export, key rotation) will be added to this class.
-
-### Class design
-
-```python
-# pypki/kms.py
-
-class KeyManagementService:
-
-    def __init__(self, db: PKIDataBase):
-        self.__db = db
-        self.__key_cache: dict[int, KeyTools] = {}   # key_id → KeyTools
-
-    # ── Key loading ──────────────────────────────────────────────
-
-    def load_key(self, key_id: int) -> None:
-        """Load a key from KeyStorage into the in-memory cache."""
-        record = self.__db.get_private_key_record(key_id)       # new DB method
-        if not record:
-            raise KeyError(f"Key {key_id} not found in KeyStorage")
-        storage_type = record["storage_type"]
-        if storage_type in ("Plain", "Encrypted"):
-            kt = KeyTools(private_key_pem=record["private_key"])
-        elif storage_type == "HSM":
-            kt = KeyTools(
-                token_slot=record["hsm_slot"],
-                token_key_id=record["hsm_token_id"],
-                token_password=record.get("token_password")
-            )
-        else:
-            raise ValueError(f"Unknown storage_type: {storage_type}")
-        self.__key_cache[key_id] = kt
-
-    def unload_key(self, key_id: int) -> None:
-        """Remove a key from the in-memory cache."""
-        self.__key_cache.pop(key_id, None)
-
-    # ── Signing ──────────────────────────────────────────────────
-
-    def sign_digest(self, key_id: int, tbs_digest: bytes) -> bytes:
-        """Sign a pre-computed digest using the key identified by key_id.
-
-        The caller is responsible for computing the digest (SHA-256 of the
-        TBS bytes). The KMS returns the raw signature bytes.
-        """
-        if key_id not in self.__key_cache:
-            self.load_key(key_id)
-        return self.__key_cache[key_id].sign_digest(tbs_digest)
-
-    def sign_data(self, key_id: int, data: bytes) -> bytes:
-        """Convenience: hash data with SHA-256 then sign the digest."""
-        digest = hashes.Hash(hashes.SHA256())
-        digest.update(data)
-        return self.sign_digest(key_id, digest.finalize())
-
-    # ── Future operations (stubs) ────────────────────────────────
-
-    def generate_key(self, algorithm: str, **kwargs) -> int:
-        """Generate a new key, store it, return its KeyStorage ID."""
-        raise NotImplementedError
-
-    def export_key(self, key_id: int) -> bytes:
-        """Export a key in PEM format (subject to policy)."""
-        raise NotImplementedError
-```
-
-### New DB method needed
-
-Add `get_private_key_record(key_id)` to `PKIDataBase` (mirrors the existing pattern of `get_cert_template_record_by_id`):
-
-```python
-def get_private_key_record(self, key_id: int):
-    """Retrieve a row from KeyStorage by ID."""
-    ...
-    query = "SELECT * FROM KeyStorage WHERE id = %s"
-    ...
-```
-
-### Integration point in `core.py`
-
-`PyPKI` (the orchestrator in `pypki/core.py`) should own the single `KeyManagementService` instance and expose it to CAs and OCSP responders:
-
-```python
-# pypki/core.py  (additions)
-
-class PyPKI:
-    def __init__(self, ...):
-        ...
-        self.__kms = KeyManagementService(self.__db)
-
-    def get_kms(self) -> KeyManagementService:
-        return self.__kms
-```
+- **Mechanism availability** — probe with `C_GetMechanismList` at
+  activation; fail fast with a clear error if a required mechanism is
+  missing.
+- **Login model** — Luna partitions use role-based login (Crypto Officer /
+  Crypto User); YubiHSM 2 authenticates via numeric authkey IDs in addition
+  to a PIN. The provider's `auth_kind` and `extra_json` carry these.
+- **Session limits** — YubiHSM 2 caps concurrent sessions at 16 per
+  authkey. Reinforces the "one shared session per provider, not per cached
+  key" rule (Gap 6).
+- **Slot identification** — slot numeric IDs are not stable across
+  reboots/reinitialisations. Always address by `slot_label`, never by
+  numeric slot.
 
 ---
 
-## Phase 3 — Route Signing Through the KMS
+## 9. REST API specification
 
-### Objective
+All endpoints under `/api/crypto-providers` and `/api/kms` require an
+authenticated session. Role gates are noted per endpoint.
 
-Replace direct `KeyTools`/private-key usage in `CertificationAuthority` and `OCSPResponder` with KMS calls. After this phase:
+### 9.1 Provider management (`/api/crypto-providers`)
 
-- Neither `CertificationAuthority` nor `OCSPResponder` holds a `KeyTools` object.
-- Neither reads the `private_key` PEM column directly.
-- All signing goes through `KeyManagementService.sign_digest()`.
+| Method | Path | Role | Description |
+|---|---|---|---|
+| GET | `/api/crypto-providers` | any authenticated | List providers. Returns `id`, `label`, `kind`, `auto_activate`, activation state, key count. Does not return secrets. |
+| GET | `/api/crypto-providers/{id}` | any authenticated | Provider details (full record minus `auth_secret_blob`). |
+| POST | `/api/crypto-providers` | superadmin | Create a provider. Body: `label`, `kind`, `module_path?`, `slot_label?`, `auth_kind`, `auto_activate`, `auth_secret_ref`, `auth_secret?` (when `db:encrypted`), `extra_json?`, `description?`. |
+| PUT | `/api/crypto-providers/{id}` | superadmin | Update mutable fields: `label`, `module_path`, `slot_label`, `auto_activate`, `auth_secret_ref`, `auth_secret?`, `extra_json`, `description`. `kind` is immutable after creation; promoting software → pkcs11 requires deleting and recreating with key migration. |
+| DELETE | `/api/crypto-providers/{id}` | superadmin | Delete a provider. Rejected with 409 if any `KeyStorage` row references it. |
+| POST | `/api/crypto-providers/{id}/activate` | admin | Activate the provider. Body: `pin?` (required for `operator:prompt`, ignored otherwise). 200 on success, 503 on backend failure. |
+| POST | `/api/crypto-providers/{id}/deactivate` | admin | Close the backend, evict cached keys. 200 on success. |
+| GET | `/api/crypto-providers/{id}/status` | any authenticated | Returns `state` (`active` / `inactive`), `last_activated_at`, `last_error`, `mechanism_list` (when `kind=pkcs11`). |
 
-### Changes per component
+### 9.2 Key management (`/api/kms/keys`)
 
-#### `CertificationAuthority` (`pypki/ca.py`)
+The existing `/api/kms/generate-key` endpoint is replaced by the
+provider-aware shape below. The old endpoint remains as an alias that maps
+to the default provider for one release, then is removed.
 
-**Before (current)**
-```python
-self.__signing_key = KeyTools(...)   # loaded from private_key PEM or HSM params
-```
+| Method | Path | Role | Description |
+|---|---|---|---|
+| GET | `/api/kms/keys` | any authenticated | List keys. Optional query: `provider_id`, `key_type`. Response: id, provider_id, key_type, label, created_at, public_key (PEM), `usage` (CA / OCSP responder bindings, if any). Private material never returned. |
+| GET | `/api/kms/keys/{key_id}` | any authenticated | Key details. |
+| POST | `/api/kms/keys` | admin | Generate a new key. Body: `provider_id`, `key_type` (`RSA-3072`, `ECDSA-P-256`, …), `label`. Provider must be `active`. |
+| POST | `/api/kms/keys/import` | superadmin | Register an existing on-token key into `KeyStorage` (no key material generated). Body: `provider_id` (must be `kind=pkcs11`), `hsm_token_id`, `label?`. Public key is read from the token. |
+| DELETE | `/api/kms/keys/{key_id}` | admin | Delete a key. For `kind=pkcs11`, deletes the on-token object too. Rejected with 409 if any CA or OCSP responder still references the key. |
 
-**After**
-```python
-self.__kms_key_id = config["crypto"]["kms_key_id"]   # integer, from private_key_reference
-# __signing_key is removed
-```
+### 9.3 Errors
 
-The signing call in `certificate_tools.py` already handles the HSM path by calling `signing_private_key.sign_digest(tbs_digest)`. That call becomes:
-
-```python
-# certificate_tools.py — unified signing path
-tbs_digest = sha256(cert_builder.tbs_bytes())
-signature = kms.sign_digest(kms_key_id, tbs_digest)
-final_der = self.patch_certificate_signature(pre_cert_der, signature, is_ecdsa=...)
-return x509.load_der_x509_certificate(final_der)
-```
-
-The software/HSM branch inside `certificate_tools.py` is removed — the KMS handles both internally via `KeyTools`.
-
-#### `OCSPResponder` (`pypki/ocsp_responder.py`)
-
-The `cryptography` library's `OCSPResponseBuilder.sign()` requires the private key object directly; it does not accept pre-computed signatures. The approach follows the same pattern already used for HSM certificate signing:
-
-1. Build the OCSP response with a throw-away key to obtain the DER bytes.
-2. Extract the TBS (to-be-signed) portion.
-3. Call `kms.sign_digest(key_id, sha256(tbs))`.
-4. Patch the signature into the DER (extend `patch_certificate_signature` or add an equivalent `patch_ocsp_signature`).
-
-```python
-# ocsp_responder.py — after Phase 3
-def generate_response(self, ...):
-    dummy_key = ec.generate_private_key(ec.P256())
-    pre_response = builder.sign(private_key=dummy_key, algorithm=hashes.SHA256())
-    tbs = pre_response.tbs_response_bytes
-    signature = self.__kms.sign_digest(self.__kms_key_id, sha256(tbs))
-    return patch_ocsp_signature(pre_response, signature)
-```
-
-#### `core.py` — loading CAs and OCSP responders
-
-When `select_ca_by_id()` reconstructs a `CertificationAuthority` from the DB row, instead of passing the PEM key it passes the `private_key_reference` ID:
-
-```python
-# core.py — select_ca_by_id (after Phase 3)
-crypto_config = {
-    "certificate":      row["certificate"],
-    "certificate_chain": row["certificate_chain"],
-    "kms_key_id":       row["private_key_reference"],   # ← new
-    # private_key, token_slot, token_key_id, token_password removed
-}
-ca = CertificationAuthority()
-ca.load_config({"ca_name": row["name"], "crypto": crypto_config, ...})
-ca.set_kms(pki.get_kms())
-```
+Errors follow the existing pyPKI error shape (`{"description": "…"}` with
+appropriate HTTP status). Provider-specific errors use 503 (provider
+inactive / backend failure), 409 (in-use key or provider), 400
+(validation), 404 (unknown id).
 
 ---
 
-## Summary of File Changes
+## 10. Management UI
 
-| File | Change |
+A new sidebar section, **KMS**, replaces the existing single "Key
+Generation" entry with two pages plus a settings shortcut.
+
+### 10.1 Crypto Providers page (`/crypto_providers.html`)
+
+- **List view** — table with columns: label, kind (badge), state (active /
+  inactive), auto-activate toggle, key count, last error. Filter by kind.
+  Buttons: "Add provider," "Activate," "Deactivate," "View," "Edit," "Delete."
+- **Add / Edit** (modal or dedicated page `/crypto_provider_editor.html`):
+  - Label (text)
+  - Kind (radio: software / pkcs11; **disabled on edit**)
+  - For `pkcs11`: module_path (text with the platform default as
+    placeholder), slot_label (text), auth_kind (dropdown), extra_json
+    (collapsible JSON editor for authkey id, role)
+  - Auto-activate (checkbox)
+  - Auth secret source (dropdown: db:encrypted / env / vault /
+    operator:prompt) + value field (only for env / vault / db:encrypted)
+  - Description (textarea)
+  - Save button validates: auto_activate + operator:prompt is rejected;
+    db:encrypted requires a PIN value entered in this form (which the
+    backend will encrypt under `HSM_PIN_KEK`).
+- **Provider detail** (`/crypto_provider_details.html`):
+  - Header: label, kind, state, "Activate" / "Deactivate" button.
+  - Activation modal: PIN input (operator:prompt) or just a confirmation
+    button (other resolvers).
+  - Linked keys table — same columns as the global key list, scoped to this
+    provider, with "Generate," "Import" (pkcs11 only), and "Delete" buttons.
+  - For `pkcs11` providers: declared mechanism list (from `C_GetMechanismList`).
+
+### 10.2 Keys page (`/kms_keys.html`)
+
+Replaces the existing `kms_keygen.html`.
+
+- **List view** — table: id, provider, key type, label, created, usage
+  (CA/OCSP binding count). Filter by provider, key type. Buttons: "Generate
+  key," "Import HSM key," "Delete."
+- **Generate modal** — provider dropdown (pre-filtered to active
+  providers), key type dropdown (RSA-2048/3072/4096, ECDSA-P-256/P-384,
+  Ed25519, AES-256), label.
+- **Import modal** (PKCS#11 providers only) — provider dropdown,
+  hsm_token_id (hex), optional label. The system reads the public key from
+  the token to populate `KeyStorage.public_key`.
+- **Delete confirmation** — refuses if usage count > 0; shows which CAs /
+  OCSP responders reference the key.
+
+### 10.3 Hooks into existing pages
+
+- **CA editor / Add CA** — the existing key-source picker gains a "Provider"
+  dropdown when generating or selecting an existing KMS key. Uploading a PEM
+  CA still goes through the default software provider (existing behavior
+  preserved; key gets encrypted at rest under that provider's KEK on import).
+- **OCSP responder editor** — same: provider dropdown for the key source.
+- **Audit log viewer** — new event types listed in §11 surface here.
+
+### 10.4 Settings
+
+`HSM_PIN_KEK` is configured outside the application (environment, systemd
+EnvironmentFile, container env). A read-only **Settings → KMS** page shows
+whether the KEK is present (boolean only — the value is never displayed)
+and the active resolver backends, so an operator can confirm the deployment
+is wired up correctly.
+
+---
+
+## 11. Audit logging
+
+The following events write to `AuditLogs`:
+
+| Event | Fields |
 |---|---|
-| Historical one-off migration | Populated `KeyStorage` and wired `private_key_reference` during the KMS rollout |
-| `pypki/db.py` | **Add** `get_private_key_record(key_id)` (Phase 2) |
-| `pypki/kms.py` | **New** — `KeyManagementService` class (Phase 2) |
-| `pypki/core.py` | Instantiate KMS; pass `kms_key_id` when loading CAs/OCSP responders (Phase 3) |
-| `pypki/ca.py` | Replace `KeyTools` with `kms_key_id` + KMS reference (Phase 3) |
-| `pypki/certificate_tools.py` | Remove software/HSM branch; always sign via KMS (Phase 3) |
-| `pypki/ocsp_responder.py` | Replace direct signing with dummy-key + KMS patch approach (Phase 3) |
-| `pypki/__init__.py` | Export `KeyManagementService` (Phase 2) |
+| `provider_create` | provider_id, label, kind, auto_activate, auth_secret_ref kind |
+| `provider_update` | provider_id, changed fields (no secret values) |
+| `provider_delete` | provider_id, label |
+| `provider_activate` | provider_id, method (`auto` / `operator-prompt` / `env` / `vault` / `db:encrypted`), success |
+| `provider_deactivate` | provider_id, reason (`operator` / `shutdown`) |
+| `provider_auto_activate_toggled` | provider_id, new value |
+| `key_generate` | key_id, provider_id, key_type, label |
+| `key_import` | key_id, provider_id, hsm_token_id |
+| `key_delete` | key_id, provider_id |
 
-The `private_key` column in `CertificationAuthorities` and `OCSPResponders` can be nulled out after Phase 3 is stable. Dropping the columns entirely is a separate, optional cleanup step.
+`sign_digest` calls are *not* audit-logged by default — they happen on every
+issuance, every CRL, every OCSP response, and would dominate the log. CA-
+and OCSP-level audit events already cover the high-level operations.
 
 ---
 
-## Future Phases (out of scope for now)
+## 12. Development environment
 
-| Capability | Notes |
-|---|---|
-| Encrypted key storage | `storage_type = 'Encrypted'`; KMS decrypts with a master key before loading into memory |
-| Key generation via KMS | `kms.generate_key(algorithm, size)` → stores in `KeyStorage`, returns ID |
-| Key export | `kms.export_key(key_id)` → PEM or PKCS#12, subject to policy |
-| Remote/cloud KMS | Swap `KeyTools` backend for AWS KMS, Azure Key Vault, HashiCorp Vault, etc. — callers unchanged |
-| Key rotation | Generate new key, re-issue certificate, update `private_key_reference` |
-| Access control | Gate `sign_digest` and `export_key` per caller identity |
-| KMS audit log | Write to `AuditLogs` on every `sign_digest` call |
+### 12.1 Two-tier strategy
+
+- **Tier 1 — SoftHSM2 (daily dev + CI).** Free, packaged on every Linux
+  distro, runs in a Docker container alongside the app, fast enough to use
+  as a unit-test fixture. Permissive: accepts attribute combinations and
+  mechanisms that real HSMs reject, so it cannot be the only test target.
+- **Tier 2 — fidelity check before each release.** Run the full HSM test
+  suite against:
+  - the **YubiHSM 2 simulator** (ships with the Yubico SDK), and / or
+  - a **Thales DPoD trial** (real Luna firmware behind their API; the only
+    realistic Luna-equivalent without owning hardware).
+
+  AWS CloudHSM (Luna under the hood) is a fallback if DPoD trial access
+  expires. No general-purpose offline Luna emulator is available outside the
+  vendor's customer SDK.
+
+### 12.2 SoftHSM2 in the pyPKI Docker image
+
+Already in place (Dockerfile, docker-entrypoint.sh, docker-compose.yml).
+Token state persists in `data/softhsm/tokens/`; default token `pypki-dev`,
+PIN `1234`, SO-PIN `5678`. The full operator manual lives in
+[softhsm2-manual.md](softhsm2-manual.md).
+
+### 12.3 Test fixtures
+
+- A `pytest` fixture opens a session against the dev SoftHSM2 token, yields
+  it to the test, and tears down on exit.
+- The full signing test suite is parameterised over backends: every test
+  runs once with the default `software-default` provider and once with a
+  `softhsm-dev` `pkcs11` provider. Mechanism / attribute / session bugs
+  surface against both backends on every CI run.
+
+### 12.4 Library choice
+
+Stay on **PyKCS11**. It is a thin, literal binding that exposes the raw
+PKCS#11 surface — useful when debugging vendor-specific quirks. Switching to
+`python-pkcs11` is a separate decision and not a prerequisite for any of
+the work in this spec.
+
+---
+
+## 13. Order of work
+
+The work is sequenced so each phase produces a working, testable
+intermediate state. Each phase ends with passing tests.
+
+**Phase 0 — provider model + dev environment.**
+
+- Introduce `CryptoProviders` table; add migration (Section 4.3).
+- Migrate `KeyStorage`: add `provider_id`, drop `hsm_slot` and
+  `token_password`, encrypt-at-rest existing `Plain` rows, set `provider_id`
+  on every row.
+- Seed `software-default`.
+- Extract `SoftwareBackend` and `PKCS11Backend` as siblings under the
+  `CryptoBackend` Protocol; route `KeyManagementService` through the
+  contract.
+- Stand up the SoftHSM2 dev environment as the first `pkcs11` provider row
+  (via the `legacy-hsm` migration entry, then renamed to `softhsm-dev`).
+- `pytest` fixture for the SoftHSM provider; two passing tests (one per
+  backend) signing through the same KMS API.
+
+Closes Gap 4 (no provider abstraction). Without this, every subsequent gap
+is fixed against the wrong shape.
+
+**Phase 1 — fix HSM signing.**
+
+- Gap 1 (RSA mechanism: switch to `CKM_SHA256_RSA_PKCS`, pass TBS bytes).
+- Gap 2 (ECDSA branch: `CKM_ECDSA` over digest, DER-encode `(r, s)`).
+- Sign-and-verify tests for both algorithms against the SoftHSM provider.
+
+**Phase 2 — slot selection.**
+
+- Gap 3 (`hsm_slot` ignored): thread `slot_label` through the provider →
+  PKCS11Backend → `open_session()`. Probe by label, not numeric slot.
+
+**Phase 3 — concurrency + session lifecycle.**
+
+- Gap 7 (per-key lock around `load_key`).
+- Gap 6 (one shared backend session per provider; close on
+  deactivate/shutdown; reconnect on `CKR_SESSION_HANDLE_INVALID` /
+  `CKR_DEVICE_REMOVED`).
+- Multi-threaded SoftHSM stress test in CI.
+
+**Phase 4 — secret handling.**
+
+- Gap 5: `auth_secret_ref` resolvers — `db:encrypted` (using `HSM_PIN_KEK`),
+  `env:`, `operator:prompt`. `vault:` deferred. `auto_activate` enforced.
+- Activation API endpoints (Section 9.1).
+
+**Phase 5 — operator UX.**
+
+- Gap 8: HSM-backed key generation and import via API and UI.
+- Provider management API + UI pages (Sections 9–10).
+- Audit-log events (Section 11).
+
+**Phase 6 — hardening + cleanup.**
+
+- Gap 9 (`hsm_token_id` validated at insert/load).
+- Gap 10 (`'Encrypted'` storage type now actually encrypts; or — given Phase
+  0 already converted everything, this gap is closed by construction;
+  confirm and mark resolved).
+- Gap 11 (`Symmetric` storage type with its own load branch).
+- Gap 12 (stale `migrate_keys_to_kms.py` reference in OCSP error path).
+- Expand SoftHSM-based test coverage.
+
+**Phase 7 — fidelity pass.**
+
+- Run the full HSM test suite against the YubiHSM 2 simulator.
+- Run the full HSM test suite against a Thales DPoD trial (if available).
+- Document any vendor-specific findings; gate any exceptions behind
+  provider `extra_json` flags rather than code branches.
+
+---
+
+## 14. Acceptance criteria
+
+For the consolidated plan to be considered "done":
+
+1. A fresh `reset_pki` install yields exactly one provider
+   (`software-default`, active) and the existing CA-creation flow works
+   without operator intervention beyond `HSM_PIN_KEK` being set.
+2. An operator can create a `pkcs11` provider pointing at the SoftHSM2 dev
+   container, activate it, generate an RSA-3072 and an ECDSA-P-256 key on
+   it, bind them to two CAs, and issue certificates that verify against
+   third-party tools (`openssl verify`, `certutil`).
+3. Restarting the container reactivates auto-activated providers, leaves
+   non-auto providers inactive, and CAs bound to inactive providers report
+   "provider unavailable" cleanly on first sign attempt — no PKCS#11-level
+   exception leaks.
+4. The same test suite passes against both backends in CI.
+5. No `KeyStorage` row contains a plaintext private key (`storage_type=Plain`
+   no longer exists in operational data; `private_key` for `Encrypted` /
+   `Symmetric` rows is encrypted under a provider KEK).
+6. `KeyStorage.token_password` and `KeyStorage.hsm_slot` columns no longer
+   exist.
+7. Audit log entries are produced for every provider lifecycle and key
+   lifecycle event.
+8. The fidelity-pass test suite passes against YubiHSM 2 simulator (Thales
+   DPoD optional but documented).
+
+---
+
+## 15. Out of scope for this spec
+
+- **Cloud KMS (AWS KMS, Azure Key Vault, GCP KMS) as a provider kind.**
+  The data model leaves room (`kind` enum extension, `extra_json` for
+  endpoint/role config), but no concrete backend is scoped here.
+- **Key rotation with cert re-issuance.** A separate workflow that uses but
+  does not require any KMS changes.
+- **Per-caller access control on `sign_digest`.** Currently any code path
+  inside the app can sign with any active key. Tightening this requires
+  thinking about CA / OCSP / EST identity propagation — separate effort.
+- **`vault:path` resolver.** Listed in the API but not implemented in the
+  initial cut; placeholder returns 501.
+- **HSM hardware procurement.** The Tier 2 fidelity targets (YubiHSM 2,
+  Thales DPoD) are validation environments, not production deployment
+  guidance.
+
+---
+
+## 16. Cross-references
+
+- [hsm-gap-analysis.md](hsm-gap-analysis.md) — punch-list of the 12 concrete
+  defects this spec closes, with file/line pointers.
+- [softhsm2-manual.md](softhsm2-manual.md) — operator manual for the
+  SoftHSM2 dev environment.
+- [database.md](database.md) — current schema; will be regenerated when the
+  `CryptoProviders` migration lands.
+- [rest-api.md](rest-api.md) — REST API reference; will be extended with the
+  endpoints in Section 9.
+- [roadmap.md](roadmap.md) — broader project roadmap; the HSM section
+  references this spec.

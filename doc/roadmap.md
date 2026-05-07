@@ -10,26 +10,31 @@ This document captures medium-term improvements that are valuable, but not requi
 
 ## 2. Security Hardening
 
-- Eliminate clear-text private-key storage for software keys by adding encryption-at-rest for `KeyStorage`.
+- Encryption-at-rest for software keys and HSM PINs, behind a per-provider secret reference with an explicit auto-activation toggle. Specified in [kms-strategy.md §6–7](kms-strategy.md); tracked under HSM / PKCS#11 Support below to keep the work consolidated.
 - Add first-class secret management for admin/bootstrap credentials instead of relying only on generated local files.
 - Support stronger auth options for the management API and UI, including MFA and shorter-lived/rotatable tokens.
 - Expand EST authentication beyond Basic Auth to include client-certificate authentication where appropriate.
-- Move HSM token PINs out of `KeyStorage.token_password` to a per-provider secret reference resolved via env-var / vault / operator-supplied (see [hsm-gap-analysis.md](hsm-gap-analysis.md) Gap 5 and the "HSM provider model" section).
-- Either implement the `storage_type='Encrypted'` decrypt path or drop the enum value to remove the foot-gun (Gap 10).
 
 ## 3. HSM / PKCS#11 Support
 
-Tracked in detail in [hsm-gap-analysis.md](hsm-gap-analysis.md). Current HSM
-support exists end-to-end on paper but has correctness, portability, and
-operator-experience gaps that block production use.
+The full specification — architecture, data model, REST API, management UI,
+PKCS#11 conformance, dev environment, and phased order of work — lives in
+[kms-strategy.md](kms-strategy.md). The remaining concrete defects (with
+file/line pointers) are catalogued as a punch-list in
+[hsm-gap-analysis.md](hsm-gap-analysis.md). Current HSM support exists end-to-end
+on paper but has correctness, portability, and operator-experience gaps that
+block production use.
 
+- **Provider model.** Introduce `CryptoProviders` (kinds `software` and `pkcs11`) so each provider — software cryptotoken, SoftHSM dev, YubiHSM, Luna, … — is configured once with module path (when applicable), slot, and auth, and `KeyStorage` rows reference it by FK. Replaces the hard-coded macOS SafeNet path, the inline per-key connection columns, and the flat plaintext-PEM software bucket (kms-strategy.md §3–4; closes Gap 4).
 - **Correctness (blockers).** Fix the RSA-on-HSM mechanism so signatures verify against `sha256WithRSAEncryption` (Gap 1), and add the missing ECDSA branch in `KeyTools.sign_digest` (Gap 2).
-- **Portability.** Introduce an `HSMProviders` record so each HSM (SoftHSM dev, YubiHSM, Luna, …) is configured once with module path, slot, and auth, and `KeyStorage` rows reference it by FK — replacing the hard-coded macOS SafeNet path and the inline per-key connection columns (Gap 4 + "HSM provider model" section). Thread `hsm_slot` through `open_session()` so multi-slot tokens work (Gap 3).
-- **Stability.** Add per-key locking in `KMS.load_key` to prevent duplicate sessions under concurrent first-use (Gap 7); share PKCS#11 sessions and close them on `unload_key` / process shutdown (Gap 6).
-- **Operator UX.** Extend `kms.generate_key` and the `/kms/generate-key` endpoint with an HSM option, and add an `import_hsm_key()` API for registering pre-existing on-token keys (Gap 8).
-- **Hardening.** Validate the `hsm_token_id` format at insert/load time (Gap 9), give symmetric keys their own storage taxonomy so they can be loaded without crashing the PEM parser (Gap 11), and update the stale `migrate_keys_to_kms.py` reference in the OCSP responder error path (Gap 12).
-- **Dev environment.** Stand up a SoftHSM2-based dev/CI environment first (see the "Development environment — SoftHSM2 first" section in [hsm-gap-analysis.md](hsm-gap-analysis.md)) — Gaps 1, 2, 6, 7 are not safely fixable without it. Validate against the YubiHSM 2 simulator and a Thales DPoD trial before declaring HSM support release-ready.
-- **Testing.** Add SoftHSM2-based integration tests in CI so regressions in mechanism selection, slot handling, or session lifecycle fail fast.
+- **Slot addressing.** Thread the provider's `slot_label` through `open_session()` so multi-slot tokens and reinitialised SoftHSM2 tokens work (Gap 3).
+- **Stability.** Add per-key locking around `KMS.load_key` to prevent duplicate sessions under concurrent first-use (Gap 7); share one PKCS#11 session per provider, opened on activation and closed on deactivation/shutdown (Gap 6).
+- **Secret handling.** Move HSM PINs and software-key PEMs out of the plaintext database under a per-provider secret reference (`db:encrypted` / `env:` / `vault:` / `operator:prompt`) with an explicit auto-activation toggle per provider (kms-strategy.md §6–7; closes Gap 5).
+- **Operator UX.** Provider management API + UI (CRUD, activate/deactivate); per-provider key management API + UI (list, generate RSA/ECDSA, import on-token keys, delete) — kms-strategy.md §9–10, closes Gap 8.
+- **Hardening.** Validate `hsm_token_id` at insert/load (Gap 9); give symmetric keys their own storage taxonomy (Gap 11); update the stale `migrate_keys_to_kms.py` OCSP error reference (Gap 12).
+- **Dev environment.** SoftHSM2-based dev/CI environment first (already wired into the Docker setup; see kms-strategy.md §12 and [softhsm2-manual.md](softhsm2-manual.md)). Gaps 1, 2, 6, 7 are not safely fixable without it.
+- **Fidelity pass.** Run the full HSM test suite against the YubiHSM 2 simulator and a Thales DPoD trial before declaring HSM support release-ready.
+- **Testing.** Parameterise the signing suite over the two backends so every test runs once against `software-default` and once against `softhsm-dev` in CI — recovers the test-parity benefit of unified PKCS#11 without making SoftHSM the production path.
 
 ## 4. PKI And Protocol Maturity
 
