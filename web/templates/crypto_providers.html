@@ -1,0 +1,564 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item active">Crypto Providers</li>
+  </ol>
+</nav>
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0">Crypto Providers</h4>
+  <button class="btn btn-primary btn-sm" id="newProviderBtn"
+          data-superadmin-only data-bs-toggle="modal" data-bs-target="#editorModal"
+          onclick="openEditorForCreate()">
+    <i class="bi bi-plus-circle me-1"></i>New Provider
+  </button>
+</div>
+
+<div class="card shadow-sm">
+  <div class="card-body p-0">
+    <table class="table table-hover mb-0" id="providersTable">
+      <thead class="table-light">
+        <tr>
+          <th>Label</th>
+          <th>Kind</th>
+          <th>State</th>
+          <th>Auto-activate</th>
+          <th>Auth source</th>
+          <th class="text-end">Keys</th>
+          <th class="text-end" style="width:280px">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="providersBody">
+        <tr><td colspan="7" class="text-muted small p-3">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div id="emptyState" class="text-center py-5" style="display:none">
+  <i class="bi bi-hdd-stack text-muted" style="font-size:3rem"></i>
+  <p class="text-muted mt-3">No crypto providers configured.</p>
+</div>
+{% endblock %}
+
+{% block modals %}
+<!-- Create / edit provider -->
+<div class="modal fade" id="editorModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="editorTitle">New Crypto Provider</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <form id="providerForm" class="row g-3" autocomplete="off">
+          <input type="hidden" id="provId">
+          <div class="col-md-6">
+            <label class="form-label">Label</label>
+            <input class="form-control" id="provLabel" required>
+            <div class="form-text">Unique. Shown everywhere this provider is referenced.</div>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">Kind</label>
+            <select class="form-select" id="provKind" onchange="onKindChange()">
+              <option value="software">software</option>
+              <option value="pkcs11">pkcs11 (HSM)</option>
+            </select>
+            <div class="form-text">Cannot be changed after creation.</div>
+          </div>
+
+          <div class="col-12 pkcs11Only">
+            <hr class="mt-1 mb-2">
+            <h6 class="text-muted small text-uppercase">PKCS#11 settings</h6>
+          </div>
+          <div class="col-md-8 pkcs11Only">
+            <label class="form-label">Module path</label>
+            <input class="form-control" id="provModulePath"
+                   placeholder="/usr/lib/softhsm/libsofthsm2.so">
+          </div>
+          <div class="col-md-4 pkcs11Only">
+            <label class="form-label">Slot label</label>
+            <input class="form-control" id="provSlotLabel" placeholder="e.g. pypki-dev">
+            <div class="form-text">Match by token label, not numeric slot id.</div>
+          </div>
+          <div class="col-md-6 pkcs11Only">
+            <label class="form-label">Auth kind</label>
+            <select class="form-select" id="provAuthKind">
+              <option value="pin">pin</option>
+              <option value="luna_role">luna_role</option>
+              <option value="yubihsm_authkey">yubihsm_authkey</option>
+            </select>
+          </div>
+
+          <div class="col-12">
+            <hr class="mt-1 mb-2">
+            <h6 class="text-muted small text-uppercase">Activation</h6>
+          </div>
+          <div class="col-md-6">
+            <div class="form-check form-switch mt-3">
+              <input class="form-check-input" type="checkbox" id="provAutoActivate"
+                     onchange="onAutoActivateChange()">
+              <label class="form-check-label" for="provAutoActivate">
+                Auto-activate at startup
+              </label>
+            </div>
+            <div class="form-text">
+              When off, the provider stays inactive until an operator submits the PIN
+              via the Activate action.
+            </div>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">Auth secret source</label>
+            <select class="form-select" id="provAuthSource" onchange="onAuthSourceChange()">
+              <option value="db:encrypted">db:encrypted (PIN encrypted on row)</option>
+              <option value="env">env: (read at activation time)</option>
+              <option value="vault">vault: (reserved)</option>
+              <option value="operator:prompt">operator:prompt (manual)</option>
+            </select>
+          </div>
+          <div class="col-md-6 authValueRow">
+            <label class="form-label" id="provAuthValueLabel">PIN</label>
+            <input class="form-control" id="provAuthValue"
+                   placeholder="Enter the PIN used to activate this provider">
+            <div class="form-text" id="provAuthValueHelp">
+              Stored encrypted under the master KEK. Never persisted in plaintext.
+            </div>
+          </div>
+
+          <div class="col-12">
+            <label class="form-label">Description (optional)</label>
+            <textarea class="form-control" id="provDescription" rows="2"></textarea>
+          </div>
+          <div class="col-12 d-none" id="formError">
+            <div class="alert alert-danger mb-0" id="formErrorBody"></div>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="saveProviderBtn" onclick="saveProvider()">
+          <i class="bi bi-check-circle me-1"></i>Save
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Activate (operator-supplied PIN) -->
+<div class="modal fade" id="activateModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Activate provider</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="mb-2">
+          Activate <strong id="activateProvLabel"></strong>?
+        </p>
+        <div id="activatePinRow">
+          <label class="form-label">PIN</label>
+          <input type="password" class="form-control" id="activatePin">
+          <div class="form-text">Held in process memory only; never persisted.</div>
+        </div>
+        <div id="activateAutoNote" class="form-text d-none">
+          PIN resolves automatically via this provider's auth secret reference.
+        </div>
+        <div class="alert alert-danger d-none mt-3 mb-0" id="activateError"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="activateBtn">
+          <i class="bi bi-power me-1"></i>Activate
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm delete -->
+<div class="modal fade" id="confirmModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Delete provider</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="confirmBody"></div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-danger btn-sm" id="confirmBtn">Delete</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:9999">
+  <div id="toast" class="toast align-items-center text-bg-success border-0" role="alert">
+    <div class="d-flex">
+      <div class="toast-body" id="toastMsg"></div>
+      <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function showToast(msg, type = 'success') {
+    const el = document.getElementById('toast');
+    document.getElementById('toastMsg').innerHTML = msg;
+    el.className = `toast align-items-center text-bg-${type} border-0`;
+    bootstrap.Toast.getOrCreateInstance(el, { delay: 3000 }).show();
+  }
+
+  function kindBadge(kind) {
+    if (kind === 'pkcs11') return '<span class="badge bg-info text-dark">pkcs11</span>';
+    return '<span class="badge bg-secondary">software</span>';
+  }
+  function stateBadge(state) {
+    return state === 'active'
+      ? '<span class="badge bg-success">active</span>'
+      : '<span class="badge bg-secondary">inactive</span>';
+  }
+  function authSourceLabel(ref) {
+    if (!ref) return '—';
+    if (ref === 'db:encrypted')   return '<code class="small">db:encrypted</code>';
+    if (ref === 'operator:prompt') return '<code class="small">operator:prompt</code>';
+    if (ref.startsWith('env:'))    return `<code class="small">${ref}</code>`;
+    if (ref.startsWith('vault:'))  return `<code class="small">${ref}</code>`;
+    return `<code class="small">${ref}</code>`;
+  }
+
+  async function fetchJson(url, init) {
+    const res = await fetch(url, init);
+    let data = {}; try { data = await res.json(); } catch (_) {}
+    if (!res.ok) {
+      const desc = (data && (data.description || data.error)) || `HTTP ${res.status}`;
+      throw new Error(typeof desc === 'string' ? desc : JSON.stringify(desc));
+    }
+    return data;
+  }
+
+  let _providers = [];
+  let _statusCache = {};   // id → status dict
+
+  async function loadProviders() {
+    try {
+      const list = await fetchJson(`${apiBase}/crypto-providers`);
+      _providers = list || [];
+      _statusCache = {};
+      // Pull status for each in parallel — fine for a small number of providers.
+      await Promise.all(_providers.map(async p => {
+        try { _statusCache[p.id] = await fetchJson(`${apiBase}/crypto-providers/${p.id}/status`); }
+        catch (_) { _statusCache[p.id] = { state: 'inactive' }; }
+      }));
+      renderTable();
+    } catch (e) {
+      document.getElementById('providersBody').innerHTML =
+        `<tr><td colspan="7" class="text-danger small p-3">Failed to load providers: ${e.message}</td></tr>`;
+    }
+  }
+
+  async function loadKeyCounts() {
+    // Single list call → bucket counts by provider_id.
+    try {
+      const keys = await fetchJson(`${apiBase}/kms/keys`);
+      const counts = {};
+      for (const k of (keys || [])) {
+        counts[k.provider_id] = (counts[k.provider_id] || 0) + 1;
+      }
+      return counts;
+    } catch (_) { return {}; }
+  }
+
+  async function renderTable() {
+    const tbody = document.getElementById('providersBody');
+    if (!_providers.length) {
+      tbody.innerHTML = '';
+      document.getElementById('providersTable').style.display = 'none';
+      document.getElementById('emptyState').style.display = '';
+      return;
+    }
+    document.getElementById('providersTable').style.display = '';
+    document.getElementById('emptyState').style.display = 'none';
+
+    const counts = await loadKeyCounts();
+    tbody.innerHTML = _providers.map(p => {
+      const st = (_statusCache[p.id] || {}).state || 'inactive';
+      const keyCount = counts[p.id] || 0;
+      const isOperator = (p.auth_secret_ref || '') === 'operator:prompt';
+      const isDefault  = !!p.is_default;
+      const actionBtns = [];
+
+      // View
+      actionBtns.push(
+        `<a href="/crypto_provider_details.html?id=${p.id}" class="btn btn-outline-secondary btn-sm me-1" title="View"><i class="bi bi-eye"></i></a>`
+      );
+      // Activate / Deactivate (admin)
+      if (window._isAdmin) {
+        if (st === 'active') {
+          actionBtns.push(
+            `<button class="btn btn-outline-warning btn-sm me-1" onclick="deactivateProvider(${p.id})" title="Deactivate"><i class="bi bi-power"></i></button>`
+          );
+        } else {
+          actionBtns.push(
+            `<button class="btn btn-outline-success btn-sm me-1" onclick="openActivate(${p.id})" title="Activate"><i class="bi bi-play-circle"></i></button>`
+          );
+        }
+      }
+      // Edit (superadmin)
+      if (window._isSuperAdmin) {
+        actionBtns.push(
+          `<button class="btn btn-outline-secondary btn-sm me-1" onclick="openEditorForUpdate(${p.id})" title="Edit"><i class="bi bi-pencil"></i></button>`
+        );
+      }
+      // Delete (superadmin, never the default)
+      if (window._isSuperAdmin && !isDefault) {
+        actionBtns.push(
+          `<button class="btn btn-outline-danger btn-sm" onclick="confirmDelete(${p.id}, '${p.label}')" title="Delete"><i class="bi bi-trash"></i></button>`
+        );
+      }
+
+      const defaultMark = isDefault
+        ? ' <span class="badge bg-light text-dark border" title="Default provider">default</span>'
+        : '';
+      return `
+        <tr>
+          <td class="fw-semibold">${p.label}${defaultMark}</td>
+          <td>${kindBadge(p.kind)}</td>
+          <td>${stateBadge(st)}</td>
+          <td>${p.auto_activate ? '<i class="bi bi-check-circle text-success"></i>' : '<i class="bi bi-x-circle text-muted"></i>'}</td>
+          <td>${authSourceLabel(p.auth_secret_ref)}</td>
+          <td class="text-end">${keyCount}</td>
+          <td class="text-end">${actionBtns.join('')}</td>
+        </tr>`;
+    }).join('');
+  }
+
+  // ── Editor modal ────────────────────────────────────────────────────────────
+
+  function _resetForm() {
+    document.getElementById('provId').value = '';
+    document.getElementById('provLabel').value = '';
+    document.getElementById('provKind').value = 'software';
+    document.getElementById('provKind').disabled = false;
+    document.getElementById('provModulePath').value = '';
+    document.getElementById('provSlotLabel').value = '';
+    document.getElementById('provAuthKind').value = 'pin';
+    document.getElementById('provAutoActivate').checked = true;
+    document.getElementById('provAuthSource').value = 'db:encrypted';
+    document.getElementById('provAuthValue').value = '';
+    document.getElementById('provDescription').value = '';
+    document.getElementById('formError').classList.add('d-none');
+    onKindChange();
+    onAuthSourceChange();
+  }
+
+  function openEditorForCreate() {
+    _resetForm();
+    document.getElementById('editorTitle').textContent = 'New Crypto Provider';
+  }
+
+  async function openEditorForUpdate(id) {
+    _resetForm();
+    document.getElementById('editorTitle').textContent = 'Edit Crypto Provider';
+    try {
+      const p = await fetchJson(`${apiBase}/crypto-providers/${id}`);
+      document.getElementById('provId').value = p.id;
+      document.getElementById('provLabel').value = p.label || '';
+      document.getElementById('provKind').value = p.kind || 'software';
+      document.getElementById('provKind').disabled = true;
+      document.getElementById('provModulePath').value = p.module_path || '';
+      document.getElementById('provSlotLabel').value = p.slot_label || '';
+      document.getElementById('provAuthKind').value = p.auth_kind || 'pin';
+      document.getElementById('provAutoActivate').checked = !!p.auto_activate;
+      const ref = p.auth_secret_ref || 'operator:prompt';
+      let kind = 'operator:prompt', value = '';
+      if (ref === 'db:encrypted') kind = 'db:encrypted';
+      else if (ref.startsWith('env:'))   { kind = 'env';   value = ref.slice(4); }
+      else if (ref.startsWith('vault:')) { kind = 'vault'; value = ref.slice(6); }
+      document.getElementById('provAuthSource').value = kind;
+      document.getElementById('provAuthValue').value = value;
+      document.getElementById('provDescription').value = p.description || '';
+      onKindChange();
+      onAuthSourceChange();
+      bootstrap.Modal.getOrCreateInstance(document.getElementById('editorModal')).show();
+    } catch (e) { showToast(`Load failed: ${e.message}`, 'danger'); }
+  }
+
+  function onKindChange() {
+    const isPkcs = document.getElementById('provKind').value === 'pkcs11';
+    document.querySelectorAll('.pkcs11Only').forEach(el => el.classList.toggle('d-none', !isPkcs));
+  }
+
+  function onAutoActivateChange() {
+    // Auto-activate=TRUE forces a non-operator source. Auto-activate=FALSE forces operator:prompt.
+    const auto = document.getElementById('provAutoActivate').checked;
+    const sel = document.getElementById('provAuthSource');
+    if (!auto) {
+      sel.value = 'operator:prompt';
+    } else if (sel.value === 'operator:prompt') {
+      sel.value = 'db:encrypted';
+    }
+    onAuthSourceChange();
+  }
+
+  function onAuthSourceChange() {
+    const src = document.getElementById('provAuthSource').value;
+    const row = document.querySelector('.authValueRow');
+    const lbl = document.getElementById('provAuthValueLabel');
+    const help = document.getElementById('provAuthValueHelp');
+    const inp = document.getElementById('provAuthValue');
+    if (src === 'db:encrypted') {
+      row.classList.remove('d-none');
+      lbl.textContent = 'PIN';
+      inp.type = 'password';
+      inp.placeholder = 'Enter the PIN used to activate this provider';
+      help.textContent = 'Stored encrypted under the master KEK. Never persisted in plaintext.';
+    } else if (src === 'env') {
+      row.classList.remove('d-none');
+      lbl.textContent = 'Environment variable name';
+      inp.type = 'text';
+      inp.placeholder = 'e.g. HSM_PIN_PROD';
+      help.textContent = 'Resolved at activation time from the named env var.';
+    } else if (src === 'vault') {
+      row.classList.remove('d-none');
+      lbl.textContent = 'Vault path';
+      inp.type = 'text';
+      inp.placeholder = 'e.g. secret/pki/hsm/prod-root';
+      help.textContent = 'Reserved — vault resolver not yet implemented.';
+    } else {
+      // operator:prompt
+      row.classList.add('d-none');
+      inp.value = '';
+    }
+
+    // Force the auto-activate flag into a consistent state.
+    if (src === 'operator:prompt') {
+      document.getElementById('provAutoActivate').checked = false;
+    }
+  }
+
+  function _readForm() {
+    const src = document.getElementById('provAuthSource').value;
+    const val = document.getElementById('provAuthValue').value.trim();
+    let auth_secret_ref = 'operator:prompt', pin = null;
+    if (src === 'db:encrypted') {
+      auth_secret_ref = 'db:encrypted';
+      pin = val;
+    } else if (src === 'env')   { auth_secret_ref = 'env:'   + val; }
+    else if (src === 'vault') { auth_secret_ref = 'vault:' + val; }
+
+    return {
+      label: document.getElementById('provLabel').value.trim(),
+      kind:  document.getElementById('provKind').value,
+      module_path: document.getElementById('provModulePath').value.trim() || null,
+      slot_label:  document.getElementById('provSlotLabel').value.trim() || null,
+      auth_kind:   document.getElementById('provAuthKind').value,
+      auto_activate: document.getElementById('provAutoActivate').checked,
+      auth_secret_ref,
+      pin,
+      description: document.getElementById('provDescription').value.trim() || null,
+    };
+  }
+
+  async function saveProvider() {
+    const id = document.getElementById('provId').value;
+    const body = _readForm();
+    const errBox = document.getElementById('formError');
+    const errBody = document.getElementById('formErrorBody');
+    errBox.classList.add('d-none');
+    try {
+      if (id) {
+        // Update — kind is immutable so don't send it.
+        const update = { ...body };
+        delete update.kind;
+        await fetchJson(`${apiBase}/crypto-providers/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(update),
+        });
+        showToast(`Provider <strong>${body.label}</strong> updated.`);
+      } else {
+        await fetchJson(`${apiBase}/crypto-providers`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        showToast(`Provider <strong>${body.label}</strong> created.`);
+      }
+      bootstrap.Modal.getInstance(document.getElementById('editorModal')).hide();
+      loadProviders();
+    } catch (e) {
+      errBody.textContent = e.message;
+      errBox.classList.remove('d-none');
+    }
+  }
+
+  // ── Activation modal ───────────────────────────────────────────────────────
+
+  function openActivate(id) {
+    const p = _providers.find(x => x.id === id);
+    if (!p) return;
+    document.getElementById('activateProvLabel').textContent = p.label;
+    document.getElementById('activateError').classList.add('d-none');
+    document.getElementById('activatePin').value = '';
+    const isOperator = (p.auth_secret_ref || '') === 'operator:prompt';
+    document.getElementById('activatePinRow').classList.toggle('d-none', !isOperator);
+    document.getElementById('activateAutoNote').classList.toggle('d-none', isOperator);
+    document.getElementById('activateBtn').onclick = () => doActivate(id, isOperator);
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('activateModal')).show();
+  }
+
+  async function doActivate(id, isOperator) {
+    const errBox = document.getElementById('activateError');
+    errBox.classList.add('d-none');
+    const body = isOperator ? { pin: document.getElementById('activatePin').value } : {};
+    try {
+      await fetchJson(`${apiBase}/crypto-providers/${id}/activate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      bootstrap.Modal.getInstance(document.getElementById('activateModal')).hide();
+      showToast(`Provider activated.`);
+      loadProviders();
+    } catch (e) {
+      errBox.textContent = e.message;
+      errBox.classList.remove('d-none');
+    }
+  }
+
+  async function deactivateProvider(id) {
+    try {
+      await fetchJson(`${apiBase}/crypto-providers/${id}/deactivate`, { method: 'POST' });
+      showToast(`Provider deactivated.`);
+      loadProviders();
+    } catch (e) { showToast(`Deactivate failed: ${e.message}`, 'danger'); }
+  }
+
+  // ── Delete ─────────────────────────────────────────────────────────────────
+
+  function confirmDelete(id, label) {
+    document.getElementById('confirmBody').innerHTML =
+      `Delete provider <strong>${label}</strong>? Refused if any keys still reference it.`;
+    document.getElementById('confirmBtn').onclick = () => deleteProvider(id, label);
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('confirmModal')).show();
+  }
+  async function deleteProvider(id, label) {
+    bootstrap.Modal.getInstance(document.getElementById('confirmModal')).hide();
+    try {
+      await fetchJson(`${apiBase}/crypto-providers/${id}`, { method: 'DELETE' });
+      showToast(`Provider <strong>${label}</strong> deleted.`);
+      loadProviders();
+    } catch (e) { showToast(`Delete failed: ${e.message}`, 'danger'); }
+  }
+
+  window.onload = loadProviders;
+</script>
+{% endblock %}

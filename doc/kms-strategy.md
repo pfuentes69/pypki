@@ -43,24 +43,51 @@ implementation.
 
 ## 2. Status
 
-### What is already in place
+### What is in place (Phases 0–6 complete)
 
-- `KeyManagementService` ([pypki/kms.py](../pypki/kms.py)) is the single
-  signing entry point. CAs and OCSP responders no longer hold key material
-  — they call `kms.sign_digest(key_id, digest)`.
-- `KeyStorage` rows with `storage_type='HSM'` are loadable by the KMS and
-  produce a `KeyTools` whose `sign_digest()` dispatches to PyKCS11.
-- The DER-patching flow (build with a dummy key → extract TBS → sign via KMS
-  → splice signature) works for both X.509 issuance and OCSP responses, so
-  the "software vs HSM" branch is hidden from the higher-level callers.
+- `CryptoProviders` data model with `kind ∈ {software, pkcs11}`, full
+  CRUD via the management API + UI, activation lifecycle, audit logging.
+- `SoftwareBackend` and `PKCS11Backend` implement the
+  ``CryptoBackend`` Protocol; `KeyManagementService` dispatches through
+  it. CAs / OCSP responders never see PKCS#11.
+- Software keys encrypted at rest under per-provider KEKs derived from
+  `HSM_PIN_KEK` via HKDF-SHA256; AES-256-GCM wrap.
+- HSM signing produces correct, verifiable signatures: RSA via
+  `CKM_RSA_PKCS` with the SHA-256 DigestInfo prefix; ECDSA via
+  `CKM_ECDSA` with `(r, s)` DER-encoded.
+- One PKCS#11 session per `pkcs11` provider, opened on activation,
+  closed on deactivation/shutdown, reconnect-on-session-invalid.
+- `auth_secret_ref` resolvers: `db:encrypted` (master KEK from
+  `HSM_PIN_KEK`), `env:NAME`, `operator:prompt`. `vault:` reserved.
+- `auto_activate` enforced at validation time; `operator:prompt` is
+  exclusive with `auto_activate=TRUE`.
+- Provider activation API: `POST /activate` (with operator PIN body
+  for `operator:prompt`), `POST /deactivate`, `GET /status`. Auto-
+  activation runs at app startup; failures are logged loudly but do
+  not block boot.
+- Provider-aware key API: `POST /api/kms/keys` (generate),
+  `POST /api/kms/keys/import` (register existing on-token key),
+  `DELETE /api/kms/keys/{id}` (refused with 409 if in-use; honours
+  `key_owned` so imported keys leave the on-token objects intact).
+- Mandatory CKA_* attribute set enforced on every PKCS#11-generated
+  key (kms-strategy.md §8.2).
+- Pytest suite parametrised over both backends; 54 tests covering the
+  full API surface, multi-threaded sign safety, lifecycle invariants,
+  and Phase 6 hardening (hex validation, symmetric-type rejection,
+  dead-code regressions).
 
-### What is broken or missing
+### What is pending
 
-The HSM path has 12 concrete defects ranging from "RSA signatures are
-malformed" to "no API to generate a key on the token." Multi-HSM support, an
-operator-facing provider concept, and software-key encryption-at-rest do not
-exist. The full punch-list is in [hsm-gap-analysis.md](hsm-gap-analysis.md);
-this document specifies the design that closes them.
+- **Phase 7 — fidelity pass against real-vendor PKCS#11 implementations**
+  (YubiHSM 2 simulator, Thales DPoD, AWS CloudHSM). Held back until
+  the hardware / SDK becomes available to the project. SoftHSM2 is
+  the canonical regression target until then. See §13 Phase 7.
+- `vault:` resolver — placeholder in the data model; raises
+  `NotImplementedError`. Concrete implementation is a separate
+  initiative.
+
+The historical 12-gap punch list is fully closed; details and
+file-line pointers are in [hsm-gap-analysis.md](hsm-gap-analysis.md).
 
 ---
 
@@ -636,12 +663,35 @@ is fixed against the wrong shape.
 - Gap 12 (stale `migrate_keys_to_kms.py` reference in OCSP error path).
 - Expand SoftHSM-based test coverage.
 
-**Phase 7 — fidelity pass.**
+**Phase 7 — fidelity pass.** *Pending hardware/SDK availability.*
 
-- Run the full HSM test suite against the YubiHSM 2 simulator.
-- Run the full HSM test suite against a Thales DPoD trial (if available).
-- Document any vendor-specific findings; gate any exceptions behind
+The pyPKI KMS layer (Phases 0–6) is feature-complete and exercised
+end-to-end against SoftHSM2 in CI. Phase 7 — running the same suite
+against real-vendor implementations to confirm portability — is held
+back until at least one of the following becomes available to the
+project:
+
+- the **YubiHSM 2 simulator** (Yubico SDK, requires a developer
+  download), or
+- a **Thales DPoD trial** (real Luna firmware behind their API;
+  registration required), or
+- an **AWS CloudHSM** instance (Luna under the hood; chargeable).
+
+When any of those is available, the work is:
+
+- Run the full HSM test suite (the parametrised pytest matrix from
+  Phase 0.4 plus the Phase 5 generate / import / delete tests) against
+  the new provider with `kind='pkcs11'` and the appropriate
+  `module_path`.
+- Document any vendor-specific findings; gate exceptions behind
   provider `extra_json` flags rather than code branches.
+- Update the conservative-subset table in §8.1 if a target rejects any
+  of the listed mechanisms.
+
+Until then, treat the SoftHSM2 suite as the canonical regression target.
+Operators deploying against a real HSM today should expect the
+implementation to work given the §8 conformance constraints, but the
+formal "release-ready against vendor X" claim is pending.
 
 ---
 
@@ -668,8 +718,9 @@ For the consolidated plan to be considered "done":
    exist.
 7. Audit log entries are produced for every provider lifecycle and key
    lifecycle event.
-8. The fidelity-pass test suite passes against YubiHSM 2 simulator (Thales
-   DPoD optional but documented).
+8. *(deferred)* The fidelity-pass test suite passes against YubiHSM 2
+   simulator (Thales DPoD optional but documented). Held back until the
+   simulator / trial is available — see Phase 7 in §13.
 
 ---
 

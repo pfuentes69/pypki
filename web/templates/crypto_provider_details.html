@@ -1,0 +1,247 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="/crypto_providers.html">Crypto Providers</a></li>
+    <li class="breadcrumb-item active" id="crumbLabel">…</li>
+  </ol>
+</nav>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <div>
+    <h4 class="mb-1" id="provLabelHeader">…</h4>
+    <div>
+      <span id="provKindBadge"></span>
+      <span id="provStateBadge" class="ms-1"></span>
+      <span id="provDefaultBadge" class="ms-1"></span>
+    </div>
+  </div>
+  <div class="d-flex gap-2" id="headerActions"></div>
+</div>
+
+<div class="card shadow-sm mb-4">
+  <div class="card-body">
+    <dl class="row mb-0 small">
+      <dt class="col-sm-3 text-muted">Module path</dt>
+      <dd class="col-sm-9"><code id="provModulePath">—</code></dd>
+      <dt class="col-sm-3 text-muted">Slot label</dt>
+      <dd class="col-sm-9"><code id="provSlotLabel">—</code></dd>
+      <dt class="col-sm-3 text-muted">Auth kind</dt>
+      <dd class="col-sm-9" id="provAuthKind">—</dd>
+      <dt class="col-sm-3 text-muted">Auth secret source</dt>
+      <dd class="col-sm-9" id="provAuthSecretRef">—</dd>
+      <dt class="col-sm-3 text-muted">Auto-activate</dt>
+      <dd class="col-sm-9" id="provAutoActivate">—</dd>
+      <dt class="col-sm-3 text-muted">Description</dt>
+      <dd class="col-sm-9" id="provDescription">—</dd>
+      <dt class="col-sm-3 text-muted">Created</dt>
+      <dd class="col-sm-9 small text-muted" id="provCreatedAt">—</dd>
+    </dl>
+  </div>
+</div>
+
+<div class="d-flex justify-content-between align-items-center mb-2">
+  <h5 class="mb-0">Keys</h5>
+  <a class="btn btn-outline-primary btn-sm" id="goToKeysBtn" href="#">
+    <i class="bi bi-key me-1"></i>Manage keys
+  </a>
+</div>
+<div class="card shadow-sm">
+  <div class="card-body p-0">
+    <table class="table mb-0" id="keysTable">
+      <thead class="table-light">
+        <tr>
+          <th>Id</th>
+          <th>Type</th>
+          <th>Label</th>
+          <th>Storage</th>
+          <th>HSM CKA_ID</th>
+          <th>Usage</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+      <tbody id="keysBody">
+        <tr><td colspan="7" class="text-muted small p-3">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block modals %}
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:9999">
+  <div id="toast" class="toast align-items-center text-bg-success border-0" role="alert">
+    <div class="d-flex">
+      <div class="toast-body" id="toastMsg"></div>
+      <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const _qs = new URLSearchParams(window.location.search);
+  const _providerId = parseInt(_qs.get('id'), 10);
+
+  function showToast(msg, type = 'success') {
+    const el = document.getElementById('toast');
+    document.getElementById('toastMsg').innerHTML = msg;
+    el.className = `toast align-items-center text-bg-${type} border-0`;
+    bootstrap.Toast.getOrCreateInstance(el, { delay: 3000 }).show();
+  }
+
+  async function fetchJson(url, init) {
+    const res = await fetch(url, init);
+    let data = {}; try { data = await res.json(); } catch (_) {}
+    if (!res.ok) {
+      const desc = (data && (data.description || data.error)) || `HTTP ${res.status}`;
+      throw new Error(typeof desc === 'string' ? desc : JSON.stringify(desc));
+    }
+    return data;
+  }
+
+  function kindBadge(kind) {
+    if (kind === 'pkcs11') return '<span class="badge bg-info text-dark">pkcs11</span>';
+    return '<span class="badge bg-secondary">software</span>';
+  }
+  function stateBadge(state) {
+    return state === 'active'
+      ? '<span class="badge bg-success">active</span>'
+      : '<span class="badge bg-secondary">inactive</span>';
+  }
+
+  async function load() {
+    if (!_providerId) {
+      document.getElementById('provLabelHeader').textContent = 'Missing provider id';
+      return;
+    }
+    try {
+      const [p, status, keys] = await Promise.all([
+        fetchJson(`${apiBase}/crypto-providers/${_providerId}`),
+        fetchJson(`${apiBase}/crypto-providers/${_providerId}/status`).catch(() => ({})),
+        fetchJson(`${apiBase}/kms/keys?provider_id=${_providerId}`).catch(() => []),
+      ]);
+      renderHeader(p, status);
+      renderInfo(p);
+      renderKeys(keys);
+    } catch (e) {
+      document.getElementById('provLabelHeader').textContent = 'Provider not found';
+      document.getElementById('keysBody').innerHTML =
+        `<tr><td colspan="7" class="text-danger small p-3">Failed to load: ${e.message}</td></tr>`;
+    }
+  }
+
+  function renderHeader(p, status) {
+    document.getElementById('provLabelHeader').textContent = p.label;
+    document.getElementById('crumbLabel').textContent = p.label;
+    document.getElementById('provKindBadge').innerHTML = kindBadge(p.kind);
+    document.getElementById('provStateBadge').innerHTML = stateBadge((status || {}).state || 'inactive');
+    document.getElementById('provDefaultBadge').innerHTML =
+      p.is_default ? '<span class="badge bg-light text-dark border">default</span>' : '';
+
+    document.getElementById('goToKeysBtn').href = `/kms_keys.html?provider_id=${p.id}`;
+
+    const actions = [];
+    const isActive = ((status || {}).state || 'inactive') === 'active';
+    if (window._isAdmin) {
+      if (isActive) {
+        actions.push(
+          `<button class="btn btn-outline-warning btn-sm" onclick="deactivate()"><i class="bi bi-power me-1"></i>Deactivate</button>`
+        );
+      } else {
+        const isOperator = (p.auth_secret_ref || '') === 'operator:prompt';
+        if (isOperator) {
+          actions.push(
+            `<button class="btn btn-outline-success btn-sm" onclick="activatePromptPin()"><i class="bi bi-play-circle me-1"></i>Activate (PIN)</button>`
+          );
+        } else {
+          actions.push(
+            `<button class="btn btn-outline-success btn-sm" onclick="activate()"><i class="bi bi-play-circle me-1"></i>Activate</button>`
+          );
+        }
+      }
+    }
+    if (window._isSuperAdmin) {
+      actions.push(
+        `<a class="btn btn-outline-secondary btn-sm" href="/crypto_providers.html#edit-${p.id}"
+           onclick="event.preventDefault(); window.location='/crypto_providers.html?edit=${p.id}'"><i class="bi bi-pencil me-1"></i>Edit</a>`
+      );
+    }
+    document.getElementById('headerActions').innerHTML = actions.join('');
+  }
+
+  function renderInfo(p) {
+    const set = (id, v) => { document.getElementById(id).textContent = (v == null || v === '') ? '—' : v; };
+    set('provModulePath',      p.module_path);
+    set('provSlotLabel',       p.slot_label);
+    set('provAuthKind',        p.auth_kind);
+    document.getElementById('provAuthSecretRef').innerHTML =
+      p.auth_secret_ref ? `<code class="small">${p.auth_secret_ref}</code>` : '—';
+    document.getElementById('provAutoActivate').innerHTML =
+      p.auto_activate
+        ? '<i class="bi bi-check-circle text-success me-1"></i>Auto-activate at startup'
+        : '<i class="bi bi-x-circle text-muted me-1"></i>Operator must activate after startup';
+    set('provDescription',     p.description);
+    set('provCreatedAt',       (p.created_at || '').slice(0, 19).replace('T', ' '));
+  }
+
+  function renderKeys(keys) {
+    const tbody = document.getElementById('keysBody');
+    if (!keys.length) {
+      tbody.innerHTML = `<tr><td colspan="7" class="text-muted small p-3">No keys on this provider yet.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = keys.map(k => {
+      const usage = (k.usage && k.usage.total) || 0;
+      const usageBadge = usage > 0
+        ? `<span class="badge bg-warning text-dark" title="In use by ${k.usage.cas} CA / ${k.usage.ocsp_responders} OCSP / ${k.usage.certificates} cert">${usage} ref(s)</span>`
+        : '<span class="text-muted small">unused</span>';
+      const cka = k.hsm_token_id ? `<code class="small">${k.hsm_token_id}</code>` : '<span class="text-muted">—</span>';
+      const created = (k.created_at || '').slice(0, 19).replace('T', ' ');
+      const labelStr = k.label || '<span class="text-muted">—</span>';
+      return `
+        <tr>
+          <td>${k.id}</td>
+          <td><code class="small">${k.key_type || ''}</code></td>
+          <td>${labelStr}</td>
+          <td><span class="badge bg-light text-dark border">${k.storage_type}</span></td>
+          <td>${cka}</td>
+          <td>${usageBadge}</td>
+          <td class="small text-muted">${created}</td>
+        </tr>`;
+    }).join('');
+  }
+
+  async function activate() {
+    try {
+      await fetchJson(`${apiBase}/crypto-providers/${_providerId}/activate`, { method: 'POST' });
+      showToast('Provider activated.');
+      load();
+    } catch (e) { showToast(`Activate failed: ${e.message}`, 'danger'); }
+  }
+
+  function activatePromptPin() {
+    const pin = window.prompt('Enter the PIN to activate this provider:');
+    if (pin == null) return;
+    fetchJson(`${apiBase}/crypto-providers/${_providerId}/activate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin }),
+    }).then(() => { showToast('Provider activated.'); load(); })
+      .catch(e => showToast(`Activate failed: ${e.message}`, 'danger'));
+  }
+
+  async function deactivate() {
+    try {
+      await fetchJson(`${apiBase}/crypto-providers/${_providerId}/deactivate`, { method: 'POST' });
+      showToast('Provider deactivated.');
+      load();
+    } catch (e) { showToast(`Deactivate failed: ${e.message}`, 'danger'); }
+  }
+
+  window.onload = load;
+</script>
+{% endblock %}

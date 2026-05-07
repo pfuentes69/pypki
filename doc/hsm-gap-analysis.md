@@ -224,69 +224,61 @@ operator-unfriendly. Targeted in Phase 5.
 
 ---
 
-## Gap 9 — `hsm_token_id` contract is unchecked
+## Gap 9 — `hsm_token_id` contract is unchecked  ✅ CLOSED (Phase 6)
 
-**Where:** [pypki/pkcs11_helper.py:184](../pypki/pkcs11_helper.py#L184)
+**Was:** [pypki/pkcs11_helper.py:184](../pypki/pkcs11_helper.py#L184)
+called `bytes.fromhex(key_id)` deep in the sign path, so a typo at insert
+or import time produced a confusing PKCS#11 error on first sign rather
+than a clear validation failure.
 
-`PKCS11Helper.get_key_by_id` calls `bytes.fromhex(key_id)`. The schema
-column is `VARCHAR(255)` with no validation, and `KMS.load_key` does not
-sanity-check the value before passing it through. A non-hex value crashes
-at first sign, not at load time.
-
-**Fix:** validate at insert/load. Decide whether `CKA_ID` is stored as
-hex-text or raw bytes — the strategy doc picks raw bytes
-(`VARBINARY(255)`); pick one and enforce.
-
-**Severity:** ergonomics — fail-late instead of fail-early. Targeted in
-Phase 6.
-
----
-
-## Gap 10 — `storage_type='Encrypted'` is enum-only, no decrypt path
-
-**Where:** schema [pypki/db.py:1839](../pypki/db.py#L1839); load handling
-[pypki/kms.py:57](../pypki/kms.py#L57).
-
-`load_key` treats `'Encrypted'` exactly like `'Plain'` — it runs
-`load_pem_private_key()` on the raw column. If anything ever stores a real
-encrypted blob there, the load crashes. No `generate_key` path produces
-this storage type.
-
-**Fix:** the Phase 0 migration converts `Plain` rows to `Encrypted` under
-the default provider's KEK and gives `Encrypted` an actual decrypt path. By
-the time Phase 6 is reached this gap is closed by construction; confirm
-and mark resolved.
-
-**Severity:** latent — only bites if someone uses the value. Closed by
-construction in Phase 0; verified in Phase 6.
+**Now:** validation lives at the API boundaries — `KMS.import_pkcs11_key`
+and `PKCS11Backend` (load / find / delete) all route through
+`pypki.backends.pkcs11._validate_cka_id_hex`, which checks for
+non-empty + even-length + all-hex and produces a `ValueError` with the
+offending value. The hex-text contract is documented; storing as raw
+`VARBINARY` was deferred (would require a per-row migration with no
+operational benefit beyond size).
 
 ---
 
-## Gap 11 — AES key entries cannot round-trip through the cache
+## Gap 10 — `storage_type='Encrypted'` is enum-only, no decrypt path  ✅ CLOSED (Phase 0.2 + Phase 6)
 
-**Where:** [pypki/kms.py:237](../pypki/kms.py#L237) writes AES keys with
-`storage_type='Plain'`; [pypki/kms.py:62](../pypki/kms.py#L62) loads
-`'Plain'` rows by calling `load_pem_private_key()`.
+**Was:** `load_key` treated `'Encrypted'` exactly like `'Plain'` — ran
+`load_pem_private_key()` on the raw column.
 
-Calling `kms.load_key(<AES id>)` will throw because the column contains
-base64, not PEM. No caller does this today, so it is latent — but the
-storage-type taxonomy needs a `Symmetric` value (or equivalent) and a
-separate load branch.
-
-**Fix:** add `storage_type='Symmetric'` (already in the strategy doc's
-schema, [§4.2](kms-strategy.md#42-keystorage-changed)) with its own load
-path. Targeted in Phase 6.
-
-**Severity:** latent — only bites if symmetric keys are ever loaded.
+**Now:** `'Encrypted'` is a real, exercised storage type:
+- Phase 0.2 migration encrypts `'Plain'` software rows under the per-
+  provider KEK and rewrites them as `'Encrypted'`. `KMS._finalise` and
+  the inline insert paths in `insert_ca` / OCSP creation also write
+  `'Encrypted'` for any new asymmetric software key.
+- `SoftwareBackend.load_key` decrypts `'Encrypted'` via
+  `decrypt_pem(blob, kek)`, with a defensive fallback that detects
+  legacy plaintext-PEM-in-Encrypted rows (operators who upgraded from a
+  pre-Phase-0 deployment) and loads them as plaintext with a loud
+  warning until the migration runs again with a configured `HSM_PIN_KEK`.
+- The Phase 0.2 migration also picks up those legacy plaintext-in-
+  Encrypted rows and re-encrypts them properly when the KEK is available.
 
 ---
 
-## Gap 12 — Stale documentation reference in OCSP error
+## Gap 11 — AES key entries cannot round-trip through the cache  ✅ CLOSED (Phase 6)
 
-**Where:** [pypki/ocsp_responder.py:175](../pypki/ocsp_responder.py#L175)
+**Was:** `KMS._finalise_symmetric` wrote AES keys with `storage_type='Plain'`
+and the load path tried to parse them as PEM private keys, crashing.
 
-The error message instructs the operator to run `migrate_keys_to_kms.py`,
-which is no longer shipped. Update the message to point at the current
-procedure (provider configuration via the management UI / API).
+**Now:** `_finalise_symmetric` writes `'Symmetric'`. The Phase 0.1 schema
+already had `'Symmetric'` in the `KeyStorage.storage_type` enum;
+`SoftwareBackend.load_key` now rejects it explicitly with a clear message
+(`"the asymmetric load/sign path does not handle these. Symmetric-key
+operations are not yet exposed through the KMS API."`) instead of silently
+crashing the PEM parser. Symmetric-key signing / wrapping / unwrapping is
+out of scope for the current KMS contract; the rejection is the explicit
+contract boundary.
 
-**Severity:** doc rot. Targeted in Phase 6.
+---
+
+## Gap 12 — Stale documentation reference in OCSP error  ✅ CLOSED (Phase 6)
+
+The OCSP responder's "no KMS key" error now points at the management API
+(`OCSPResponders.private_key_reference`) instead of the long-retired
+`migrate_keys_to_kms.py` script.

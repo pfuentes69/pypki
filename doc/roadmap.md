@@ -2,6 +2,11 @@
 
 This document captures medium-term improvements that are valuable, but not required for the current release.
 
+For the **current execution status** of every item below — what's done, what's
+in flight, what's pending, what's deferred — see
+[PROGRESS.md](PROGRESS.md). Both files are kept in sync as new requirements
+arrive: this one is the strategic view, that one is the tactical status board.
+
 ## 1. Reliability And Testing
 
 - Introduce automated tests for the core issuance, revocation, CRL, OCSP, EST, and user-management flows.
@@ -33,7 +38,7 @@ block production use.
 - **Operator UX.** Provider management API + UI (CRUD, activate/deactivate); per-provider key management API + UI (list, generate RSA/ECDSA, import on-token keys, delete) — kms-strategy.md §9–10, closes Gap 8.
 - **Hardening.** Validate `hsm_token_id` at insert/load (Gap 9); give symmetric keys their own storage taxonomy (Gap 11); update the stale `migrate_keys_to_kms.py` OCSP error reference (Gap 12).
 - **Dev environment.** SoftHSM2-based dev/CI environment first (already wired into the Docker setup; see kms-strategy.md §12 and [softhsm2-manual.md](softhsm2-manual.md)). Gaps 1, 2, 6, 7 are not safely fixable without it.
-- **Fidelity pass.** Run the full HSM test suite against the YubiHSM 2 simulator and a Thales DPoD trial before declaring HSM support release-ready.
+- **Fidelity pass.** *Pending hardware/SDK availability.* Run the full HSM test suite against the YubiHSM 2 simulator and / or a Thales DPoD trial (or AWS CloudHSM as a Luna-equivalent fallback) before declaring HSM support release-ready against those vendors. SoftHSM2 remains the canonical regression target until then. See [kms-strategy.md §13 Phase 7](kms-strategy.md).
 - **Testing.** Parameterise the signing suite over the two backends so every test runs once against `software-default` and once against `softhsm-dev` in CI — recovers the test-parity benefit of unified PKCS#11 without making SoftHSM the production path.
 
 ## 4. PKI And Protocol Maturity
@@ -62,3 +67,28 @@ block production use.
 - Keep operational docs aligned with the Docker-first deployment path and current utility scripts.
 - Separate historical design notes from current operator documentation more clearly.
 - Add upgrade notes for schema-changing releases so operators know when `reset_pki.py` is sufficient and when a migration script is needed.
+
+## 8. Functional Improvements
+
+This section is the home for change requests that add new product
+capabilities, distinct from the reliability / security / polish
+improvements above. New requirements coming in from operators or
+testing land here first; once accepted they get a corresponding
+`[pending]` entry in [PROGRESS.md](PROGRESS.md).
+
+- **Self-signed certificate option in the request flow.** Today the
+  certificate-request page requires picking both a CA and a template.
+  Add a "Self-signed" option — most likely a sentinel entry at the top
+  of the CA dropdown — so an operator can generate a one-off self-signed
+  certificate without involving any managed CA.
+  Behaviour:
+  - The selected template still drives subject DN, validity, and
+    extensions.
+  - The freshly-generated private key signs the certificate as its own
+    issuer (subject == issuer).
+  - The KMS path is unchanged: the new key goes through the default
+    software provider exactly as in the current key-generation flow.
+  - The result is recorded in the `Certificates` table with `ca_id`
+    NULL (already nullable in the schema) plus an explicit
+    `is_self_signed` marker so the certificate list can show the
+    distinction without a JOIN gymnastic.

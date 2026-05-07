@@ -1,195 +1,117 @@
+"""
+Thin PyKCS11 wrapper used by :class:`pypki.backends.PKCS11Backend`.
+
+Scope after Phase 6: session lifecycle only — load the PKCS#11 module,
+open and login a session against a labelled token slot, hand the live
+``PyKCS11.Session`` to the backend, and tear it all down on close.
+Everything semantically interesting (mechanism dispatch, mandatory
+CKA_* attributes, generate / find / delete with the right semantics,
+reconnect-on-session-invalid, locking) lives in
+``pypki/backends/pkcs11.py``.
+
+The legacy methods that previously lived here (``get_token_info``,
+``get_certificates``, ``generate_private_key``, etc.) were unused and
+have been removed; the eight-method audit is recorded in the Phase 5
+review notes.
+"""
 import PyKCS11
-import getpass
-import os
-from cryptography import x509
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.x509.oid import NameOID
 
 from .log import logger
 
-PKCS11_LIB = "/usr/local/lib/pkcs11/libeTPkcs11.dylib"
 
 class PKCS11Helper:
-    def __init__(self, lib_path=PKCS11_LIB):
+    """PKCS#11 session lifecycle wrapper. Owns one ``PyKCS11.Session``
+    for the lifetime of an activation."""
+
+    def __init__(self, lib_path: str):
+        """
+        Load the PKCS#11 module at ``lib_path``. The path must be supplied
+        explicitly — every legitimate caller now sources it from the
+        ``CryptoProviders.module_path`` column, and falling back to a
+        platform-specific default would silently mask a misconfigured
+        provider on a different host.
+        """
+        if not lib_path:
+            raise ValueError(
+                "PKCS11Helper: lib_path is required (typically sourced from "
+                "CryptoProviders.module_path; see doc/kms-strategy.md §4.1)."
+            )
         self.__pkcs11 = PyKCS11.PyKCS11Lib()
         self.__pkcs11.load(lib_path)
-        self.__session = None
+        self.__session: PyKCS11.Session | None = None
 
-    def get_token_info(self):
-        slots = self.__pkcs11.getSlotList(tokenPresent=True)
-        if not slots:
-            raise RuntimeError("No PKCS#11 device found")
-        
-        token_info = self.__pkcs11.getTokenInfo(slots[0])
-        return {
-            "label": token_info.label.strip(),
-            "manufacturer": token_info.manufacturerID.strip(),
-            "model": token_info.model.strip(),
-            "serial": token_info.serialNumber.strip()
-        }
-    
-    def open_session(self, token_password: str) -> PyKCS11.Session: 
+    # ── session lifecycle ────────────────────────────────────────────────────
+
+    def open_session(self, token_password: str, slot_label: str = None) -> PyKCS11.Session:
+        """
+        Open a session against the slot whose token label matches
+        ``slot_label``. When ``slot_label`` is None, fall back to the first
+        slot with an initialised token (and log a warning) — preserved for
+        legacy callers that pre-date the provider model.
+
+        Matching by ``CK_TOKEN_INFO.label`` is the only stable way to address
+        a token: numeric slot ids are not stable across reinitialisations
+        (SoftHSM2 randomises them at ``--init-token`` time precisely to force
+        this discipline; real HSMs change them across reboots, firmware
+        updates, or when partitions are added).
+        """
         slots = self.__pkcs11.getSlotList(tokenPresent=True)
         if not slots:
             raise RuntimeError("No PKCS#11 tokens found")
 
-        #self.__session = self.__pkcs11.openSession(slots[0], PyKCS11.CKF_RW_SESSION)
-        #self.__session.login(token_password)
-        self.__session = self.__pkcs11.openSession(slots[0], PyKCS11.CKF_RW_SESSION | PyKCS11.CKF_SERIAL_SESSION)
+        chosen = None
+        if slot_label:
+            target = slot_label.strip()
+            for slot in slots:
+                try:
+                    info = self.__pkcs11.getTokenInfo(slot)
+                except PyKCS11.PyKCS11Error:
+                    continue
+                if info.label.strip() == target:
+                    chosen = slot
+                    break
+            if chosen is None:
+                available = []
+                for slot in slots:
+                    try:
+                        available.append(self.__pkcs11.getTokenInfo(slot).label.strip())
+                    except PyKCS11.PyKCS11Error:
+                        pass
+                raise RuntimeError(
+                    f"PKCS#11: no token with label {slot_label!r} found "
+                    f"(available labels: {available})"
+                )
+        else:
+            # Skip placeholder slots whose token is not initialised
+            # (SoftHSM2 reports a free slot at id 0 alongside initialised
+            # tokens) so we land on something usable.
+            for slot in slots:
+                try:
+                    info = self.__pkcs11.getTokenInfo(slot)
+                except PyKCS11.PyKCS11Error:
+                    continue
+                if int(info.flags) & PyKCS11.CKF_TOKEN_INITIALIZED:
+                    chosen = slot
+                    break
+            if chosen is None:
+                chosen = slots[0]
+            logger.warning(
+                "PKCS#11: open_session called without slot_label; falling back "
+                f"to slot id={chosen}. Configure CryptoProviders.slot_label to "
+                "make this stable across reinitialisations."
+            )
+
+        self.__session = self.__pkcs11.openSession(
+            chosen, PyKCS11.CKF_RW_SESSION | PyKCS11.CKF_SERIAL_SESSION
+        )
         self.__session.login(str(token_password).encode("utf-8"), PyKCS11.CKU_USER)
-
-        return self.__session
-    
-    def get_session(self) -> PyKCS11.Session: 
         return self.__session
 
-    def close_session(self):
+    def get_session(self) -> PyKCS11.Session:
+        return self.__session
+
+    def close_session(self) -> None:
         if self.__session:
             self.__session.logout()
             self.__session.closeSession()
             self.__session = None
-
-
-    def get_objects(self, obj_class):
-        return self.__session.findObjects([{PyKCS11.CKA_CLASS: obj_class}])
-
-
-    def get_certificates(self):
-        try:
-            # Attempt to retrieve certificates
-            certs = self.__session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_CERTIFICATE)])
-            return certs
-        except PyKCS11.PyKCS11Error as e:
-            logger.error(f"❌ Error retrieving certificates: {e}")
-            return []
-
-
-    def get_ca_certificates(self):
-        return [cert for cert in self.list_certificates() if "CA" in str(self.__session.getAttributeValue(cert, [PyKCS11.CKA_LABEL])[0])]
-
-
-    def get_private_keys(self):
-        try:
-            # Attempt to retrieve private keys
-            # print("🔎 Searching for private keys...")
-            private_keys = self.__session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY)])
-            return private_keys
-        except PyKCS11.PyKCS11Error as e:
-            logger.error(f"❌ Error retrieving private keys: {e}")
-            return []
-
-
-    def generate_private_key(self, label, exportable=False, key_type="RSA2048"):
-        if key_type not in ["RSA2048", "ECC256p"]:
-            raise ValueError("Invalid key type. Choose 'RSA2048' or 'ECC256p'.")
-        """
-        # Generate CKA_ID based on label or random if label is empty
-        if label:
-            digest = hashes.Hash(hashes.SHA1())
-            digest.update(label.encode())
-            cka_id = digest.finalize()[:8]  # Use first 8 bytes
-        else:
-            cka_id = os.urandom(8)  # Generate random 8-byte ID
-        """
-        cka_id = os.urandom(8)  # Generate random 8-byte ID
-
-        if key_type == "RSA2048":
-            mechanism = PyKCS11.Mechanism(PyKCS11.CKM_RSA_PKCS_KEY_PAIR_GEN, None)
-            pub_template = [
-                (PyKCS11.CKA_LABEL, label),
-                (PyKCS11.CKA_TOKEN, True),
-                (PyKCS11.CKA_ENCRYPT, True),
-                (PyKCS11.CKA_VERIFY, True),
-                (PyKCS11.CKA_MODULUS_BITS, 2048),
-                (PyKCS11.CKA_ID, cka_id)
-            ]
-        elif key_type == "ECC256p":
-            mechanism = PyKCS11.Mechanism(PyKCS11.CKM_EC_KEY_PAIR_GEN, None)
-            ec_params = bytes([0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07])  # OID for P-256
-            pub_template = [
-                (PyKCS11.CKA_LABEL, label),
-                (PyKCS11.CKA_TOKEN, True),
-                (PyKCS11.CKA_VERIFY, True),
-                (PyKCS11.CKA_EC_PARAMS, ec_params),
-                (PyKCS11.CKA_ID, cka_id)
-            ]
-
-
-        # ✅ Create an X.509 Distinguished Name (DN)
-        subject_name = x509.Name([
-            x509.NameAttribute(x509.oid.NameOID.COUNTRY_NAME, "ES"),
-            x509.NameAttribute(x509.oid.NameOID.ORGANIZATION_NAME, "Test"),
-            x509.NameAttribute(x509.oid.NameOID.COMMON_NAME, "Pedro Fuentes")
-        ])
-        
-        # ✅ Encode subject name in DER format
-        subject_der = subject_name.public_bytes(serialization.Encoding.DER)
-
-        # Private key template
-        priv_template = [
-            (PyKCS11.CKA_LABEL, label),
-            (PyKCS11.CKA_SUBJECT, subject_der),  # ✅ DER-encoded subject name
-            (PyKCS11.CKA_TOKEN, True),
-            (PyKCS11.CKA_SIGN, True),
-            (PyKCS11.CKA_SENSITIVE, not exportable),
-            (PyKCS11.CKA_EXTRACTABLE, exportable),
-            (PyKCS11.CKA_ID, cka_id)  # Set CKA_ID (same as public key)
-        ]
-
-        # Handle the key generation
-        try:
-            if self.__session.generateKeyPair(pub_template, priv_template, mechanism):
-                return cka_id
-            else:
-                return None
-        except PyKCS11.PyKCS11Error as e:
-            raise RuntimeError(f"Unexpected error: {str(e)}")
-
-
-    def generate_csr(self, priv_key, subject_name):
-        subject = x509.Name([
-            x509.NameAttribute(NameOID.COMMON_NAME, subject_name)
-        ])
-        
-        csr = x509.CertificateSigningRequestBuilder().subject_name(subject).sign(priv_key, hashes.SHA256())
-        return csr.public_bytes(serialization.Encoding.PEM)
-
-    def export_public_key(self, priv_key):
-        pub_key = self.__session.findObjects([{PyKCS11.CKA_CLASS: PyKCS11.CKO_PUBLIC_KEY}])[0]
-        return self.__session.getAttributeValue(pub_key, [PyKCS11.CKA_VALUE])[0]
-    
-    def insert_certificate(self, cert_pem, label):
-        cert = x509.load_pem_x509_certificate(cert_pem)
-        cert_der = cert.public_bytes(serialization.Encoding.DER)
-        
-        template = [
-            (PyKCS11.CKA_CLASS, PyKCS11.CKO_CERTIFICATE),
-            (PyKCS11.CKA_LABEL, label),
-            (PyKCS11.CKA_VALUE, cert_der),
-            (PyKCS11.CKA_TOKEN, True)
-        ]
-        self.__session.createObject(template)
-
-    def export_certificate(self, cert):
-        return self.__session.getAttributeValue(cert, [PyKCS11.CKA_VALUE])[0]
-    
-
-    def export_private_key(self, priv_key):
-        return self.__session.getAttributeValue(priv_key, [PyKCS11.CKA_VALUE])[0]
-    
-
-    def get_key_by_id(self, key_id: str) -> PyKCS11.CK_OBJECT_HANDLE:
-        # Find private key
-        key_id = bytes.fromhex(key_id)
-        priv_keys = self.__session.findObjects([
-        (PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY),
-        (PyKCS11.CKA_ID, key_id)
-        ])
-
-        if not priv_keys:
-            raise RuntimeError("Private key not found")
-
-        self.__selected_key = priv_keys[0]
-        return self.__selected_key
-    

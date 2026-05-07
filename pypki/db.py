@@ -119,34 +119,443 @@ class PKIDataBase:
             return None
 
 
-    def insert_key(self, private_key: str, storage_type: str = "Plain",
-                   public_key: str = None, key_type: str = None,
-                   hsm_slot: int = None, hsm_token_id: str = None,
-                   token_password: str = None) -> int:
-        """
-        Insert a row into KeyStorage.
-        Returns the new row id.
+    # ── CryptoProviders helpers (Phase 0.1) ───────────────────────────────────
+    #
+    # CRUD over the CryptoProviders table. The full management API will be
+    # built on top of these in a later phase — see doc/kms-strategy.md §9.
 
-        For software keys only private_key, storage_type, public_key, and
-        key_type are used.  For HSM keys also pass hsm_slot, hsm_token_id,
-        and token_password.
+    def insert_provider(self, label: str, kind: str, auth_secret_ref: str,
+                        module_path: str = None, slot_label: str = None,
+                        auth_kind: str = "pin", auto_activate: bool = False,
+                        auth_secret_blob: bytes = None, extra_json: str = "{}",
+                        description: str = None, is_default: bool = False) -> int:
+        """
+        Insert a CryptoProviders row. Returns the new row id, or None on error.
+
+        `extra_json` must be a JSON-serialised string. Provider-level validation
+        (e.g. auto_activate is incompatible with operator:prompt) is the
+        caller's responsibility — this is a thin DB helper.
         """
         try:
             db_name = self.__config["database"]
             cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
             cursor.execute(
-                "INSERT INTO KeyStorage "
-                "(private_key, storage_type, public_key, key_type, "
-                " hsm_slot, hsm_token_id, token_password) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (private_key, storage_type, public_key, key_type,
-                 hsm_slot, hsm_token_id, token_password)
+                "INSERT INTO CryptoProviders ("
+                "    label, kind, module_path, slot_label, auth_kind, auto_activate, "
+                "    auth_secret_ref, auth_secret_blob, extra_json, description, is_default"
+                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (label, kind, module_path, slot_label, auth_kind, auto_activate,
+                 auth_secret_ref, auth_secret_blob, extra_json, description, is_default)
             )
             self._local.connection.commit()
             new_id = cursor.lastrowid
             cursor.close()
-            logger.info(f"Inserted KeyStorage id={new_id}")
+            logger.info(f"Inserted CryptoProviders id={new_id} label='{label}' kind={kind}")
+            return new_id
+        except mysql.connector.Error as err:
+            logger.error(f"Error inserting CryptoProviders record: {err}")
+            return None
+
+    def get_provider_by_id(self, provider_id: int):
+        """Retrieve a CryptoProviders row by id. Returns a dict or None."""
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute("SELECT * FROM CryptoProviders WHERE id = %s", (provider_id,))
+            result = cursor.fetchone()
+            cursor.close()
+            return result if result else None
+        except mysql.connector.Error as err:
+            logger.error(f"Error retrieving CryptoProviders record: {err}")
+            return None
+
+    def get_provider_by_label(self, label: str):
+        """Retrieve a CryptoProviders row by label. Returns a dict or None."""
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute("SELECT * FROM CryptoProviders WHERE label = %s", (label,))
+            result = cursor.fetchone()
+            cursor.close()
+            return result if result else None
+        except mysql.connector.Error as err:
+            logger.error(f"Error retrieving CryptoProviders record by label: {err}")
+            return None
+
+    def list_providers(self):
+        """List all CryptoProviders rows ordered by id."""
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute("SELECT * FROM CryptoProviders ORDER BY id")
+            results = cursor.fetchall()
+            cursor.close()
+            return results or []
+        except mysql.connector.Error as err:
+            logger.error(f"Error listing CryptoProviders: {err}")
+            return []
+
+    def _encrypt_pem_under_default_provider(self, cursor, pem_text: str):
+        """
+        Resolve the default crypto provider, derive its KEK, encrypt the PEM,
+        and return (provider_id, ciphertext_blob_b64). Used by inline insert
+        paths (insert_ca, OCSP responder inserts) so new software keys land
+        in `KeyStorage` already encrypted at rest.
+
+        Raises RuntimeError if the default provider does not exist or its
+        secret cannot be resolved (e.g. HSM_PIN_KEK is not set).
+        """
+        # Local import — keep cryptography KDF/AEAD off the module load path.
+        from .key_encryption import get_provider_kek, encrypt_pem, KEKUnavailable
+        cursor.execute(
+            "SELECT * FROM CryptoProviders WHERE is_default = TRUE LIMIT 1"
+        )
+        cols = [d[0] for d in cursor.description]
+        row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError(
+                "No default crypto provider found; cannot encrypt-at-rest software keys. "
+                "Run reset_pki or apply migrations to seed 'software-default'."
+            )
+        provider = dict(zip(cols, row))
+        try:
+            kek = get_provider_kek(provider)
+        except KEKUnavailable as e:
+            raise RuntimeError(
+                f"Cannot encrypt-at-rest software key under provider "
+                f"id={provider['id']} ('{provider['label']}'): {e}"
+            )
+        pem_bytes = pem_text.encode("utf-8") if isinstance(pem_text, str) else pem_text
+        blob = encrypt_pem(pem_bytes, kek)
+        return provider["id"], blob
+
+
+    @staticmethod
+    def validate_provider_auth_config(record: dict) -> None:
+        """
+        Enforce the cross-field consistency rules from kms-strategy.md §4.1
+        on a CryptoProviders row before it is persisted:
+
+          - auto_activate=TRUE  → auth_secret_ref must be one of
+                                  db:encrypted | env:NAME | vault:path
+          - auto_activate=FALSE → auth_secret_ref must be operator:prompt
+          - auth_secret_blob is non-null iff auth_secret_ref='db:encrypted'
+
+        Raises :class:`ValueError` with a single human-readable message on
+        the first violation; safe to call from API handlers.
+        """
+        ref = (record.get("auth_secret_ref") or "").strip()
+        auto = bool(record.get("auto_activate"))
+        blob = record.get("auth_secret_blob")
+        label = record.get("label") or "<unnamed>"
+
+        is_operator = (ref == "operator:prompt")
+        is_db_enc = (ref == "db:encrypted")
+        is_env = ref.startswith("env:")
+        is_vault = ref.startswith("vault:")
+
+        if not (is_operator or is_db_enc or is_env or is_vault):
+            raise ValueError(
+                f"Provider '{label}': auth_secret_ref must be one of "
+                f"'db:encrypted', 'env:NAME', 'vault:PATH', or 'operator:prompt' "
+                f"(got {ref!r})"
+            )
+
+        if auto and is_operator:
+            raise ValueError(
+                f"Provider '{label}': auto_activate=TRUE is incompatible with "
+                f"auth_secret_ref='operator:prompt' — auto-activated providers "
+                f"must resolve their PIN without operator interaction"
+            )
+        if not auto and not is_operator:
+            raise ValueError(
+                f"Provider '{label}': auto_activate=FALSE requires "
+                f"auth_secret_ref='operator:prompt' (got {ref!r}); operator-prompt "
+                f"is the only resolver that supplies the PIN at runtime"
+            )
+
+        if is_db_enc and not blob:
+            raise ValueError(
+                f"Provider '{label}': auth_secret_ref='db:encrypted' requires "
+                f"auth_secret_blob to be populated"
+            )
+        if blob and not is_db_enc:
+            raise ValueError(
+                f"Provider '{label}': auth_secret_blob is set but "
+                f"auth_secret_ref={ref!r} (auth_secret_blob is only valid for "
+                f"'db:encrypted')"
+            )
+
+
+    def get_default_provider_id(self):
+        """Return the id of the provider with is_default=TRUE, or None."""
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute(
+                "SELECT id FROM CryptoProviders WHERE is_default = TRUE LIMIT 1"
+            )
+            row = cursor.fetchone()
+            cursor.close()
+            return row[0] if row else None
+        except mysql.connector.Error as err:
+            logger.error(f"Error retrieving default provider id: {err}")
+            return None
+
+    # Mutable provider fields per kms-strategy.md §9.1 (POST/PUT). `kind`
+    # and `is_default` are intentionally *not* in this set — kind is
+    # immutable after creation, is_default flips through a dedicated path.
+    _PROVIDER_UPDATABLE = frozenset({
+        "label", "module_path", "slot_label", "auth_kind",
+        "auto_activate", "auth_secret_ref", "auth_secret_blob",
+        "extra_json", "description",
+    })
+
+    def update_provider(self, provider_id: int, fields: dict) -> bool:
+        """
+        Update mutable fields on a CryptoProviders row. Unknown fields are
+        ignored. Returns True if the row was updated, False on no-op or
+        DB error. The caller is responsible for running
+        :meth:`validate_provider_auth_config` on the resulting record
+        beforehand.
+        """
+        updates = {k: v for k, v in fields.items() if k in self._PROVIDER_UPDATABLE}
+        if not updates:
+            return False
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+            set_clause = ", ".join(f"{col} = %s" for col in updates)
+            values = list(updates.values()) + [provider_id]
+            cursor.execute(
+                f"UPDATE CryptoProviders SET {set_clause} WHERE id = %s",
+                values,
+            )
+            self._local.connection.commit()
+            affected = cursor.rowcount
+            cursor.close()
+            return affected > 0
+        except mysql.connector.Error as err:
+            logger.error(f"Error updating CryptoProviders: {err}")
+            return False
+
+    def count_provider_keys(self, provider_id: int) -> int:
+        """Count KeyStorage rows that belong to this provider."""
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute(
+                "SELECT COUNT(*) FROM KeyStorage WHERE provider_id = %s",
+                (provider_id,),
+            )
+            row = cursor.fetchone()
+            cursor.close()
+            return int(row[0]) if row else 0
+        except mysql.connector.Error as err:
+            logger.error(f"Error counting provider keys: {err}")
+            return 0
+
+    def delete_provider(self, provider_id: int):
+        """
+        Delete a provider row. Returns:
+          - {"deleted": True}      on success
+          - {"deleted": False, "reason": "...", "key_count": N}  if blocked
+          - None                   if the provider does not exist
+
+        Refuses if any KeyStorage row references this provider, or if the
+        provider is the default. The caller's REST handler should map
+        those cases to 409 Conflict.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute(
+                "SELECT id, is_default FROM CryptoProviders WHERE id = %s",
+                (provider_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                cursor.close()
+                return None
+            if row.get("is_default"):
+                cursor.close()
+                return {"deleted": False, "reason": "is_default"}
+
+            cursor.execute(
+                "SELECT COUNT(*) AS n FROM KeyStorage WHERE provider_id = %s",
+                (provider_id,),
+            )
+            n = int(cursor.fetchone()["n"])
+            if n > 0:
+                cursor.close()
+                return {"deleted": False, "reason": "has_keys", "key_count": n}
+
+            cursor.execute(
+                "DELETE FROM CryptoProviders WHERE id = %s", (provider_id,),
+            )
+            self._local.connection.commit()
+            cursor.close()
+            return {"deleted": True}
+        except mysql.connector.Error as err:
+            logger.error(f"Error deleting CryptoProviders: {err}")
+            return {"deleted": False, "reason": "db_error", "error": str(err)}
+
+    # ── Key listing / usage / deletion (Phase 5a) ─────────────────────────────
+
+    def list_keys(self, provider_id: int = None, key_type: str = None):
+        """
+        List KeyStorage rows with optional filters. Returns dicts that omit
+        the private_key column (callers should never see encrypted material
+        through the management API).
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
+            cursor.execute(f"USE {db_name}")
+            where = []
+            params = []
+            if provider_id is not None:
+                where.append("provider_id = %s")
+                params.append(provider_id)
+            if key_type:
+                where.append("key_type = %s")
+                params.append(key_type)
+            where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+            cursor.execute(
+                "SELECT id, provider_id, key_type, public_key, label, "
+                "       storage_type, hsm_token_id, key_owned, created_at "
+                f"FROM KeyStorage{where_sql} ORDER BY id",
+                params,
+            )
+            rows = cursor.fetchall() or []
+            cursor.close()
+            return rows
+        except mysql.connector.Error as err:
+            logger.error(f"Error listing KeyStorage: {err}")
+            return []
+
+    def count_key_usage(self, key_id: int) -> dict:
+        """
+        How many CAs / OCSP responders / certificates reference this key?
+        Used by delete_key to refuse removal of an in-use key (kms-strategy
+        §9.2 — DELETE returns 409 when usage > 0).
+        """
+        out = {"cas": 0, "ocsp_responders": 0, "certificates": 0}
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute(
+                "SELECT COUNT(*) FROM CertificationAuthorities "
+                "WHERE private_key_reference = %s", (key_id,),
+            )
+            out["cas"] = int(cursor.fetchone()[0])
+            cursor.execute(
+                "SELECT COUNT(*) FROM OCSPResponders "
+                "WHERE private_key_reference = %s", (key_id,),
+            )
+            out["ocsp_responders"] = int(cursor.fetchone()[0])
+            cursor.execute(
+                "SELECT COUNT(*) FROM Certificates "
+                "WHERE private_key_reference = %s", (key_id,),
+            )
+            out["certificates"] = int(cursor.fetchone()[0])
+            cursor.close()
+        except mysql.connector.Error as err:
+            logger.error(f"Error counting key usage: {err}")
+        out["total"] = out["cas"] + out["ocsp_responders"] + out["certificates"]
+        return out
+
+    def delete_key(self, key_id: int):
+        """
+        Delete a KeyStorage row. Returns:
+          - {"deleted": True}                        on success
+          - {"deleted": False, "reason": "in_use", "usage": {...}}
+          - None                                     if the row does not exist
+
+        The on-token deletion for HSM keys is the caller's responsibility
+        (KMS dispatches to PKCS11Backend.delete_key first, then this row).
+        """
+        usage = self.count_key_usage(key_id)
+        if usage.get("total", 0) > 0:
+            return {"deleted": False, "reason": "in_use", "usage": usage}
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute("SELECT id FROM KeyStorage WHERE id = %s", (key_id,))
+            if cursor.fetchone() is None:
+                cursor.close()
+                return None
+            cursor.execute("DELETE FROM KeyStorage WHERE id = %s", (key_id,))
+            self._local.connection.commit()
+            cursor.close()
+            return {"deleted": True}
+        except mysql.connector.Error as err:
+            logger.error(f"Error deleting KeyStorage row: {err}")
+            return {"deleted": False, "reason": "db_error", "error": str(err)}
+
+
+    def insert_key(self, private_key: str, storage_type: str = "Plain",
+                   public_key: str = None, key_type: str = None,
+                   hsm_slot: int = None, hsm_token_id: str = None,
+                   token_password: str = None,
+                   provider_id: int = None, label: str = None,
+                   key_owned: bool = True) -> int:
+        """
+        Insert a row into KeyStorage. Returns the new row id.
+
+        For software keys only private_key, storage_type, public_key, and
+        key_type are used.  For HSM keys also pass hsm_slot, hsm_token_id,
+        and token_password.
+
+        ``key_owned`` controls whether ``KMS.delete_key`` cascades to the
+        on-token objects:
+          - ``True`` (default): pyPKI generated this key, so deletion
+            destroys the on-token objects too.
+          - ``False``: the operator imported a pre-existing on-token key;
+            deletion only removes the pyPKI registration.
+
+        If ``provider_id`` is not supplied the row is bound to the default
+        crypto provider so every new key has a provider — see
+        doc/kms-strategy.md §3-4.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+
+            if provider_id is None:
+                cursor.execute(
+                    "SELECT id FROM CryptoProviders WHERE is_default = TRUE LIMIT 1"
+                )
+                row = cursor.fetchone()
+                if row is not None:
+                    provider_id = row[0]
+
+            cursor.execute(
+                "INSERT INTO KeyStorage "
+                "(provider_id, private_key, storage_type, public_key, key_type, "
+                " label, hsm_slot, hsm_token_id, token_password, key_owned) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (provider_id, private_key, storage_type, public_key, key_type,
+                 label, hsm_slot, hsm_token_id, token_password, bool(key_owned))
+            )
+            self._local.connection.commit()
+            new_id = cursor.lastrowid
+            cursor.close()
+            logger.info(
+                f"Inserted KeyStorage id={new_id} provider_id={provider_id} "
+                f"storage_type={storage_type} key_owned={bool(key_owned)}"
+            )
             return new_id
         except mysql.connector.Error as err:
             logger.error(f"Error inserting KeyStorage record: {err}")
@@ -213,13 +622,17 @@ class PKIDataBase:
                 logger.info(f"CA bound to existing KeyStorage id={private_key_reference} (not owned)")
             elif private_key_pem:
                 pub_key_pem = public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+                default_provider_id, enc_blob = self._encrypt_pem_under_default_provider(
+                    cursor, private_key_pem
+                )
                 cursor.execute(
-                    "INSERT INTO KeyStorage (private_key, storage_type, public_key, key_type) VALUES (%s, %s, %s, %s)",
-                    (private_key_pem, "Plain", pub_key_pem, key_type)
+                    "INSERT INTO KeyStorage (provider_id, private_key, storage_type, public_key, key_type) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (default_provider_id, enc_blob, "Encrypted", pub_key_pem, key_type)
                 )
                 private_key_reference = cursor.lastrowid
                 key_owned = True
-                logger.info(f"CA private key stored in KeyStorage id={private_key_reference}")
+                logger.info(f"CA private key stored encrypted in KeyStorage id={private_key_reference} provider_id={default_provider_id}")
             else:
                 private_key_reference = None
                 key_owned = True
@@ -495,12 +908,16 @@ class PKIDataBase:
                         key_type = f"ECDSA-{public_key.curve.name}"
                     else:
                         key_type = f"RSA-{public_key.key_size}"
+                default_provider_id, enc_blob = self._encrypt_pem_under_default_provider(
+                    cursor, private_key_pem
+                )
                 cursor.execute(
-                    "INSERT INTO KeyStorage (private_key, storage_type, public_key, key_type) VALUES (%s, %s, %s, %s)",
-                    (private_key_pem, "Plain", pub_key_pem, key_type)
+                    "INSERT INTO KeyStorage (provider_id, private_key, storage_type, public_key, key_type) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (default_provider_id, enc_blob, "Encrypted", pub_key_pem, key_type)
                 )
                 private_key_reference = cursor.lastrowid
-                logger.info(f"OCSP responder private key stored in KeyStorage id={private_key_reference}")
+                logger.info(f"OCSP responder private key stored encrypted in KeyStorage id={private_key_reference} provider_id={default_provider_id}")
 
             # Resolve the issuing CA by its SKI so we can populate ca_id
             issuer_ski = ocsp_resp.get_config()["issuer_ski"]
@@ -577,13 +994,16 @@ class PKIDataBase:
                         key_type = f"ECDSA-{public_key.curve.name}"
                     else:
                         key_type = f"RSA-{public_key.key_size}"
+                default_provider_id, enc_blob = self._encrypt_pem_under_default_provider(
+                    cursor, private_key_pem
+                )
                 cursor.execute(
-                    "INSERT INTO KeyStorage (private_key, storage_type, public_key, key_type)"
-                    " VALUES (%s, %s, %s, %s)",
-                    (private_key_pem, "Plain", pub_key_pem, key_type)
+                    "INSERT INTO KeyStorage (provider_id, private_key, storage_type, public_key, key_type)"
+                    " VALUES (%s, %s, %s, %s, %s)",
+                    (default_provider_id, enc_blob, "Encrypted", pub_key_pem, key_type)
                 )
                 private_key_reference = cursor.lastrowid
-                logger.info(f"OCSP responder private key stored in KeyStorage id={private_key_reference}")
+                logger.info(f"OCSP responder private key stored encrypted in KeyStorage id={private_key_reference} provider_id={default_provider_id}")
 
             response_validity_hours = int(data.get("response_validity_hours") or 24)
             cursor.execute("""
@@ -1897,10 +2317,373 @@ class PKIDataBase:
                     )
                     self._local.connection.commit()
 
+                # ── KMS Phase 0.1 — crypto provider model scaffolding ────────────
+                # See doc/kms-strategy.md §3-4 for the design.
+                self._migrate_create_crypto_providers(cursor, db_name)
+                self._migrate_extend_keystorage_for_providers(cursor, db_name)
+                self._migrate_seed_default_provider(cursor)
+                self._migrate_backfill_keystorage_provider_id(cursor)
+
+                # ── KMS Phase 0.2 — encrypt-at-rest software keys ────────────────
+                # See doc/kms-strategy.md §6-7 for the design.
+                self._migrate_encrypt_software_keys(cursor)
+
+                # ── KMS Phase 0.4 — seed the SoftHSM2 dev provider ───────────────
+                # Gated on env var so manual installs that don't have SoftHSM
+                # don't get a phantom provider row.
+                self._migrate_seed_softhsm_provider(cursor)
+
                 cursor.close()
         except mysql.connector.Error as err:
             logger.error(f"Schema migration failed: {err}")
             raise
+
+
+    # ── KMS provider-model migrations (Phase 0.1) ─────────────────────────────
+
+    def _migrate_create_crypto_providers(self, cursor, db_name):
+        """Create the CryptoProviders table on existing installs if missing."""
+        cursor.execute(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
+            "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'CryptoProviders'",
+            (db_name,)
+        )
+        row = cursor.fetchone()
+        if row is not None and row[0] == 0:
+            logger.info("migrate_schema: creating CryptoProviders table")
+            cursor.execute("""
+                CREATE TABLE CryptoProviders (
+                    id INT PRIMARY KEY AUTO_INCREMENT,
+                    label VARCHAR(255) NOT NULL UNIQUE,
+                    kind ENUM('software', 'pkcs11') NOT NULL,
+                    module_path VARCHAR(1024),
+                    slot_label VARCHAR(255),
+                    auth_kind ENUM('pin', 'luna_role', 'yubihsm_authkey') NOT NULL DEFAULT 'pin',
+                    auto_activate BOOLEAN NOT NULL DEFAULT FALSE,
+                    auth_secret_ref VARCHAR(512) NOT NULL,
+                    auth_secret_blob VARBINARY(1024),
+                    extra_json JSON NOT NULL,
+                    description TEXT,
+                    is_default BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+            """)
+            self._local.connection.commit()
+
+    def _migrate_extend_keystorage_for_providers(self, cursor, db_name):
+        """Extend KeyStorage with provider_id, label, and the 'Symmetric' enum value.
+
+        Each step is independently checked so re-runs are no-ops.
+        """
+        # provider_id column
+        cursor.execute(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'KeyStorage' "
+            "AND COLUMN_NAME = 'provider_id'",
+            (db_name,)
+        )
+        row = cursor.fetchone()
+        if row is not None and row[0] == 0:
+            logger.info("migrate_schema: adding KeyStorage.provider_id")
+            cursor.execute(
+                "ALTER TABLE KeyStorage ADD COLUMN provider_id INT AFTER certificate_id"
+            )
+            self._local.connection.commit()
+
+        # label column
+        cursor.execute(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'KeyStorage' "
+            "AND COLUMN_NAME = 'label'",
+            (db_name,)
+        )
+        row = cursor.fetchone()
+        if row is not None and row[0] == 0:
+            logger.info("migrate_schema: adding KeyStorage.label")
+            cursor.execute(
+                "ALTER TABLE KeyStorage ADD COLUMN label VARCHAR(255) AFTER public_key"
+            )
+            self._local.connection.commit()
+
+        # FK to CryptoProviders — only add if both column and target table exist
+        cursor.execute(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS "
+            "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'KeyStorage' "
+            "AND CONSTRAINT_NAME = 'fk_keystorage_provider_id'",
+            (db_name,)
+        )
+        row = cursor.fetchone()
+        if row is not None and row[0] == 0:
+            logger.info("migrate_schema: adding fk_keystorage_provider_id")
+            cursor.execute(
+                "ALTER TABLE KeyStorage "
+                "ADD CONSTRAINT fk_keystorage_provider_id "
+                "FOREIGN KEY (provider_id) REFERENCES CryptoProviders(id)"
+            )
+            self._local.connection.commit()
+
+        # Extend storage_type ENUM with 'Symmetric' if not already present
+        cursor.execute(
+            "SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'KeyStorage' "
+            "AND COLUMN_NAME = 'storage_type'",
+            (db_name,)
+        )
+        row = cursor.fetchone()
+        if row is not None and "'Symmetric'" not in (row[0] or ""):
+            logger.info("migrate_schema: extending KeyStorage.storage_type ENUM with 'Symmetric'")
+            cursor.execute(
+                "ALTER TABLE KeyStorage MODIFY COLUMN storage_type "
+                "ENUM('Encrypted', 'Plain', 'HSM', 'Symmetric') NOT NULL"
+            )
+            self._local.connection.commit()
+
+        # KeyStorage.key_owned (introduced when import_pkcs11_key landed,
+        # parallel to CertificationAuthorities.key_owned). Distinguishes
+        # keys pyPKI generated (deletion cascades to the on-token objects)
+        # from keys an operator imported (deletion is a pyPKI-side
+        # registration removal only, the on-token objects are preserved).
+        cursor.execute(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'KeyStorage' "
+            "AND COLUMN_NAME = 'key_owned'",
+            (db_name,)
+        )
+        row = cursor.fetchone()
+        if row is not None and row[0] == 0:
+            logger.info("migrate_schema: adding KeyStorage.key_owned")
+            cursor.execute(
+                "ALTER TABLE KeyStorage ADD COLUMN key_owned BOOLEAN NOT NULL "
+                "DEFAULT TRUE AFTER storage_type"
+            )
+            # Pre-existing HSM rows came in via hand-crafted SQL (per the
+            # gap analysis pre-Phase-5) — pyPKI didn't generate them and
+            # has no claim on the on-token objects. Default them to FALSE
+            # so a subsequent delete_key doesn't unilaterally destroy on-
+            # token material the operator created out-of-band.
+            cursor.execute(
+                "UPDATE KeyStorage SET key_owned = FALSE "
+                "WHERE storage_type = 'HSM'"
+            )
+            self._local.connection.commit()
+
+    def _migrate_seed_default_provider(self, cursor):
+        """Seed the software-default provider on an existing install if no provider
+        is marked as default. Idempotent."""
+        cursor.execute("SELECT COUNT(*) FROM CryptoProviders WHERE is_default = TRUE")
+        row = cursor.fetchone()
+        if row is not None and row[0] == 0:
+            logger.info("migrate_schema: seeding software-default provider")
+            cursor.execute(
+                "INSERT INTO CryptoProviders ("
+                "    label, kind, auth_kind, auto_activate, auth_secret_ref, "
+                "    extra_json, is_default, description"
+                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    'software-default', 'software', 'pin', True,
+                    'env:HSM_PIN_KEK', '{}', True,
+                    'Default software cryptotoken. Encrypts software keys at rest '
+                    'under the KEK derived from HSM_PIN_KEK. Created automatically '
+                    'on install.'
+                )
+            )
+            self._local.connection.commit()
+
+    def _migrate_backfill_keystorage_provider_id(self, cursor):
+        """Set provider_id on existing software (Plain) KeyStorage rows that lack one.
+        HSM rows are intentionally skipped here — they will be assigned to a pkcs11
+        provider in a later migration step (Phase 0.4)."""
+        cursor.execute(
+            "SELECT id FROM CryptoProviders WHERE is_default = TRUE LIMIT 1"
+        )
+        row = cursor.fetchone()
+        if row is None:
+            # No default provider — nothing to backfill against.
+            return
+        default_provider_id = row[0]
+        cursor.execute(
+            "UPDATE KeyStorage SET provider_id = %s "
+            "WHERE provider_id IS NULL "
+            "AND storage_type IN ('Plain', 'Encrypted', 'Symmetric')",
+            (default_provider_id,)
+        )
+        if cursor.rowcount > 0:
+            logger.info(
+                f"migrate_schema: backfilled provider_id={default_provider_id} on "
+                f"{cursor.rowcount} software KeyStorage rows"
+            )
+            self._local.connection.commit()
+
+    def _migrate_encrypt_software_keys(self, cursor):
+        """
+        Re-encrypt existing software ``KeyStorage`` rows under their
+        provider's KEK so the ``private_key`` column never contains
+        plaintext PEM.
+
+        Picks up two kinds of rows:
+        - ``storage_type='Plain'`` (the obvious case)
+        - ``storage_type='Encrypted'`` whose ``private_key`` column actually
+          holds plaintext PEM (Gap 10 legacy mislabel — pre-Phase-0 pypki
+          had ``'Encrypted'`` as an enum value but no decrypt path).
+
+        Skips silently if ``HSM_PIN_KEK`` is unavailable: this keeps the
+        app bootable on a misconfigured deployment so the operator can fix
+        the env var and restart. The runtime ``SoftwareBackend.load_key``
+        path tolerates the legacy state with a warning, so signing keeps
+        working in the meantime.
+        """
+        from .key_encryption import (
+            resolve_provider_secret, derive_kek, encrypt_pem, KEKUnavailable
+        )
+
+        cursor.execute(
+            "SELECT id, provider_id, key_type, private_key, storage_type "
+            "FROM KeyStorage "
+            "WHERE private_key IS NOT NULL AND provider_id IS NOT NULL "
+            "AND storage_type IN ('Plain', 'Encrypted') "
+            "AND (key_type LIKE 'RSA-%%' OR key_type LIKE 'ECDSA-%%' "
+            "     OR key_type = 'Ed25519')"
+        )
+        candidates = cursor.fetchall()
+        # Only rows that are actually plaintext-PEM need encrypting.
+        rows = []
+        for r in candidates:
+            key_id, provider_id, key_type, blob, storage_type = r
+            blob_str = blob.decode("utf-8", "ignore") if isinstance(blob, (bytes, bytearray)) else blob
+            if storage_type == "Plain" or (
+                storage_type == "Encrypted" and isinstance(blob_str, str)
+                and blob_str.lstrip().startswith("-----BEGIN ")
+            ):
+                rows.append(r)
+        if not rows:
+            return
+
+        # Group by provider so we resolve each KEK once.
+        by_provider: dict = {}
+        for r in rows:
+            by_provider.setdefault(r[1], []).append(r)
+
+        # Fetch all relevant provider records up front.
+        providers: dict = {}
+        for pid in by_provider:
+            cursor.execute("SELECT * FROM CryptoProviders WHERE id = %s", (pid,))
+            cols = [d[0] for d in cursor.description]
+            prec_row = cursor.fetchone()
+            providers[pid] = dict(zip(cols, prec_row)) if prec_row else None
+
+        converted = 0
+        deferred = 0
+        for provider_id, group_rows in by_provider.items():
+            provider = providers.get(provider_id)
+            if not provider:
+                logger.warning(
+                    f"migrate_schema: KeyStorage rows reference missing "
+                    f"provider_id={provider_id}; leaving them as-is."
+                )
+                continue
+            try:
+                pin = resolve_provider_secret(provider)
+                kek = derive_kek(pin, provider_id)
+            except KEKUnavailable as e:
+                # Don't block app startup. The runtime load path tolerates
+                # plaintext-PEM-in-Encrypted rows (Gap 10 legacy) and Plain
+                # rows have always been tolerated.
+                deferred += len(group_rows)
+                logger.warning(
+                    f"migrate_schema: deferring encryption of {len(group_rows)} "
+                    f"row(s) on provider id={provider_id} "
+                    f"('{provider.get('label')}'): {e} — set the secret and "
+                    f"restart to migrate."
+                )
+                continue
+            for row in group_rows:
+                key_id, _, _, pem, _ = row
+                pem_bytes = pem.encode("utf-8") if isinstance(pem, str) else pem
+                blob = encrypt_pem(pem_bytes, kek)
+                cursor.execute(
+                    "UPDATE KeyStorage SET private_key = %s, storage_type = 'Encrypted' "
+                    "WHERE id = %s",
+                    (blob, key_id)
+                )
+                converted += 1
+
+        if converted > 0:
+            logger.info(
+                f"migrate_schema: encrypted-at-rest {converted} software key row(s) "
+                f"under per-provider KEKs"
+                + (f" ({deferred} deferred)" if deferred else "")
+            )
+            self._local.connection.commit()
+        elif deferred > 0:
+            logger.warning(
+                f"migrate_schema: {deferred} software key row(s) await encryption "
+                f"(HSM_PIN_KEK or other secret unavailable)."
+            )
+
+    def _migrate_seed_softhsm_provider(self, cursor):
+        """
+        Idempotently seed a 'softhsm-dev' pkcs11 provider when the operator
+        has opted in via PYPKI_SEED_SOFTHSM_PROVIDER=true and the relevant
+        PKCS11_* env vars are present.
+
+        Used in the Docker dev container (which already installs SoftHSM2,
+        initialises a token, and sets PKCS11_MODULE / PKCS11_TOKEN_LABEL /
+        PKCS11_PIN) to make the SoftHSM provider show up in the management
+        UI / API as a first-class citizen.
+
+        Skipped silently otherwise — manual installs without SoftHSM stay
+        with just the seeded software-default provider.
+        """
+        import os
+
+        if (os.environ.get("PYPKI_SEED_SOFTHSM_PROVIDER") or "").lower() not in {"1", "true", "yes"}:
+            return
+
+        # Already seeded?
+        cursor.execute(
+            "SELECT id FROM CryptoProviders WHERE label = %s",
+            ("softhsm-dev",)
+        )
+        if cursor.fetchone() is not None:
+            return
+
+        module_path = os.environ.get("PKCS11_MODULE")
+        slot_label = os.environ.get("PKCS11_TOKEN_LABEL")
+        pin_env = "PKCS11_PIN"  # the env var from which the provider resolves its PIN
+
+        if not module_path or not slot_label:
+            logger.warning(
+                "migrate_schema: PYPKI_SEED_SOFTHSM_PROVIDER=true but "
+                "PKCS11_MODULE / PKCS11_TOKEN_LABEL not set; skipping seed."
+            )
+            return
+
+        if not os.path.exists(module_path):
+            logger.warning(
+                f"migrate_schema: PKCS11_MODULE='{module_path}' does not exist on disk; "
+                "skipping softhsm-dev seed."
+            )
+            return
+
+        logger.info(
+            f"migrate_schema: seeding softhsm-dev provider "
+            f"(module_path={module_path}, slot_label={slot_label})"
+        )
+        cursor.execute(
+            "INSERT INTO CryptoProviders ("
+            "    label, kind, module_path, slot_label, auth_kind, auto_activate, "
+            "    auth_secret_ref, extra_json, is_default, description"
+            ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                'softhsm-dev', 'pkcs11', module_path, slot_label, 'pin', True,
+                f'env:{pin_env}', '{}', False,
+                'SoftHSM2 development PKCS#11 provider seeded automatically when '
+                'PYPKI_SEED_SOFTHSM_PROVIDER=true. Token and PIN come from the '
+                'PKCS11_* environment variables.'
+            )
+        )
+        self._local.connection.commit()
 
 
     def create_database(self):
@@ -1922,14 +2705,35 @@ class PKIDataBase:
 
             # SQL for creating the tables without foreign keys
             tables_without_fk = {
+                "CryptoProviders": """
+                    CREATE TABLE IF NOT EXISTS CryptoProviders (
+                        id INT PRIMARY KEY AUTO_INCREMENT,
+                        label VARCHAR(255) NOT NULL UNIQUE,
+                        kind ENUM('software', 'pkcs11') NOT NULL,
+                        module_path VARCHAR(1024),
+                        slot_label VARCHAR(255),
+                        auth_kind ENUM('pin', 'luna_role', 'yubihsm_authkey') NOT NULL DEFAULT 'pin',
+                        auto_activate BOOLEAN NOT NULL DEFAULT FALSE,
+                        auth_secret_ref VARCHAR(512) NOT NULL,
+                        auth_secret_blob VARBINARY(1024),
+                        extra_json JSON NOT NULL,
+                        description TEXT,
+                        is_default BOOLEAN NOT NULL DEFAULT FALSE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                    );
+                """,
                 "KeyStorage": """
                     CREATE TABLE IF NOT EXISTS KeyStorage (
                         id INT PRIMARY KEY AUTO_INCREMENT,
                         certificate_id INT,
+                        provider_id INT,
                         key_type VARCHAR(64),
                         private_key TEXT,
                         public_key TEXT,
-                        storage_type ENUM('Encrypted', 'Plain', 'HSM') NOT NULL,
+                        label VARCHAR(255),
+                        storage_type ENUM('Encrypted', 'Plain', 'HSM', 'Symmetric') NOT NULL,
+                        key_owned BOOLEAN NOT NULL DEFAULT TRUE,
                         hsm_slot INT,
                         hsm_token_id VARCHAR(255),
                         token_password VARCHAR(255),
@@ -2108,6 +2912,11 @@ class PKIDataBase:
                 ALTER TABLE CertificateRevocationLists
                 ADD CONSTRAINT fk_crl_cert_authority
                 FOREIGN KEY (ca_id) REFERENCES CertificationAuthorities(id);
+                """,
+                """
+                ALTER TABLE KeyStorage
+                ADD CONSTRAINT fk_keystorage_provider_id
+                FOREIGN KEY (provider_id) REFERENCES CryptoProviders(id);
                 """
             ]
 
@@ -2115,6 +2924,24 @@ class PKIDataBase:
             for fk_statement in foreign_keys:
                 logger.info(f"Adding foreign key: {fk_statement}")
                 cursor.execute(fk_statement)
+
+            # Seed the default software crypto provider. New software keys default
+            # to this provider unless the operator explicitly creates another one.
+            # See doc/kms-strategy.md §3-4 for the provider model.
+            logger.info("Seeding default software provider")
+            cursor.execute(
+                "INSERT INTO CryptoProviders ("
+                "    label, kind, auth_kind, auto_activate, auth_secret_ref, "
+                "    extra_json, is_default, description"
+                ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    'software-default', 'software', 'pin', True,
+                    'env:HSM_PIN_KEK', '{}', True,
+                    'Default software cryptotoken. Encrypts software keys at rest '
+                    'under the KEK derived from HSM_PIN_KEK. Created automatically '
+                    'on install.'
+                )
+            )
 
             # Seed default superadmin account (password must be changed after first login)
             logger.info("Seeding default superadmin user")

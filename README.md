@@ -130,6 +130,7 @@ Edit `.env` and set strong values for:
 
 - `DB_ROOT_PASSWORD`
 - `DB_PASSWORD`
+- `HSM_PIN_KEK` — the deployment-wide KEK used to encrypt software keys at rest under per-provider keys. Generate with `openssl rand -base64 48 | tr -dc 'A-Za-z0-9_-' | head -c 64`. **Do not rotate after first run — every encrypted `KeyStorage` row would become unreadable.**
 
 `DB_NAME` and `DB_USER` can usually stay at their defaults.
 
@@ -262,6 +263,14 @@ openssl rand -base64 48 | tr -dc 'A-Za-z0-9_-' | head -c 64
 ```
 
 The secret key is used to sign JWT authentication tokens. Keep it stable across restarts to avoid invalidating active sessions.
+
+Also export `HSM_PIN_KEK` in the environment before running scripts or the server. This is the deployment-wide KEK used by the KMS to encrypt software private keys at rest under per-provider keys (see [doc/kms-strategy.md §6-7](doc/kms-strategy.md)). Generate a separate strong random value:
+
+```bash
+export HSM_PIN_KEK="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9_-' | head -c 64)"
+```
+
+Persist it in your shell rc, `.envrc`, or systemd `EnvironmentFile`. **Do not rotate after first key has been generated — every encrypted `KeyStorage` row would become unreadable.**
 
 ### 5. Initialise the database
 
@@ -445,5 +454,7 @@ PYTHONPATH=. python -m tests
 | `doc/softhsm2-manual.md` | SoftHSM2 operator manual — install, init, key ops, backup/restore |
 | `doc/rest-api.md` | REST API reference |
 | `doc/roadmap.md` | Proposed future evolutions and improvement areas |
+| `doc/PROGRESS.md` | Operational status board — every roadmap item broken down with done / partial / pending / deferred markers |
+| `doc/hsm-gap-analysis.md` | Closed-bug catalogue for the HSM / PKCS#11 work (Phases 0–6) |
 | `doc/structure.md` | Detailed project structure |
 | `doc/request_examples/` | Sample request JSON files and example CSR |

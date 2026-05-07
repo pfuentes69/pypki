@@ -25,9 +25,9 @@ class CertificationAuthority:
         Accepts two config shapes:
         - KMS path (runtime, after Phase 1 migration): crypto.kms_key_id is set.
           Signing goes through the injected KeyManagementService.
-        - Direct path (offline / initial setup): crypto.private_key or
-          crypto.token_key_id is present. The key is loaded into a local KeyTools
-          instance so signing works without a database or KMS.
+        - Direct path (offline / initial setup): crypto.private_key (PEM) is
+          present. The key is loaded into a local KeyTools instance so
+          signing works without a database or KMS.
         """
         self.__config = json.loads(ca_config_json)
         crypto = self.__config["crypto"]
@@ -42,20 +42,12 @@ class CertificationAuthority:
 
         # Build a local KeyTools for direct signing when no KMS key ID is configured.
         self.__local_key = None
-        if self.__kms_key_id is None:
-            if crypto.get("private_key"):
-                kt = KeyTools()
-                kt.set_private_key(
-                    load_pem_private_key(crypto["private_key"].encode("utf-8"), password=None)
-                )
-                self.__local_key = kt
-            elif crypto.get("token_key_id"):
-                self.__local_key = KeyTools(
-                    private_key=None,
-                    key_id=crypto.get("token_key_id"),
-                    slot_num=crypto.get("token_slot"),
-                    token_password=crypto.get("token_password") or ""
-                )
+        if self.__kms_key_id is None and crypto.get("private_key"):
+            kt = KeyTools()
+            kt.set_private_key(
+                load_pem_private_key(crypto["private_key"].encode("utf-8"), password=None)
+            )
+            self.__local_key = kt
 
 
     def set_kms(self, kms) -> None:
@@ -69,7 +61,7 @@ class CertificationAuthority:
 
         Priority:
           1. KMS (when set_kms() has been called and kms_key_id is configured).
-          2. Local KeyTools (when a private_key or token_key_id was in the config).
+          2. Local KeyTools (when a private_key was supplied in the config).
         """
         if self.__kms is not None and self.__kms_key_id is not None:
             return self.__kms.sign_digest(self.__kms_key_id, tbs_digest)

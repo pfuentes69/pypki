@@ -1,12 +1,19 @@
 import os
 import base64
+import threading
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.serialization import load_pem_private_key, Encoding, PrivateFormat, PublicFormat, NoEncryption
 from cryptography.hazmat.primitives.asymmetric import rsa, ec, ed25519
 
+from .backends import (
+    CryptoBackend, KeyHandle, BackendNotActive,
+    SoftwareBackend, PKCS11Backend,
+)
 from .db import PKIDataBase
-from .key_tools import KeyTools
+from .key_encryption import (
+    decrypt_pem, encrypt_pem, get_provider_kek, KEKUnavailable
+)
 from .log import logger
 
 
@@ -35,69 +42,445 @@ class KeyManagementService:
 
     def __init__(self, db: PKIDataBase):
         self.__db = db
-        self.__key_cache: dict[int, KeyTools] = {}   # key_id → KeyTools
+        # key_id → KeyHandle. PKCS11Backend / SoftwareBackend produce these.
+        self.__handle_cache: dict[int, KeyHandle] = {}
+        # provider_id → activated backend (one per provider, per kms-strategy.md §5/§6)
+        self.__backends: dict[int, CryptoBackend] = {}
+        # Guards backend creation/activation against concurrent first-use.
+        # Full per-key locking (Gap 7) lands in Phase 3.
+        self.__lock = threading.RLock()
+
+    # ── Backend lookup ───────────────────────────────────────────────────────
+
+    def _get_backend(self, provider_id: int) -> CryptoBackend:
+        """Return an activated backend for the provider, creating it if needed.
+
+        Backend instantiation + activation is serialised by ``self.__lock`` so
+        concurrent first-use of the same provider does not produce two
+        backend instances (or two PKCS#11 sessions).
+        """
+        with self.__lock:
+            backend = self.__backends.get(provider_id)
+            if backend is not None:
+                return backend
+            with self.__db.connection():
+                provider = self.__db.get_provider_by_id(provider_id)
+            if not provider:
+                raise KeyError(f"KMS: provider_id={provider_id} not found")
+            kind = provider.get("kind")
+            if kind == "software":
+                backend = SoftwareBackend()
+            elif kind == "pkcs11":
+                backend = PKCS11Backend()
+            else:
+                raise ValueError(
+                    f"KMS: provider id={provider_id} has unknown kind={kind!r}"
+                )
+            backend.open(provider)  # may raise BackendNotActive on PIN/KEK failure
+            self.__backends[provider_id] = backend
+            return backend
+
+    def activate_provider(self, provider_id: int, pin: str = None) -> None:
+        """
+        Force activation of a provider's backend now (rather than lazily on
+        first use). Used by the management API
+        (``POST /api/crypto-providers/{id}/activate``) — see
+        doc/kms-strategy.md §6.
+
+        ``pin`` is the operator-supplied PIN for ``operator:prompt``
+        providers; ignored otherwise. Raises :class:`KeyError` for unknown
+        provider id, :class:`ValueError` for protocol mismatches (e.g. PIN
+        supplied but provider isn't operator-prompt, or vice versa), and
+        :class:`BackendError`/its subclasses on activation failure.
+        """
+        from .backends.base import BackendNotActive
+        with self.__db.connection():
+            provider = self.__db.get_provider_by_id(provider_id)
+        if not provider:
+            raise KeyError(f"KMS: provider_id={provider_id} not found")
+
+        ref = (provider.get("auth_secret_ref") or "").strip()
+        is_operator = ref == "operator:prompt"
+
+        if is_operator and not pin:
+            raise ValueError(
+                f"KMS: provider id={provider_id} ('{provider.get('label')}') "
+                f"is operator:prompt; activation requires a PIN"
+            )
+        if pin and not is_operator:
+            raise ValueError(
+                f"KMS: provider id={provider_id} ('{provider.get('label')}') "
+                f"resolves its PIN automatically (auth_secret_ref={ref!r}); "
+                f"do not supply one in the activate request"
+            )
+
+        with self.__lock:
+            backend = self.__backends.get(provider_id)
+            if backend is not None and backend.is_active():
+                logger.info(
+                    f"KMS.activate_provider: id={provider_id} already active; no-op"
+                )
+                return
+            if backend is None:
+                kind = provider.get("kind")
+                if kind == "software":
+                    backend = SoftwareBackend()
+                elif kind == "pkcs11":
+                    backend = PKCS11Backend()
+                else:
+                    raise ValueError(f"KMS: provider id={provider_id} has unknown kind={kind!r}")
+            secret_override = pin.encode("utf-8") if pin else None
+            backend.open(provider, secret_override=secret_override)
+            self.__backends[provider_id] = backend
+
+    def get_provider_status(self, provider_id: int) -> dict:
+        """
+        Return a snapshot of a provider's current state. Used by
+        ``GET /api/crypto-providers/{id}/status``.
+        """
+        with self.__db.connection():
+            provider = self.__db.get_provider_by_id(provider_id)
+        if not provider:
+            raise KeyError(f"KMS: provider_id={provider_id} not found")
+        with self.__lock:
+            backend = self.__backends.get(provider_id)
+            active = bool(backend is not None and backend.is_active())
+        return {
+            "id": provider_id,
+            "label": provider.get("label"),
+            "kind": provider.get("kind"),
+            "auto_activate": bool(provider.get("auto_activate")),
+            "auth_secret_ref": provider.get("auth_secret_ref"),
+            "state": "active" if active else "inactive",
+        }
+
+    def activate_auto_providers(self) -> dict:
+        """
+        Activate every provider with ``auto_activate=TRUE`` at startup.
+        Failures are logged loudly but do not raise — CAs bound to a
+        failing provider will report "provider unavailable" cleanly on
+        first sign attempt (kms-strategy.md §6).
+
+        Returns a summary dict with ``activated``, ``skipped``, and
+        ``errors`` counts for the caller to log.
+        """
+        with self.__db.connection():
+            providers = self.__db.list_providers()
+        activated = skipped = errors = 0
+        for provider in providers:
+            if not provider.get("auto_activate"):
+                skipped += 1
+                continue
+            pid = provider["id"]
+            try:
+                self.activate_provider(pid)
+                activated += 1
+            except Exception as e:
+                errors += 1
+                logger.error(
+                    f"KMS.activate_auto_providers: provider id={pid} "
+                    f"('{provider.get('label')}') failed to activate: {e}"
+                )
+        logger.info(
+            f"KMS.activate_auto_providers: activated={activated} "
+            f"skipped={skipped} errors={errors}"
+        )
+        return {"activated": activated, "skipped": skipped, "errors": errors}
+
+    def deactivate_provider(self, provider_id: int) -> None:
+        """
+        Close the backend for a provider and evict any of its cached
+        handles. Idempotent. Used by the management API
+        (Phase 5 — POST /api/crypto-providers/{id}/deactivate).
+        """
+        with self.__lock:
+            backend = self.__backends.pop(provider_id, None)
+            if backend is not None:
+                try:
+                    backend.close()
+                except Exception:
+                    logger.exception(f"KMS: backend.close() failed for provider {provider_id}")
+            # Evict cached handles for this provider.
+            for kid in list(self.__handle_cache.keys()):
+                if self.__handle_cache[kid].provider_id == provider_id:
+                    del self.__handle_cache[kid]
+
+    # ── Provider-aware key generation / import / deletion (Phase 5a) ─────────
+
+    def generate_key_in_provider(
+        self, provider_id: int, key_type: str, label: str = None
+    ) -> dict:
+        """
+        Generate a fresh key on the given provider's backend and persist a
+        ``KeyStorage`` row. Activates the provider on demand. Returns the
+        new ``KeyStorage`` id plus the public material so callers (the
+        management API, CA-creation flow, …) can use it immediately.
+
+        For software providers, the PEM is encrypted at rest under the
+        per-provider KEK. For pkcs11 providers, the keypair is created on
+        the token with the mandatory CKA_* attribute set; only the public
+        key, key_type, and CKA_ID land in the database.
+        """
+        backend = self._get_backend(provider_id)
+        result = backend.generate_key(key_type=key_type, label=label)
+
+        with self.__db.connection():
+            new_id = self.__db.insert_key(
+                private_key=result.get("private_key"),
+                storage_type=result["storage_type"],
+                public_key=result.get("public_key"),
+                key_type=result["key_type"],
+                hsm_token_id=result.get("hsm_token_id"),
+                provider_id=provider_id,
+                label=label,
+            )
+        if new_id is None:
+            # Best-effort cleanup if the DB insert failed for an HSM key —
+            # otherwise we'd leak the on-token object.
+            tok_id = result.get("hsm_token_id")
+            if tok_id and isinstance(backend, PKCS11Backend):
+                try:
+                    backend.delete_key(tok_id)
+                except Exception:
+                    logger.exception(
+                        f"KMS: rollback delete_key({tok_id}) failed after DB error"
+                    )
+            raise RuntimeError("KMS: failed to persist KeyStorage row for new key")
+
+        logger.info(
+            f"KMS: generated {result['key_type']} on provider id={provider_id} "
+            f"→ KeyStorage id={new_id}"
+        )
+        return {
+            "key_id": new_id,
+            "provider_id": provider_id,
+            "key_type": result["key_type"],
+            "public_key": result.get("public_key"),
+            "label": label,
+            "hsm_token_id": result.get("hsm_token_id"),
+        }
+
+    def import_pkcs11_key(
+        self, provider_id: int, hsm_token_id: str, label: str = None
+    ) -> dict:
+        """
+        Register an *existing* on-token key into ``KeyStorage`` without
+        generating new material. Provider must be ``kind='pkcs11'``.
+        Returns ``{key_id, provider_id, key_type, public_key, hsm_token_id}``.
+
+        ``hsm_token_id`` is validated as a non-empty hex string with an
+        even number of digits (Gap 9) — fails fast with a clear
+        :class:`ValueError` rather than crashing inside PyKCS11 on first
+        sign.
+        """
+        # Validate the hex contract at the API boundary, not at sign time.
+        from .backends.pkcs11 import _validate_cka_id_hex
+        _validate_cka_id_hex(hsm_token_id)
+        with self.__db.connection():
+            provider = self.__db.get_provider_by_id(provider_id)
+        if not provider:
+            raise KeyError(f"KMS: provider_id={provider_id} not found")
+        if provider.get("kind") != "pkcs11":
+            raise ValueError(
+                f"KMS: provider id={provider_id} is kind={provider.get('kind')!r}; "
+                f"key import is only valid for pkcs11 providers"
+            )
+
+        backend = self._get_backend(provider_id)
+        if not isinstance(backend, PKCS11Backend):
+            raise RuntimeError("KMS: import_pkcs11_key requires a PKCS11Backend")
+
+        found = backend.find_key_by_id(hsm_token_id)
+        if not found:
+            raise KeyError(
+                f"KMS: no on-token private key with CKA_ID={hsm_token_id} on "
+                f"provider id={provider_id}"
+            )
+
+        # Operator-supplied label wins; otherwise fall back to the on-token
+        # CKA_LABEL so the import doesn't lose useful identity information.
+        effective_label = label if label else found.get("cka_label")
+
+        with self.__db.connection():
+            new_id = self.__db.insert_key(
+                private_key=None,
+                storage_type="HSM",
+                public_key=found["public_key"],
+                key_type=found["key_type"],
+                hsm_token_id=found["hsm_token_id"],
+                provider_id=provider_id,
+                label=effective_label,
+                # Imported keys: pyPKI does *not* own the on-token objects.
+                # delete_key will skip the backend.delete_key call so the
+                # operator's pre-existing material survives unregistration.
+                key_owned=False,
+            )
+        if new_id is None:
+            raise RuntimeError("KMS: failed to insert imported KeyStorage row")
+        logger.info(
+            f"KMS: imported on-token key CKA_ID={hsm_token_id} on provider "
+            f"id={provider_id} → KeyStorage id={new_id} (label={effective_label!r}, "
+            f"key_owned=False)"
+        )
+        return {
+            "key_id": new_id,
+            "provider_id": provider_id,
+            "key_type": found["key_type"],
+            "public_key": found["public_key"],
+            "hsm_token_id": found["hsm_token_id"],
+            "label": effective_label,
+        }
+
+    def delete_key(self, key_id: int) -> dict:
+        """
+        Delete a key. Refuses if any CA / OCSP responder / certificate
+        references it (returns ``{"deleted": False, "reason": "in_use",
+        "usage": {...}}``). For HSM rows, removes both on-token objects
+        before dropping the ``KeyStorage`` row.
+
+        Returns the ``delete_key`` result from PKIDataBase, or None if the
+        row does not exist.
+        """
+        with self.__db.connection():
+            record = self.__db.get_key_record(key_id)
+        if not record:
+            return None
+
+        # Pre-flight usage check so we don't touch the token if the row
+        # cannot be deleted anyway.
+        with self.__db.connection():
+            usage = self.__db.count_key_usage(key_id)
+        if usage.get("total", 0) > 0:
+            return {"deleted": False, "reason": "in_use", "usage": usage}
+
+        # On-token cleanup for HSM rows — only when pyPKI owns the key.
+        # Imported keys (key_owned=FALSE) had the on-token objects created
+        # out-of-band by the operator; we leave them in place and only
+        # remove the pyPKI registration.
+        if record.get("storage_type") == "HSM" and bool(record.get("key_owned", True)):
+            tok_id = record.get("hsm_token_id")
+            provider_id = record.get("provider_id")
+            if tok_id and provider_id is not None:
+                try:
+                    backend = self._get_backend(provider_id)
+                    if isinstance(backend, PKCS11Backend):
+                        backend.delete_key(tok_id)
+                except Exception:
+                    logger.exception(
+                        f"KMS.delete_key: on-token delete failed for key_id={key_id}; "
+                        f"continuing with DB row removal"
+                    )
+        elif record.get("storage_type") == "HSM":
+            logger.info(
+                f"KMS.delete_key: key_id={key_id} is imported (key_owned=False); "
+                f"leaving on-token objects intact"
+            )
+
+        # Drop in-memory cache and the DB row.
+        self.unload_key(key_id)
+        with self.__db.connection():
+            return self.__db.delete_key(key_id)
+
+    def shutdown(self) -> None:
+        """
+        Close every active backend and evict every cached handle. Safe to
+        call multiple times. Wired into ``atexit`` from
+        ``web/services/__init__.py`` so PKCS#11 sessions are released on
+        process termination (Gap 6).
+        """
+        with self.__lock:
+            for provider_id, backend in list(self.__backends.items()):
+                try:
+                    backend.close()
+                except Exception:
+                    logger.exception(
+                        f"KMS.shutdown: backend.close() failed for provider {provider_id}"
+                    )
+            self.__backends.clear()
+            self.__handle_cache.clear()
 
     # ── Key loading ──────────────────────────────────────────────────────────
 
     def load_key(self, key_id: int, token_password: str = None) -> None:
-        """Load a key from KeyStorage into the in-memory cache.
+        """Load a key from KeyStorage and cache its handle.
 
-        For HSM keys the token_password is read from the KeyStorage record.
-        The token_password parameter is accepted for backwards compatibility
-        but the stored value takes precedence when present.
+        Dispatches to the matching :class:`CryptoBackend` for the row's
+        provider. ``token_password`` is accepted for backwards
+        compatibility but is no longer consulted — provider PINs are
+        resolved through ``auth_secret_ref`` (kms-strategy.md §7).
         """
         with self.__db.connection():
             record = self.__db.get_key_record(key_id)
-
         if not record:
             raise KeyError(f"KMS: key_id={key_id} not found in KeyStorage")
 
+        provider_id = record.get("provider_id")
         storage_type = record.get("storage_type")
 
-        if storage_type in ("Plain", "Encrypted"):
-            pem = record.get("private_key")
-            if not pem:
-                raise ValueError(f"KMS: key_id={key_id} has no private_key in KeyStorage")
-            kt = KeyTools()
-            kt.set_private_key(load_pem_private_key(pem.encode("utf-8"), password=None))
-
-        elif storage_type == "HSM":
-            stored_password = record.get("token_password")
-            kt = KeyTools(
-                private_key=None,
-                key_id=record.get("hsm_token_id"),
-                slot_num=record.get("hsm_slot"),
-                token_password=stored_password if stored_password is not None else (token_password or "")
+        if provider_id is not None:
+            backend = self._get_backend(provider_id)
+            handle = backend.load_key(record)
+            with self.__lock:
+                self.__handle_cache[key_id] = handle
+            logger.info(
+                f"KMS: loaded key_id={key_id} via {type(backend).__name__} "
+                f"(provider_id={provider_id}, storage_type={storage_type})"
             )
+            return
 
-        else:
-            raise ValueError(f"KMS: unsupported storage_type '{storage_type}' for key_id={key_id}")
-
-        self.__key_cache[key_id] = kt
-        logger.info(f"KMS: loaded key_id={key_id} (storage_type={storage_type})")
+        # No provider_id and no legacy fallback applies. The Phase 0.1
+        # migration backfilled software rows; HSM rows from before the
+        # provider model need an operator action: assign them to a
+        # pkcs11 provider (UPDATE KeyStorage SET provider_id = X) or
+        # delete and re-import via the management API.
+        raise ValueError(
+            f"KMS: key_id={key_id} (storage_type={storage_type}) has no provider_id. "
+            f"Assign it to a pkcs11 provider or re-import via "
+            f"POST /api/kms/keys/import."
+        )
 
     def unload_key(self, key_id: int) -> None:
-        """Remove a key from the in-memory cache."""
-        if key_id in self.__key_cache:
-            del self.__key_cache[key_id]
-            logger.info(f"KMS: unloaded key_id={key_id}")
+        """Remove a key handle from the in-memory cache."""
+        with self.__lock:
+            handle = self.__handle_cache.pop(key_id, None)
+        if handle is None:
+            return
+        backend = self.__backends.get(handle.provider_id)
+        if backend is not None:
+            try:
+                backend.unload_key(handle)
+            except Exception:
+                logger.exception(f"KMS: backend.unload_key failed for key_id={key_id}")
+        logger.info(f"KMS: unloaded key_id={key_id}")
 
     def is_loaded(self, key_id: int) -> bool:
-        return key_id in self.__key_cache
+        return key_id in self.__handle_cache
 
     # ── Signing ──────────────────────────────────────────────────────────────
 
     def sign_digest(self, key_id: int, tbs_digest: bytes) -> bytes:
         """
-        Sign a pre-computed SHA-256 digest.
+        Sign a pre-computed SHA-256 digest. The key is loaded on first use
+        and cached for subsequent calls. Returns the raw signature bytes.
 
-        The key is loaded on first use and cached for subsequent calls.
-        Returns the raw signature bytes.
+        Loading is serialised by ``self.__lock`` (double-checked) so two
+        threads first-using the same key do not both run :meth:`load_key`
+        — closes Gap 7. The actual signing is dispatched to the backend
+        and runs without the KMS-level lock held; backends that need to
+        serialise their own state (PKCS11Backend in particular) hold an
+        internal lock.
         """
-        if key_id not in self.__key_cache:
-            self.load_key(key_id)
+        handle = self.__handle_cache.get(key_id)
+        if handle is None:
+            with self.__lock:
+                handle = self.__handle_cache.get(key_id)
+                if handle is None:
+                    self.load_key(key_id)
+                    handle = self.__handle_cache[key_id]
+
         logger.debug(f"KMS: sign_digest key_id={key_id}")
-        return self.__key_cache[key_id].sign_digest(tbs_digest)
+        backend = self._get_backend(handle.provider_id)
+        return backend.sign_digest(handle, tbs_digest)
 
     def sign_data(self, key_id: int, data: bytes) -> bytes:
         """Hash data with SHA-256 then sign the digest."""
@@ -217,11 +600,37 @@ class KeyManagementService:
 
     def _finalise(self, pem: str, storage_type: str, persist: bool, meta: dict,
                   public_key: str = None, key_type: str = None) -> dict:
-        """Common finalisation for asymmetric keys."""
+        """Common finalisation for asymmetric keys.
+
+        On persist, the PEM is encrypted at rest under the default crypto
+        provider's KEK and stored as ``storage_type='Encrypted'``. The
+        caller-supplied ``storage_type`` argument is preserved only for the
+        non-default path (e.g. future symmetric flows).
+        """
         if persist:
             with self.__db.connection():
-                key_id = self.__db.insert_key(pem, storage_type, public_key, key_type)
-            logger.info(f"KMS: persisted key → KeyStorage id={key_id}")
+                default_id = self.__db.get_default_provider_id()
+                if default_id is None:
+                    raise RuntimeError(
+                        "KMS: no default crypto provider exists; cannot persist a "
+                        "software key. Run reset_pki or apply migrations to seed "
+                        "'software-default'."
+                    )
+                provider = self.__db.get_provider_by_id(default_id)
+            try:
+                kek = get_provider_kek(provider)
+            except KEKUnavailable as e:
+                raise RuntimeError(
+                    f"KMS: cannot persist a software key under provider "
+                    f"id={default_id} ('{provider.get('label')}'): {e}"
+                )
+            blob = encrypt_pem(pem.encode("utf-8"), kek)
+            with self.__db.connection():
+                key_id = self.__db.insert_key(
+                    blob, "Encrypted", public_key, key_type,
+                    provider_id=default_id,
+                )
+            logger.info(f"KMS: persisted encrypted key → KeyStorage id={key_id}")
             return {**meta, "key_id": key_id, "persisted": True}
         else:
             result = {**meta, "key_material": pem, "persisted": False}
@@ -231,10 +640,17 @@ class KeyManagementService:
 
     def _finalise_symmetric(self, b64_key: str, persist: bool, meta: dict,
                             key_type: str = None) -> dict:
-        """Common finalisation for symmetric keys."""
+        """Common finalisation for symmetric keys.
+
+        Stored as ``storage_type='Symmetric'`` (Gap 11 fix) so the load
+        path can reject a symmetric key being treated as an asymmetric
+        signing key with a clear error rather than crashing the PEM parser.
+        """
         if persist:
             with self.__db.connection():
-                key_id = self.__db.insert_key(b64_key, "Plain", public_key=None, key_type=key_type)
+                key_id = self.__db.insert_key(
+                    b64_key, "Symmetric", public_key=None, key_type=key_type,
+                )
             logger.info(f"KMS: persisted symmetric key → KeyStorage id={key_id}")
             return {**meta, "key_id": key_id, "persisted": True}
         else:

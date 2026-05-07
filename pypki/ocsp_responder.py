@@ -172,7 +172,8 @@ class OCSPResponder:
         if self.__kms_key_id is None:
             raise RuntimeError(
                 f"No KMS key ID for OCSPResponder '{self.__name}'. "
-                "Run the Phase 1 migration (migrate_keys_to_kms.py) first."
+                "Recreate the responder through the management API or assign "
+                "a KeyStorage row via OCSPResponders.private_key_reference."
             )
 
         hash_algo = hashes.SHA256() if self.__hash_algorithm == 'sha256' else hashes.SHA1()

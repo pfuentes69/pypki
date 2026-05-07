@@ -765,6 +765,214 @@ def kms_generate_key():
     return jsonify(result), 200
 
 
+# ── Crypto provider activation (Phase 4) ─────────────────────────────────────
+
+@bp.route('/crypto-providers', methods=['GET'])
+def list_crypto_providers():
+    logger.info("API - GET Crypto Providers")
+    rows = api_adapters.list_crypto_providers()
+    return jsonify(api_adapters.convert_to_serializable(rows)), 200
+
+
+@bp.route('/crypto-providers/<int:provider_id>', methods=['GET'])
+def get_crypto_provider(provider_id):
+    logger.info(f"API - GET Crypto Provider {provider_id}")
+    row = api_adapters.get_crypto_provider(provider_id)
+    if not row:
+        abort(404, description="Crypto provider not found")
+    return jsonify(api_adapters.convert_to_serializable(row)), 200
+
+
+@bp.route('/crypto-providers/<int:provider_id>/status', methods=['GET'])
+def get_crypto_provider_status(provider_id):
+    logger.info(f"API - GET Crypto Provider {provider_id} Status")
+    try:
+        status = api_adapters.get_crypto_provider_status(provider_id)
+    except KeyError:
+        abort(404, description="Crypto provider not found")
+    return jsonify(api_adapters.convert_to_serializable(status)), 200
+
+
+@bp.route('/crypto-providers/<int:provider_id>/activate', methods=['POST'])
+def activate_crypto_provider(provider_id):
+    logger.info(f"API - POST Crypto Provider {provider_id} Activate")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+    body = request.get_json(silent=True) or {}
+    pin = body.get('pin')
+    try:
+        api_adapters.activate_crypto_provider(provider_id, pin=pin, user_id=user_id)
+    except KeyError:
+        abort(404, description="Crypto provider not found")
+    except ValueError as e:
+        abort(400, description=str(e))
+    except RuntimeError as e:
+        # BackendError, KEKUnavailable, etc.
+        abort(503, description=f"Provider activation failed: {e}")
+    return jsonify({"message": "Provider activated", "id": provider_id}), 200
+
+
+@bp.route('/crypto-providers/<int:provider_id>/deactivate', methods=['POST'])
+def deactivate_crypto_provider(provider_id):
+    logger.info(f"API - POST Crypto Provider {provider_id} Deactivate")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+    try:
+        api_adapters.deactivate_crypto_provider(provider_id, user_id=user_id)
+    except KeyError:
+        abort(404, description="Crypto provider not found")
+    return jsonify({"message": "Provider deactivated", "id": provider_id}), 200
+
+
+@bp.route('/crypto-providers', methods=['POST'])
+def create_crypto_provider():
+    logger.info("API - POST Crypto Provider")
+    err = _require_role('superadmin')
+    if err: return err
+    data = request.get_json(silent=True) or {}
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+    try:
+        new_id = api_adapters.create_crypto_provider(data, user_id=user_id)
+    except ValueError as e:
+        abort(400, description=str(e))
+    except RuntimeError as e:
+        abort(500, description=str(e))
+    return jsonify({"message": "Provider created", "id": new_id}), 201
+
+
+@bp.route('/crypto-providers/<int:provider_id>', methods=['PUT'])
+def update_crypto_provider(provider_id):
+    logger.info(f"API - PUT Crypto Provider {provider_id}")
+    err = _require_role('superadmin')
+    if err: return err
+    data = request.get_json(silent=True) or {}
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+    try:
+        ok = api_adapters.update_crypto_provider(provider_id, data, user_id=user_id)
+    except KeyError:
+        abort(404, description="Crypto provider not found")
+    except ValueError as e:
+        abort(400, description=str(e))
+    if not ok:
+        return jsonify({"message": "Nothing to update", "id": provider_id}), 200
+    return jsonify({"message": "Provider updated", "id": provider_id}), 200
+
+
+@bp.route('/crypto-providers/<int:provider_id>', methods=['DELETE'])
+def delete_crypto_provider(provider_id):
+    logger.info(f"API - DELETE Crypto Provider {provider_id}")
+    err = _require_role('superadmin')
+    if err: return err
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+    result = api_adapters.delete_crypto_provider(provider_id, user_id=user_id)
+    if result is None:
+        abort(404, description="Crypto provider not found")
+    if not result.get("deleted"):
+        reason = result.get("reason")
+        if reason == "is_default":
+            abort(409, description="Cannot delete the default provider")
+        if reason == "has_keys":
+            abort(409, description=(
+                f"Provider has {result.get('key_count')} key(s); "
+                f"delete or migrate them before removing the provider"
+            ))
+        abort(500, description=f"Provider delete failed: {result.get('error') or reason}")
+    return jsonify({"message": "Provider deleted", "id": provider_id}), 200
+
+
+# ── KMS key management (Phase 5a) ────────────────────────────────────────────
+
+@bp.route('/kms/keys', methods=['GET'])
+def list_kms_keys():
+    logger.info("API - GET KMS Keys")
+    provider_id = request.args.get('provider_id', type=int)
+    key_type = request.args.get('key_type')
+    rows = api_adapters.list_kms_keys(provider_id=provider_id, key_type=key_type)
+    return jsonify(api_adapters.convert_to_serializable(rows)), 200
+
+
+@bp.route('/kms/keys/<int:key_id>', methods=['GET'])
+def get_kms_key(key_id):
+    logger.info(f"API - GET KMS Key {key_id}")
+    row = api_adapters.get_kms_key(key_id)
+    if not row:
+        abort(404, description="KMS key not found")
+    return jsonify(api_adapters.convert_to_serializable(row)), 200
+
+
+@bp.route('/kms/keys', methods=['POST'])
+def generate_kms_key():
+    logger.info("API - POST Generate KMS Key")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
+    data = request.get_json(silent=True) or {}
+    provider_id = data.get('provider_id')
+    key_type = data.get('key_type')
+    label = data.get('label')
+    if not provider_id or not key_type:
+        abort(400, description="provider_id and key_type are required")
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+    try:
+        result = api_adapters.generate_kms_key(
+            provider_id=int(provider_id), key_type=key_type, label=label,
+            user_id=user_id,
+        )
+    except KeyError:
+        abort(404, description="Crypto provider not found")
+    except ValueError as e:
+        abort(400, description=str(e))
+    except RuntimeError as e:
+        abort(503, description=str(e))
+    return jsonify(api_adapters.convert_to_serializable(result)), 201
+
+
+@bp.route('/kms/keys/import', methods=['POST'])
+def import_kms_key():
+    logger.info("API - POST Import KMS Key")
+    err = _require_role('superadmin')
+    if err: return err
+    data = request.get_json(silent=True) or {}
+    provider_id = data.get('provider_id')
+    hsm_token_id = data.get('hsm_token_id')
+    label = data.get('label')
+    if not provider_id or not hsm_token_id:
+        abort(400, description="provider_id and hsm_token_id are required")
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+    try:
+        result = api_adapters.import_pkcs11_kms_key(
+            provider_id=int(provider_id), hsm_token_id=hsm_token_id,
+            label=label, user_id=user_id,
+        )
+    except KeyError as e:
+        abort(404, description=str(e))
+    except ValueError as e:
+        abort(400, description=str(e))
+    except RuntimeError as e:
+        abort(503, description=str(e))
+    return jsonify(api_adapters.convert_to_serializable(result)), 201
+
+
+@bp.route('/kms/keys/<int:key_id>', methods=['DELETE'])
+def delete_kms_key(key_id):
+    logger.info(f"API - DELETE KMS Key {key_id}")
+    err = _require_role('superadmin', 'admin')
+    if err: return err
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+    result = api_adapters.delete_kms_key(key_id, user_id=user_id)
+    if result is None:
+        abort(404, description="KMS key not found")
+    if not result.get("deleted"):
+        if result.get("reason") == "in_use":
+            abort(409, description={
+                "message": "Key is in use",
+                "usage": result.get("usage"),
+            })
+        abort(500, description=f"Key delete failed: {result.get('error') or result.get('reason')}")
+    return jsonify({"message": "Key deleted", "id": key_id}), 200
+
+
 # ── User management ──────────────────────────────────────────────────────────
 
 BUILTIN_SUPERADMIN = 'superadmin'

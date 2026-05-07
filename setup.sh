@@ -93,14 +93,25 @@ step "Configuring credentials"
 DB_NAME="pypki_db"
 DB_USER="pypki_user"
 
-# If .env already exists, read existing passwords so we don't rotate them
+# If .env already exists, read existing passwords so we don't rotate them.
+# HSM_PIN_KEK is also reused — rotating it would invalidate every encrypted
+# software key in the database.
+HSM_PIN_KEK=""
 if [[ -f "$APP_DIR/.env" ]]; then
     DB_ROOT_PASSWORD=$(grep ^DB_ROOT_PASSWORD "$APP_DIR/.env" | cut -d= -f2-)
-    DB_PASSWORD=$(grep ^DB_PASSWORD "$APP_DIR/.env"      | cut -d= -f2-)
-    ok ".env already exists — reusing existing DB passwords"
+    DB_PASSWORD=$(grep ^DB_PASSWORD     "$APP_DIR/.env" | cut -d= -f2-)
+    HSM_PIN_KEK=$(grep ^HSM_PIN_KEK     "$APP_DIR/.env" | cut -d= -f2- || true)
+    ok ".env already exists — reusing existing DB passwords and HSM_PIN_KEK"
 else
     DB_ROOT_PASSWORD="$(openssl rand -base64 21 | tr -dc 'A-Za-z0-9' | head -c 24)"
     DB_PASSWORD="$(openssl rand -base64 21 | tr -dc 'A-Za-z0-9' | head -c 24)"
+fi
+
+# Generate HSM_PIN_KEK if missing. This is the deployment-wide KEK that
+# encrypts software keys at rest under per-provider keys derived via HKDF.
+# Once set, do NOT rotate without re-encrypting every KeyStorage row.
+if [[ -z "$HSM_PIN_KEK" ]]; then
+    HSM_PIN_KEK="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9_-' | head -c 64)"
 fi
 
 cat > "$APP_DIR/.env" <<ENV
@@ -108,6 +119,7 @@ DB_ROOT_PASSWORD=${DB_ROOT_PASSWORD}
 DB_NAME=${DB_NAME}
 DB_USER=${DB_USER}
 DB_PASSWORD=${DB_PASSWORD}
+HSM_PIN_KEK=${HSM_PIN_KEK}
 ENV
 chmod 600 "$APP_DIR/.env"
 ok ".env written"
@@ -167,6 +179,7 @@ DB_USER=${DB_USER}
 DB_PASSWORD=${DB_PASSWORD}
 DB_ROOT_PASSWORD=${DB_ROOT_PASSWORD}
 SECRET_KEY=${SECRET_KEY}
+HSM_PIN_KEK=${HSM_PIN_KEK}
 CREDS
 chmod 600 "$CREDS_FILE"
 ok "Credentials saved to .setup_credentials  ← delete after noting them"

@@ -30,14 +30,22 @@ services:
       - ./data/softhsm/tokens:/var/lib/softhsm/tokens       # SoftHSM2 dev-token storage — survives restarts
     environment:
       PYPKI_CONFIG: config/config.json
+      # KMS encryption-at-rest KEK. Encrypts software keys under per-provider
+      # keys derived via HKDF. Must be set; rotating it invalidates every
+      # encrypted KeyStorage row. See doc/kms-strategy.md §6-7.
+      HSM_PIN_KEK: ${HSM_PIN_KEK:?HSM_PIN_KEK must be set in .env}
       # SoftHSM2 — a development token is initialised on first boot.
       # CHANGE THESE for any non-dev deployment, or set SOFTHSM2_AUTO_INIT=false to skip.
       SOFTHSM2_AUTO_INIT: "true"
       SOFTHSM2_TOKEN_LABEL: pypki-dev
       SOFTHSM2_PIN: "1234"
       SOFTHSM2_SO_PIN: "5678"
-      # Consumed by `pkcs11-tool` inside the container and by the HSM provider
-      # once Gap 4 of doc/hsm-gap-analysis.md is closed.
+      # Consumed by `pkcs11-tool` inside the container and by the seeded
+      # softhsm-dev pkcs11 provider (see doc/kms-strategy.md).
       PKCS11_MODULE: /usr/lib/softhsm/libsofthsm2.so
       PKCS11_TOKEN_LABEL: pypki-dev
       PKCS11_PIN: "1234"
+      # Auto-seed the softhsm-dev pkcs11 provider on first boot. Disable
+      # by setting to "false" if you want to manage providers exclusively
+      # through the API/UI.
+      PYPKI_SEED_SOFTHSM_PROVIDER: "true"

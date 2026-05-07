@@ -1,0 +1,445 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item active">Keys</li>
+  </ol>
+</nav>
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <h4 class="mb-0">Keys</h4>
+  <div class="d-flex gap-2 flex-wrap">
+    <select class="form-select form-select-sm" id="filterProvider" onchange="loadKeys()" style="min-width:220px">
+      <option value="">All providers</option>
+    </select>
+    <select class="form-select form-select-sm" id="filterKeyType" onchange="loadKeys()" style="min-width:160px">
+      <option value="">All key types</option>
+    </select>
+    <button class="btn btn-primary btn-sm" data-admin-only data-bs-toggle="modal"
+            data-bs-target="#generateModal" onclick="openGenerate()">
+      <i class="bi bi-plus-circle me-1"></i>Generate
+    </button>
+    <button class="btn btn-outline-primary btn-sm" data-superadmin-only data-bs-toggle="modal"
+            data-bs-target="#importModal" onclick="openImport()">
+      <i class="bi bi-box-arrow-in-down me-1"></i>Import HSM key
+    </button>
+  </div>
+</div>
+
+<div class="card shadow-sm">
+  <div class="card-body p-0">
+    <table class="table table-hover mb-0" id="keysTable">
+      <thead class="table-light">
+        <tr>
+          <th>Id</th>
+          <th>Provider</th>
+          <th>Type</th>
+          <th>Label</th>
+          <th>Storage</th>
+          <th>HSM CKA_ID</th>
+          <th>Usage</th>
+          <th>Created</th>
+          <th class="text-end">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="keysBody">
+        <tr><td colspan="9" class="text-muted small p-3">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block modals %}
+<!-- Generate -->
+<div class="modal fade" id="generateModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Generate key</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label">Provider</label>
+          <select class="form-select" id="genProvider"></select>
+          <div class="form-text">Only active providers are listed.</div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Key type</label>
+          <select class="form-select" id="genKeyType">
+            <option value="RSA-2048">RSA-2048</option>
+            <option value="RSA-3072" selected>RSA-3072</option>
+            <option value="RSA-4096">RSA-4096</option>
+            <option value="ECDSA-P-256">ECDSA-P-256</option>
+            <option value="ECDSA-P-384">ECDSA-P-384</option>
+            <option value="Ed25519">Ed25519 (software only)</option>
+          </select>
+          <div class="form-text">PKCS#11 providers do not support Ed25519 in the conservative subset.</div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Label (optional)</label>
+          <input class="form-control" id="genLabel" placeholder="e.g. issuing-ca-2026">
+        </div>
+        <div class="alert alert-danger d-none mb-0" id="genError"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="generateKey()">
+          <i class="bi bi-check-circle me-1"></i>Generate
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Import -->
+<div class="modal fade" id="importModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Import existing on-token key</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label">PKCS#11 provider</label>
+          <select class="form-select" id="impProvider"></select>
+          <div class="form-text">Only active <code>pkcs11</code> providers are listed.</div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">CKA_ID (hex)</label>
+          <input class="form-control" id="impCkaId" placeholder="e.g. 01">
+          <div class="form-text">
+            Hex-encoded CKA_ID. Both the private key and the matching public
+            key on the token (which share this CKA_ID by PKCS#11 convention)
+            are imported as a single pyPKI key.
+          </div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Label (optional)</label>
+          <input class="form-control" id="impLabel">
+          <div class="form-text">
+            Leave empty to inherit the token's <code>CKA_LABEL</code>. Set
+            a value to override it inside pyPKI (the on-token label is not
+            modified).
+          </div>
+        </div>
+        <div class="alert alert-danger d-none mb-0" id="impError"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="importKey()">
+          <i class="bi bi-check-circle me-1"></i>Import
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Result modal (post-generate) -->
+<div class="modal fade" id="resultModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Key created</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="mb-2">Key id <code id="resKeyId"></code> created on provider <strong id="resProv"></strong>.</p>
+        <label class="form-label small text-muted">Public key (PEM)</label>
+        <textarea class="form-control font-monospace small" id="resPubkey" rows="8" readonly></textarea>
+        <div class="form-text mt-2">
+          The private key never leaves the provider. Use the <code>key_id</code>
+          to bind this key to a CA or OCSP responder.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm delete -->
+<div class="modal fade" id="confirmModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Delete key</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="confirmBody"></div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-danger btn-sm" id="confirmBtn">Delete</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:9999">
+  <div id="toast" class="toast align-items-center text-bg-success border-0" role="alert">
+    <div class="d-flex">
+      <div class="toast-body" id="toastMsg"></div>
+      <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function showToast(msg, type = 'success') {
+    const el = document.getElementById('toast');
+    document.getElementById('toastMsg').innerHTML = msg;
+    el.className = `toast align-items-center text-bg-${type} border-0`;
+    bootstrap.Toast.getOrCreateInstance(el, { delay: 3000 }).show();
+  }
+
+  async function fetchJson(url, init) {
+    const res = await fetch(url, init);
+    let data = {}; try { data = await res.json(); } catch (_) {}
+    if (!res.ok) {
+      const desc = (data && (data.description || data.error)) || `HTTP ${res.status}`;
+      throw new Error(typeof desc === 'string' ? desc : JSON.stringify(desc));
+    }
+    return data;
+  }
+
+  let _providers = [];
+
+  async function loadProviders() {
+    try {
+      const list = await fetchJson(`${apiBase}/crypto-providers`);
+      _providers = list || [];
+      const filterSel = document.getElementById('filterProvider');
+      const preSelect = parseInt(new URLSearchParams(window.location.search).get('provider_id'), 10);
+      filterSel.innerHTML = '<option value="">All providers</option>' + _providers.map(p =>
+        `<option value="${p.id}">${p.label} (${p.kind})</option>`
+      ).join('');
+      if (preSelect) filterSel.value = String(preSelect);
+    } catch (e) {
+      showToast(`Provider list failed: ${e.message}`, 'danger');
+    }
+  }
+
+  function _activeProviders() {
+    // The list endpoint doesn't return state; status is per-id. For modal
+    // dropdowns we filter client-side after a quick status fetch.
+    return Promise.all(_providers.map(async p => {
+      try {
+        const s = await fetchJson(`${apiBase}/crypto-providers/${p.id}/status`);
+        return { ...p, _state: s.state };
+      } catch (_) {
+        return { ...p, _state: 'inactive' };
+      }
+    })).then(rows => rows.filter(p => p._state === 'active'));
+  }
+
+  async function loadKeys() {
+    const provFilter = document.getElementById('filterProvider').value;
+    const typeFilter = document.getElementById('filterKeyType').value;
+    const qs = new URLSearchParams();
+    if (provFilter) qs.set('provider_id', provFilter);
+    if (typeFilter) qs.set('key_type', typeFilter);
+    const url = `${apiBase}/kms/keys${qs.toString() ? '?' + qs.toString() : ''}`;
+    try {
+      const keys = await fetchJson(url);
+      renderKeys(keys);
+      updateTypeFilter(keys);
+    } catch (e) {
+      document.getElementById('keysBody').innerHTML =
+        `<tr><td colspan="9" class="text-danger small p-3">Failed: ${e.message}</td></tr>`;
+    }
+  }
+
+  function updateTypeFilter(keys) {
+    const sel = document.getElementById('filterKeyType');
+    const current = sel.value;
+    const types = Array.from(new Set(keys.map(k => k.key_type).filter(Boolean))).sort();
+    sel.innerHTML = '<option value="">All key types</option>' +
+      types.map(t => `<option value="${t}">${t}</option>`).join('');
+    if (types.includes(current)) sel.value = current;
+  }
+
+  function _providerLabel(id) {
+    const p = _providers.find(x => x.id === id);
+    return p ? p.label : `#${id}`;
+  }
+
+  function renderKeys(keys) {
+    const tbody = document.getElementById('keysBody');
+    if (!keys.length) {
+      tbody.innerHTML = `<tr><td colspan="9" class="text-muted small p-3">No keys.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = keys.map(k => {
+      const usage = (k.usage && k.usage.total) || 0;
+      const usageBadge = usage > 0
+        ? `<span class="badge bg-warning text-dark" title="In use by ${k.usage.cas} CA / ${k.usage.ocsp_responders} OCSP / ${k.usage.certificates} cert">${usage} ref(s)</span>`
+        : '<span class="text-muted small">unused</span>';
+      const cka = k.hsm_token_id ? `<code class="small">${k.hsm_token_id}</code>` : '<span class="text-muted">—</span>';
+      const created = (k.created_at || '').slice(0, 19).replace('T', ' ');
+      const provLink = `<a href="/crypto_provider_details.html?id=${k.provider_id}">${_providerLabel(k.provider_id)}</a>`;
+      const labelStr = k.label || '<span class="text-muted">—</span>';
+      const ownedFlag = (k.key_owned === false || k.key_owned === 0) ? false : true;
+      const deleteBtn = window._isAdmin
+        ? `<button class="btn btn-outline-danger btn-sm" onclick="confirmDelete(${k.id}, '${k.key_type || ''}', ${usage}, '${k.storage_type}', ${ownedFlag}, '${k.hsm_token_id || ''}')" title="Delete"><i class="bi bi-trash"></i></button>`
+        : '';
+      return `
+        <tr>
+          <td>${k.id}</td>
+          <td>${provLink}</td>
+          <td><code class="small">${k.key_type || ''}</code></td>
+          <td>${labelStr}</td>
+          <td><span class="badge bg-light text-dark border">${k.storage_type}</span></td>
+          <td>${cka}</td>
+          <td>${usageBadge}</td>
+          <td class="small text-muted">${created}</td>
+          <td class="text-end">${deleteBtn}</td>
+        </tr>`;
+    }).join('');
+  }
+
+  // ── Generate ──────────────────────────────────────────────────────────────
+
+  async function openGenerate() {
+    const sel = document.getElementById('genProvider');
+    sel.innerHTML = '<option value="">Loading…</option>';
+    document.getElementById('genError').classList.add('d-none');
+    const active = await _activeProviders();
+    if (!active.length) {
+      sel.innerHTML = '<option value="">— no active providers —</option>';
+    } else {
+      sel.innerHTML = active.map(p =>
+        `<option value="${p.id}" data-kind="${p.kind}">${p.label} (${p.kind})</option>`
+      ).join('');
+    }
+  }
+
+  async function generateKey() {
+    const provider_id = parseInt(document.getElementById('genProvider').value, 10);
+    const key_type = document.getElementById('genKeyType').value;
+    const label = document.getElementById('genLabel').value.trim() || null;
+    const errBox = document.getElementById('genError');
+    errBox.classList.add('d-none');
+    if (!provider_id) {
+      errBox.textContent = 'Pick a provider.';
+      errBox.classList.remove('d-none');
+      return;
+    }
+    try {
+      const result = await fetchJson(`${apiBase}/kms/keys`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider_id, key_type, label }),
+      });
+      bootstrap.Modal.getInstance(document.getElementById('generateModal')).hide();
+      document.getElementById('resKeyId').textContent = result.key_id;
+      document.getElementById('resProv').textContent = _providerLabel(result.provider_id);
+      document.getElementById('resPubkey').value = result.public_key || '';
+      bootstrap.Modal.getOrCreateInstance(document.getElementById('resultModal')).show();
+      loadKeys();
+    } catch (e) {
+      errBox.textContent = e.message;
+      errBox.classList.remove('d-none');
+    }
+  }
+
+  // ── Import ────────────────────────────────────────────────────────────────
+
+  async function openImport() {
+    const sel = document.getElementById('impProvider');
+    sel.innerHTML = '<option value="">Loading…</option>';
+    document.getElementById('impError').classList.add('d-none');
+    document.getElementById('impCkaId').value = '';
+    document.getElementById('impLabel').value = '';
+    const active = await _activeProviders();
+    const pkcs11Only = active.filter(p => p.kind === 'pkcs11');
+    if (!pkcs11Only.length) {
+      sel.innerHTML = '<option value="">— no active pkcs11 providers —</option>';
+    } else {
+      sel.innerHTML = pkcs11Only.map(p =>
+        `<option value="${p.id}">${p.label}</option>`
+      ).join('');
+    }
+  }
+
+  async function importKey() {
+    const provider_id = parseInt(document.getElementById('impProvider').value, 10);
+    const hsm_token_id = document.getElementById('impCkaId').value.trim();
+    const label = document.getElementById('impLabel').value.trim() || null;
+    const errBox = document.getElementById('impError');
+    errBox.classList.add('d-none');
+    if (!provider_id || !hsm_token_id) {
+      errBox.textContent = 'Pick a pkcs11 provider and supply the CKA_ID hex.';
+      errBox.classList.remove('d-none');
+      return;
+    }
+    try {
+      const result = await fetchJson(`${apiBase}/kms/keys/import`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider_id, hsm_token_id, label }),
+      });
+      bootstrap.Modal.getInstance(document.getElementById('importModal')).hide();
+      document.getElementById('resKeyId').textContent = result.key_id;
+      document.getElementById('resProv').textContent = _providerLabel(result.provider_id);
+      document.getElementById('resPubkey').value = result.public_key || '';
+      bootstrap.Modal.getOrCreateInstance(document.getElementById('resultModal')).show();
+      loadKeys();
+    } catch (e) {
+      errBox.textContent = e.message;
+      errBox.classList.remove('d-none');
+    }
+  }
+
+  // ── Delete ────────────────────────────────────────────────────────────────
+
+  function confirmDelete(id, keyType, usage, storageType, owned, hsmTokenId) {
+    let hsmNote = '';
+    if (storageType === 'HSM') {
+      if (owned) {
+        hsmNote = `<div class="alert alert-warning small mt-2 mb-0">
+            <i class="bi bi-exclamation-triangle me-1"></i>
+            This key was generated by pyPKI; both the private and public on-token
+            objects (CKA_ID <code>${hsmTokenId}</code>) will be destroyed.
+          </div>`;
+      } else {
+        hsmNote = `<div class="alert alert-info small mt-2 mb-0">
+            <i class="bi bi-info-circle me-1"></i>
+            This key was <strong>imported</strong>; only its pyPKI registration
+            will be removed. The on-token objects (CKA_ID <code>${hsmTokenId}</code>)
+            are preserved on the HSM.
+          </div>`;
+      }
+    }
+    const usageWarn = usage > 0
+      ? `<div class="alert alert-danger small mb-0 mt-2">Key is in use by ${usage} CA/OCSP/cert reference(s); the server will refuse the delete.</div>`
+      : '';
+    document.getElementById('confirmBody').innerHTML =
+      `Delete key <code>#${id}</code> (${keyType})?${hsmNote}${usageWarn}`;
+    document.getElementById('confirmBtn').onclick = () => deleteKey(id);
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('confirmModal')).show();
+  }
+  async function deleteKey(id) {
+    bootstrap.Modal.getInstance(document.getElementById('confirmModal')).hide();
+    try {
+      await fetchJson(`${apiBase}/kms/keys/${id}`, { method: 'DELETE' });
+      showToast(`Key <code>#${id}</code> deleted.`);
+      loadKeys();
+    } catch (e) { showToast(`Delete failed: ${e.message}`, 'danger'); }
+  }
+
+  async function init() {
+    await loadProviders();
+    await loadKeys();
+  }
+
+  window.onload = init;
+</script>
+{% endblock %}

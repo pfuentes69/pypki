@@ -548,6 +548,238 @@ def kms_generate_key(algorithm: str, persist: bool, **kwargs):
     return kms.generate_key(algorithm=algorithm, persist=persist, **kwargs)
 
 
+# ── Crypto provider management (Phase 4: activation lifecycle) ───────────────
+#
+# Full CRUD lands in Phase 5; this is the read-only + activation surface.
+# See doc/kms-strategy.md §9.1.
+
+def _sanitise_provider(record: dict) -> dict:
+    """Drop secret material before returning a provider record over the API."""
+    if not record:
+        return record
+    safe = dict(record)
+    safe.pop("auth_secret_blob", None)
+    return safe
+
+
+def list_crypto_providers():
+    db: PKIDataBase = pki.get_db()
+    with db.connection():
+        rows = db.list_providers()
+    return [_sanitise_provider(r) for r in rows]
+
+
+def get_crypto_provider(provider_id: int):
+    db: PKIDataBase = pki.get_db()
+    with db.connection():
+        row = db.get_provider_by_id(provider_id)
+    return _sanitise_provider(row)
+
+
+def get_crypto_provider_status(provider_id: int):
+    return pki.get_kms().get_provider_status(provider_id)
+
+
+def activate_crypto_provider(provider_id: int, pin: str = None, user_id: int = 0):
+    """
+    Activate a provider via the KMS. Records an audit-log entry on success;
+    re-raises on failure so the route handler can map to an HTTP status.
+    """
+    pki.get_kms().activate_provider(provider_id, pin=pin)
+    write_audit_log(
+        "crypto_providers", provider_id,
+        "ACTIVATE_OPERATOR" if pin else "ACTIVATE",
+        user_id,
+    )
+
+
+def deactivate_crypto_provider(provider_id: int, user_id: int = 0):
+    pki.get_kms().deactivate_provider(provider_id)
+    write_audit_log("crypto_providers", provider_id, "DEACTIVATE", user_id)
+
+
+# ── Provider CRUD (Phase 5a) ─────────────────────────────────────────────────
+
+# Fields the API accepts on POST/PUT. `kind` and `is_default` are intentionally
+# excluded from the update path; `is_default` only flips through reset_pki.
+_CREATE_FIELDS = {
+    "label", "kind", "module_path", "slot_label", "auth_kind",
+    "auto_activate", "auth_secret_ref", "extra_json", "description",
+}
+_UPDATE_FIELDS = _CREATE_FIELDS - {"kind"}
+
+
+def create_crypto_provider(payload: dict, user_id: int = 0) -> int:
+    """
+    Insert a new CryptoProviders row. Validates auth_secret_ref/auto_activate
+    consistency and (when ``auth_secret_ref='db:encrypted'``) encrypts the
+    operator-supplied PIN under the master KEK before storing.
+
+    The payload may contain ``pin`` (plaintext) which is consumed and never
+    persisted as plaintext: it is encrypted into ``auth_secret_blob`` for
+    db:encrypted, and ignored otherwise.
+
+    Returns the new provider id; raises ValueError on validation failure.
+    """
+    db: PKIDataBase = pki.get_db()
+    record = {k: payload.get(k) for k in _CREATE_FIELDS if k in payload}
+    record.setdefault("auth_kind", "pin")
+    record.setdefault("auto_activate", False)
+    record.setdefault("extra_json", "{}")
+
+    if not record.get("label"):
+        raise ValueError("label is required")
+    if record.get("kind") not in ("software", "pkcs11"):
+        raise ValueError("kind must be 'software' or 'pkcs11'")
+    if record["kind"] == "pkcs11" and not record.get("module_path"):
+        raise ValueError("module_path is required for kind='pkcs11'")
+
+    pin = payload.get("pin")
+    if record.get("auth_secret_ref") == "db:encrypted":
+        if not pin:
+            raise ValueError(
+                "auth_secret_ref='db:encrypted' requires a 'pin' field in the payload"
+            )
+        from pypki.key_encryption import encrypt_provider_pin
+        record["auth_secret_blob"] = encrypt_provider_pin(pin.encode("utf-8"))
+
+    PKIDataBase.validate_provider_auth_config(record)
+
+    with db.connection():
+        new_id = db.insert_provider(
+            label=record["label"],
+            kind=record["kind"],
+            auth_secret_ref=record.get("auth_secret_ref") or "operator:prompt",
+            module_path=record.get("module_path"),
+            slot_label=record.get("slot_label"),
+            auth_kind=record.get("auth_kind", "pin"),
+            auto_activate=bool(record.get("auto_activate")),
+            auth_secret_blob=record.get("auth_secret_blob"),
+            extra_json=record.get("extra_json") or "{}",
+            description=record.get("description"),
+            is_default=False,
+        )
+    if new_id is None:
+        raise RuntimeError("Failed to create CryptoProviders row")
+    write_audit_log("crypto_providers", new_id, "CREATE", user_id)
+    return new_id
+
+
+def update_crypto_provider(provider_id: int, payload: dict, user_id: int = 0) -> bool:
+    """
+    Update a provider. Validates the resulting record and re-encrypts the
+    PIN if a new one is supplied for ``auth_secret_ref='db:encrypted'``.
+    Returns True if anything changed.
+    """
+    db: PKIDataBase = pki.get_db()
+    with db.connection():
+        existing = db.get_provider_by_id(provider_id)
+    if not existing:
+        raise KeyError(f"crypto_provider id={provider_id} not found")
+
+    fields = {k: payload[k] for k in _UPDATE_FIELDS if k in payload}
+
+    # Re-encrypt the PIN on demand. If the operator changes auth_secret_ref
+    # from db:encrypted to something else, drop the stored blob.
+    new_ref = fields.get("auth_secret_ref", existing.get("auth_secret_ref"))
+    pin = payload.get("pin")
+    if new_ref == "db:encrypted" and pin:
+        from pypki.key_encryption import encrypt_provider_pin
+        fields["auth_secret_blob"] = encrypt_provider_pin(pin.encode("utf-8"))
+    elif new_ref != "db:encrypted":
+        fields["auth_secret_blob"] = None
+
+    # Build the merged record for validation.
+    merged = dict(existing)
+    merged.update(fields)
+    PKIDataBase.validate_provider_auth_config(merged)
+
+    # Track the auto_activate flip separately so it's audit-loggable.
+    auto_changed = (
+        "auto_activate" in fields
+        and bool(fields["auto_activate"]) != bool(existing.get("auto_activate"))
+    )
+
+    with db.connection():
+        ok = db.update_provider(provider_id, fields)
+    if ok:
+        write_audit_log("crypto_providers", provider_id, "UPDATE", user_id)
+        if auto_changed:
+            write_audit_log(
+                "crypto_providers", provider_id, "AUTO_ACTIVATE_TOGGLED", user_id
+            )
+    return ok
+
+
+def delete_crypto_provider(provider_id: int, user_id: int = 0) -> dict | None:
+    """Delete a provider. Maps to 200 / 404 / 409 in the route handler."""
+    db: PKIDataBase = pki.get_db()
+    # Make sure no backend session is left dangling for this provider.
+    try:
+        pki.get_kms().deactivate_provider(provider_id)
+    except Exception:
+        logger.warning(
+            f"crypto_provider delete: deactivate failed for id={provider_id}; "
+            f"proceeding with DB delete",
+            exc_info=True,
+        )
+    with db.connection():
+        result = db.delete_provider(provider_id)
+    if result and result.get("deleted"):
+        write_audit_log("crypto_providers", provider_id, "DELETE", user_id)
+    return result
+
+
+# ── Key management (Phase 5a) ────────────────────────────────────────────────
+
+def list_kms_keys(provider_id: int = None, key_type: str = None):
+    db: PKIDataBase = pki.get_db()
+    with db.connection():
+        rows = db.list_keys(provider_id=provider_id, key_type=key_type)
+        # Annotate each row with a usage summary so the UI can show "in use".
+        for r in rows:
+            r["usage"] = db.count_key_usage(r["id"])
+    return rows
+
+
+def get_kms_key(key_id: int):
+    db: PKIDataBase = pki.get_db()
+    with db.connection():
+        row = db.get_key_record(key_id)
+        if not row:
+            return None
+        # Strip the encrypted/plain private material.
+        row.pop("private_key", None)
+        row.pop("token_password", None)
+        row["usage"] = db.count_key_usage(key_id)
+    return row
+
+
+def generate_kms_key(provider_id: int, key_type: str, label: str = None,
+                     user_id: int = 0) -> dict:
+    result = pki.get_kms().generate_key_in_provider(
+        provider_id, key_type=key_type, label=label,
+    )
+    write_audit_log("kms_keys", result["key_id"], "GENERATE", user_id)
+    return result
+
+
+def import_pkcs11_kms_key(provider_id: int, hsm_token_id: str,
+                          label: str = None, user_id: int = 0) -> dict:
+    result = pki.get_kms().import_pkcs11_key(
+        provider_id, hsm_token_id, label=label,
+    )
+    write_audit_log("kms_keys", result["key_id"], "IMPORT", user_id)
+    return result
+
+
+def delete_kms_key(key_id: int, user_id: int = 0) -> dict | None:
+    result = pki.get_kms().delete_key(key_id)
+    if result and result.get("deleted"):
+        write_audit_log("kms_keys", key_id, "DELETE", user_id)
+    return result
+
+
 def create_template(template_dict, user_id: int = 0):
     db = pki.get_db()
     with db.connection():
