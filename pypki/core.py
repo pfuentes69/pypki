@@ -53,6 +53,12 @@ class PyPKI:
         with self.__db.connection():
             self.__db.create_database()
 
+        # Run idempotent post-create seeds (e.g. softhsm-dev provider when
+        # PYPKI_SEED_SOFTHSM_PROVIDER=true). create_database() seeds the
+        # software-default provider directly but defers env-gated seeds to
+        # the migration code path.
+        self.__db.migrate_schema()
+
         for template_path in glob.glob(os.path.join(self.__config["template_folder"], "*.json")):
             with open(template_path, "r") as template_file:
                 template_json = template_file.read()
