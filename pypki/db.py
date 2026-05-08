@@ -2323,6 +2323,21 @@ class PKIDataBase:
 
                 cursor.execute(f"USE {db_name}")
 
+                # Also bail out if the schema exists but is empty (pre-reset_pki
+                # state — e.g. first run inside Docker, where MariaDB creates the
+                # empty database from MARIADB_DATABASE before reset_pki has built
+                # any tables). create_database() will produce the modern schema
+                # directly, so migrations have nothing to upgrade.
+                cursor.execute(
+                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
+                    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'CertificationAuthorities'",
+                    (db_name,)
+                )
+                if cursor.fetchone()[0] == 0:
+                    cursor.close()
+                    logger.info(f"migrate_schema: schema '{db_name}' is empty; skipping (reset_pki will build the modern schema)")
+                    return
+
                 # Migration: add CertificationAuthorities.key_owned (introduced when
                 # CAs gained support for binding to a pre-existing KMS key).
                 cursor.execute(
