@@ -46,8 +46,6 @@ start_time = time.time()  # Record start time
 print("Generate sample certificates")
 
 pki = PyPKI("config/config.aws.json")
-pki.load_template_collection()
-pki.load_ca_collection()
 
 ca = pki.select_ca_by_name("IoT Root CA 1")
 pki.select_cert_template_by_name("IoT Device")

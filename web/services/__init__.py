@@ -64,10 +64,6 @@ crl_task_enabled = True
 
 pki = PyPKI(CONFIG_PATH)
 
-pki.load_ocsp_responders()
-pki.load_template_collection()
-pki.load_ca_collection()
-
 # Activate every crypto provider with auto_activate=TRUE so PKCS#11
 # sessions and software KEKs are ready before the first signing request.
 # Failures are logged but non-fatal (kms-strategy.md §6).

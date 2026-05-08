@@ -19,7 +19,6 @@ start_time = time.time()  # Record start time
 print("Generate CRLs for all CAs")
 
 pki = PyPKI(config_path)
-pki.load_ca_collection()
 
 ca_collection = pki.get_ca_collection()
 

@@ -122,7 +122,6 @@ def update_ca(ca_id: int, data: dict, user_id: int = 0):
     with db.connection():
         ok = db.update_ca(ca_id, fields)
     if ok:
-        pki.load_ca_collection()
         write_audit_log("cas", ca_id, "UPDATE", user_id)
     return ok
 
@@ -540,7 +539,6 @@ def update_template(template_id, template_dict, user_id: int = 0):
     with db.connection():
         success = db.update_cert_template(template_id, template_dict)
     if success:
-        pki.load_template_collection()
         write_audit_log("templates", template_id, "UPDATE", user_id)
     return success
 
@@ -787,7 +785,6 @@ def create_template(template_dict, user_id: int = 0):
     with db.connection():
         template_id = db.insert_cert_template(template_dict)
     if template_id:
-        pki.load_template_collection()
         write_audit_log("templates", template_id, "CREATE", user_id)
     return template_id
 
@@ -892,10 +889,6 @@ def list_backups() -> list:
 def reset_pki_database() -> dict:
     """Drop and recreate all tables, then seed defaults from config files."""
     pki.reset_pki()
-    # Reload in-memory state to reflect the fresh DB
-    pki.load_template_collection()
-    pki.load_ca_collection()
-    pki.load_ocsp_responders()
     return {"reset": True}
 
 

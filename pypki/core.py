@@ -22,7 +22,14 @@ from .log import logger
 
 class PyPKI:
     def __init__(self, config_file_json:str = None):
-        """Initialize the PKI Utilities class."""
+        """Initialize the PKI Utilities class.
+
+        CA, template, and OCSP responder records are read from the database
+        on demand. Earlier revisions kept in-memory caches that became stale
+        across gunicorn workers (a CA created via worker A was invisible to
+        worker B until restart). Direct DB reads on the lookup hot path are
+        cheap relative to keygen/signing and remove that whole class of bug.
+        """
         self.__config = {}
         self.__db = PKIDataBase()
         self.__kms = KeyManagementService(self.__db)
@@ -30,9 +37,6 @@ class PyPKI:
         self.__cert_tool = CertificateTools()
         self.__ca_id = 0
         self.__cert_template_id = 0
-        self.__ocsp_responders = []
-        self.__ca_collection = []
-        self.__template_collection = []
 
         if config_file_json:
             with open(config_file_json, "rb") as config_file:
@@ -80,7 +84,7 @@ class PyPKI:
 
         The SQL file already contains DROP TABLE / CREATE TABLE / INSERT
         statements with FOREIGN_KEY_CHECKS disabled, so it handles its own
-        cleanup.  After the restore the in-memory collections are reloaded.
+        cleanup.
         """
         import mysql.connector
 
@@ -115,11 +119,6 @@ class PyPKI:
         # would otherwise roll the schema back to its pre-migration state.
         self.__db.migrate_schema()
 
-        # Reload in-memory state to reflect the restored data
-        self.load_template_collection()
-        self.load_ca_collection()
-        self.load_ocsp_responders()
-
     def get_db(self):
         return self.__db
 
@@ -131,33 +130,23 @@ class PyPKI:
 
 
     def create_ca_from_config_json(self, config_json: str) -> int:
-        """Create a CA from a JSON config string, persist it, and refresh the collection.
-        Returns the new CA's database ID."""
+        """Create a CA from a JSON config string. Returns the new CA's database ID."""
         ca = CertificationAuthority()
         ca.load_config_json(config_json)
         with self.__db.connection():
             new_id = self.__db.insert_ca(ca)
-        self.load_ca_collection()
         return new_id
 
 
-    def load_ca_collection(self):
-        with self.__db.connection():
-            self.__ca_collection = self.__db.get_ca_collection()
-
-
     def get_ca_collection(self):
-        return self.__ca_collection
+        with self.__db.connection():
+            return self.__db.get_ca_collection()
 
 
     def delete_ca(self, ca_id: int) -> dict:
-        """Delete a CA and its dependent resources, then refresh the in-memory collection."""
+        """Delete a CA and its dependent resources."""
         with self.__db.connection():
-            stats = self.__db.delete_ca(ca_id)
-        if stats is not None:
-            self.load_ca_collection()
-            self.load_ocsp_responders()
-        return stats
+            return self.__db.delete_ca(ca_id)
 
     def get_ca_by_id(self, ca_id: int) -> CertificationAuthority:
         with self.__db.connection():
@@ -168,8 +157,8 @@ class PyPKI:
     def select_ca_by_name(self, ca_name: str) -> CertificationAuthority:
         self.__ca_id = 0
         self.__ca_active = None
-        if self.__ca_collection:
-            for ca_item in self.__ca_collection:
+        with self.__db.connection():
+            for ca_item in self.__db.get_ca_collection():
                 if ca_item.get("name") == ca_name:
                     logger.info(f"CA {ca_name} selected")
                     return self.select_ca_by_id(ca_item.get("id"))
@@ -181,40 +170,43 @@ class PyPKI:
     def _build_ca(self, ca_id: int) -> CertificationAuthority:
         """Build and return a local CertificationAuthority for *ca_id*.
 
-        Does NOT mutate any shared instance state, so it is safe to call
-        concurrently from multiple request threads.
+        Reads the CA record from the database on every call. Safe to call
+        concurrently from multiple request threads (no shared mutable state).
         """
-        for ca_item in self.__ca_collection:
-            if ca_item.get("id") == ca_id:
-                ca = CertificationAuthority()
-                ca_config = {
-                    "ca_name": ca_item.get("name"),
-                    "max_validity": ca_item.get("max_validity"),
-                    "serial_number_length": ca_item.get("serial_number_length"),
-                    "crl_validity": ca_item.get("crl_validity"),
-                    "extensions": json.loads(ca_item.get("extensions", "{}")),
-                    "crypto": {
-                        "certificate": ca_item.get("certificate"),
-                        "certificate_chain": ca_item.get("certificate_chain"),
-                        "kms_key_id": ca_item.get("private_key_reference"),
-                    }
-                }
-                ca.load_config_json(json.dumps(ca_config, indent=2))
-                ca.set_kms(self.__kms)
-                return ca
-        return None
+        with self.__db.connection():
+            ca_item = self.__db.get_ca_record_by_id(ca_id)
+        if ca_item is None:
+            return None
+        ca = CertificationAuthority()
+        ca_config = {
+            "ca_name": ca_item.get("name"),
+            "max_validity": ca_item.get("max_validity"),
+            "serial_number_length": ca_item.get("serial_number_length"),
+            "crl_validity": ca_item.get("crl_validity"),
+            "extensions": json.loads(ca_item.get("extensions", "{}")),
+            "crypto": {
+                "certificate": ca_item.get("certificate"),
+                "certificate_chain": ca_item.get("certificate_chain"),
+                "kms_key_id": ca_item.get("private_key_reference"),
+            }
+        }
+        ca.load_config_json(json.dumps(ca_config, indent=2))
+        ca.set_kms(self.__kms)
+        return ca
 
     def _build_cert_tool(self, template_id: int) -> CertificateTools:
         """Build and return a local CertificateTools for *template_id*.
 
-        Does NOT mutate any shared instance state.
+        Reads the template record from the database on every call. Safe to
+        call concurrently from multiple request threads.
         """
-        for template in self.__template_collection:
-            if template.get("id") == template_id:
-                cert_tool = CertificateTools()
-                cert_tool.load_certificate_template(template.get("definition"))
-                return cert_tool
-        return None
+        with self.__db.connection():
+            template = self.__db.get_cert_template_record_by_id(template_id)
+        if template is None:
+            return None
+        cert_tool = CertificateTools()
+        cert_tool.load_certificate_template(template.get("definition"))
+        return cert_tool
 
     def select_ca_by_id(self, ca_id: int) -> CertificationAuthority:
         """Select a CA by ID, storing it as the active CA (single-threaded / legacy use only).
@@ -239,16 +231,18 @@ class PyPKI:
             self.__db.insert_ocsp_responder(ocsp_resp)
 
 
-    def load_ocsp_responders(self):
-        with self.__db.connection():
-            self.__ocsp_responders = self.__db.get_ocsp_responders_collection()
-        for responder in self.__ocsp_responders:
-            responder.set_kms(self.__kms)
-
-
     def get_ocsp_responder_by_issuer_ski(self, issuer_ski):
-        for responder in self.__ocsp_responders:
+        """Look up the OCSP responder matching *issuer_ski* directly from the DB.
+
+        OCSPResponders is a tiny table (≤ one row per CA), so a full scan
+        is cheap and avoids the cross-worker staleness an in-memory cache
+        would create.
+        """
+        with self.__db.connection():
+            responders = self.__db.get_ocsp_responders_collection()
+        for responder in responders:
             if responder.get_issuer_ski() == issuer_ski:
+                responder.set_kms(self.__kms)
                 return responder
         return None
 
@@ -263,12 +257,10 @@ class PyPKI:
     def update_ocsp_responder_settings(self, responder_id: int, settings: dict):
         with self.__db.connection():
             self.__db.update_ocsp_responder_settings(responder_id, settings)
-        self.load_ocsp_responders()
 
     def delete_ocsp_responder(self, responder_id: int):
         with self.__db.connection():
             self.__db.delete_ocsp_responder(responder_id)
-        self.load_ocsp_responders()
 
     def create_ocsp_responder(self, data: dict) -> int:
         """
@@ -291,7 +283,6 @@ class PyPKI:
         payload = {**data, "issuer_ski": issuer_ski, "issuer_certificate": issuer_cert}
         with self.__db.connection():
             new_id = self.__db.insert_ocsp_responder_from_dict(payload)
-        self.load_ocsp_responders()
         return new_id
 
     def create_cert_template_from_json(self, config_json: str):
@@ -300,20 +291,16 @@ class PyPKI:
             self.__db.insert_cert_template(cert_template)
 
 
-    def load_template_collection(self):
-        with self.__db.connection():
-            self.__template_collection = self.__db.get_template_collection()
-
-
     def get_template_collection(self):
-        return self.__template_collection
+        with self.__db.connection():
+            return self.__db.get_template_collection()
 
 
     def select_cert_template_by_name(self, cert_template_name: str) -> CertificateTools:
         self.__cert_template_id = 0
         self.__cert_tool = None
-        if self.__template_collection:
-            for template in self.__template_collection:
+        with self.__db.connection():
+            for template in self.__db.get_template_collection():
                 if template.get("name") == cert_template_name:
                     logger.info(f"Certificate Template {cert_template_name} selected")
                     return self.select_cert_template_by_id(template.get("id"))
