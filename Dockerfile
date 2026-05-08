@@ -6,6 +6,7 @@ FROM python:3.13-slim
 # is not used at runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc \
+        g++ \
         swig \
         pkg-config \
         libmariadb-dev \
