@@ -103,6 +103,19 @@ class SoftwareBackend:
                 f"exposed through the KMS API."
             )
 
+        # End-entity key escrow regime: the row holds a KEK-wrapped PEM that
+        # is *also* passphrase-encrypted with an operator-supplied PKCS#12
+        # password. Loading it requires that passphrase, which the KMS sign
+        # path does not have. Refuse cleanly and point at the right flow.
+        if storage_type == "PassphraseEncrypted":
+            raise ValueError(
+                f"SoftwareBackend: KeyStorage id={key_id} is a passphrase-"
+                f"encrypted end-entity key (storage_type='PassphraseEncrypted'); "
+                f"the asymmetric signing path does not handle these. Use "
+                f"PyPKI.build_pkcs12_for_certificate() with the operator-"
+                f"supplied PKCS#12 passphrase to access the key material."
+            )
+
         if storage_type == "Encrypted":
             blob = record.get("private_key")
             if not blob:
@@ -209,16 +222,30 @@ class SoftwareBackend:
 
 
 def _looks_like_pem(blob) -> bool:
-    """Return True if the value looks like a PEM-armoured private key.
+    """Return True if the value looks like a *plaintext* PEM-armoured
+    private key — the Gap 10 legacy state where ``KeyStorage.private_key``
+    holds raw PEM under ``storage_type='Encrypted'``.
 
-    Used to detect the Gap 10 legacy state: ``KeyStorage`` rows marked
-    ``storage_type='Encrypted'`` whose ``private_key`` column actually
-    contains plaintext PEM rather than a base64-encoded ciphertext blob.
+    Excludes passphrase-encrypted PEM (PKCS#8 ``-----BEGIN ENCRYPTED
+    PRIVATE KEY-----`` and PKCS#1 / SEC1 ``Proc-Type: 4,ENCRYPTED``) so
+    the migration doesn't double-encrypt rows whose ``Encrypted`` label
+    actually meant "passphrase-encrypted PEM" (the regime collision
+    documented in roadmap §2 / PROGRESS §2).
     """
     if not isinstance(blob, (str, bytes, bytearray)):
         return False
     s = blob.decode("utf-8", "ignore") if isinstance(blob, (bytes, bytearray)) else blob
-    return s.lstrip().startswith("-----BEGIN ")
+    s = s.lstrip()
+    if not s.startswith("-----BEGIN "):
+        return False
+    if s.startswith("-----BEGIN ENCRYPTED PRIVATE KEY-----"):
+        return False
+    # PKCS#1 / SEC1 carry an explicit "Proc-Type: 4,ENCRYPTED" line in the
+    # header when password-protected. Inspect only the first 300 bytes —
+    # the marker is always near the top.
+    if "Proc-Type: 4,ENCRYPTED" in s[:300]:
+        return False
+    return True
 
 
 def _generate_software_keypair(key_type: str):

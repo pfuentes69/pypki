@@ -29,7 +29,12 @@
   <div class="row g-3 mb-4">
     <div class="col-md-6">
       <label class="form-label fw-semibold">Certification Authority <span class="text-danger">*</span></label>
-      <select id="caSelect" class="form-select"><option value="">Select CA…</option></select>
+      <select id="caSelect" class="form-select" onchange="onCaChange()"><option value="">Select CA…</option></select>
+      <div id="selfSignedNote" class="form-text text-warning d-none">
+        <i class="bi bi-shield-exclamation me-1"></i>Self-signed: subject and issuer
+        will be identical, signed by the freshly-generated key. CSR upload is
+        disabled — server-side key generation is required.
+      </div>
     </div>
     <div class="col-md-6">
       <label class="form-label fw-semibold">Certificate Template <span class="text-danger">*</span></label>
@@ -278,6 +283,12 @@ async function loadDropdowns() {
   const [cas, templates] = await Promise.all([caRes.json(), tplRes.json()]);
 
   const caSelect = document.getElementById('caSelect');
+  // Sentinel "Self-signed" option goes first — value=0, the API treats
+  // ca_id ∈ {0, null} as the self-signed request (see /certificate/issue-pkcs12).
+  const selfOpt = document.createElement('option');
+  selfOpt.value = '0';
+  selfOpt.textContent = '— Self-signed (no CA) —';
+  caSelect.appendChild(selfOpt);
   cas.forEach(c => {
     const o = document.createElement('option');
     o.value = c.id; o.textContent = c.name; caSelect.appendChild(o);
@@ -288,6 +299,33 @@ async function loadDropdowns() {
     const o = document.createElement('option');
     o.value = t.id; o.textContent = t.name; tplSelect.appendChild(o);
   });
+}
+
+// ── CA change — self-signed has restrictions ─────────────────────────────────
+
+function _isSelfSigned() {
+  return document.getElementById('caSelect').value === '0';
+}
+
+function onCaChange() {
+  const selfSigned = _isSelfSigned();
+  document.getElementById('selfSignedNote').classList.toggle('d-none', !selfSigned);
+  // Self-signed requires server-side keygen (the cert's own private key
+  // signs it; we don't have a private key when the user uploads a CSR).
+  const csrRadio = document.getElementById('modeUploadCsr');
+  const serverRadio = document.getElementById('modeServerKey');
+  if (selfSigned) {
+    csrRadio.disabled = true;
+    csrRadio.parentElement.title = 'CSR upload not available for self-signed';
+    if (csrRadio.checked) {
+      serverRadio.checked = true;
+      onKeyModeChange();
+    }
+  } else {
+    csrRadio.disabled = false;
+    csrRadio.parentElement.title = '';
+  }
+  validate();
 }
 
 // ── Template change ──────────────────────────────────────────────────────────

@@ -368,7 +368,8 @@ def generate_certificate_from_csr(ca_template_config, csr_pem: bytes,
         request_json=request_json,
         validity_days=PKITools.INFINITE_VALIDITY,
         enforce_template=True,
-        return_certificate=return_certificate
+        return_certificate=return_certificate,
+        self_signed=bool(ca_template_config.get("self_signed")),
     )
     # certificate_der is the cert_id when return_certificate=False
     cert_id = certificate_der if not return_certificate else None
@@ -387,6 +388,7 @@ def generate_pkcs12(ca_template_config, request_json: str,
         key_type=key_type,
         pfx_password=pfx_password,
         friendly_name=friendly_name,
+        self_signed=bool(ca_template_config.get("self_signed")),
         validity_days=PKITools.INFINITE_VALIDITY,
         store_key=store_key,
     )

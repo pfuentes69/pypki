@@ -199,6 +199,22 @@ class PKIDataBase:
             logger.error(f"Error listing CryptoProviders: {err}")
             return []
 
+    def kek_wrap_pem(self, pem_text: str):
+        """
+        Public wrapper around :meth:`_encrypt_pem_under_default_provider`
+        that handles its own connection / cursor. Returns
+        ``(provider_id, ciphertext_b64)`` so callers in ``core.py`` can
+        encrypt PEM material under the per-provider KEK without owning a
+        cursor themselves.
+        """
+        with self.connection():
+            cursor = self._local.connection.cursor(buffered=True)
+            try:
+                return self._encrypt_pem_under_default_provider(cursor, pem_text)
+            finally:
+                cursor.close()
+
+
     def _encrypt_pem_under_default_provider(self, cursor, pem_text: str):
         """
         Resolve the default crypto provider, derive its KEK, encrypt the PEM,
@@ -1382,14 +1398,20 @@ class PKIDataBase:
             return None
 
 
-    def insert_certificate(self, pem_certificate: bytes, ca_id: int, template_id: int, private_key_reference: int = None):
+    def insert_certificate(self, pem_certificate: bytes, ca_id: int, template_id: int,
+                           private_key_reference: int = None, is_self_signed: bool = False):
         """
         Inserts a certificate record into the Certificates table.
-        
+
         :param pem_certificate: Certificate in PEM format (string)
-        :param ca_id: The CA ID related to this certificate
-        :param type_id: The certificate type ID
+        :param ca_id: The CA ID related to this certificate. Pass ``None`` for
+                      self-signed certificates.
+        :param template_id: The certificate template ID
         :param private_key_reference: (Optional) Reference to the private key ID
+        :param is_self_signed: When True, the certificate's subject is also its
+                               issuer and it was signed by its own private key.
+                               Recorded as a marker so the certificate list can
+                               render the distinction without a JOIN.
         """
         try:
             # Parse the PEM certificate
@@ -1420,8 +1442,9 @@ class PKIDataBase:
             insert_query = """
                 INSERT INTO Certificates (
                     ca_id, template_id, serial_number, subject_name, issuer_name,
-                    not_before, not_after, public_key, private_key_reference, certificate_data, fingerprint
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    not_before, not_after, public_key, private_key_reference,
+                    is_self_signed, certificate_data, fingerprint
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
             data = (
                 ca_id,
@@ -1433,6 +1456,7 @@ class PKIDataBase:
                 not_after_str,
                 public_key,
                 private_key_reference,
+                bool(is_self_signed),
                 pem_certificate,
                 fingerprint
             )
@@ -2333,6 +2357,11 @@ class PKIDataBase:
                 # don't get a phantom provider row.
                 self._migrate_seed_softhsm_provider(cursor)
 
+                # ── Functional improvement: self-signed certificates ─────────────
+                # Adds Certificates.is_self_signed so the UI / API can show the
+                # distinction without a JOIN gymnastic. See roadmap.md §8.
+                self._migrate_certificates_is_self_signed(cursor, db_name)
+
                 cursor.close()
         except mysql.connector.Error as err:
             logger.error(f"Schema migration failed: {err}")
@@ -2423,7 +2452,9 @@ class PKIDataBase:
             )
             self._local.connection.commit()
 
-        # Extend storage_type ENUM with 'Symmetric' if not already present
+        # Extend storage_type ENUM with values added since v1 of the schema.
+        # Each addition is checked independently so re-runs are no-ops and
+        # an upgrade from an in-between version still picks up what it needs.
         cursor.execute(
             "SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
             "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'KeyStorage' "
@@ -2431,11 +2462,17 @@ class PKIDataBase:
             (db_name,)
         )
         row = cursor.fetchone()
-        if row is not None and "'Symmetric'" not in (row[0] or ""):
-            logger.info("migrate_schema: extending KeyStorage.storage_type ENUM with 'Symmetric'")
+        current_type = (row[0] if row else "") or ""
+        wanted_values = ["Encrypted", "Plain", "HSM", "Symmetric", "PassphraseEncrypted"]
+        missing = [v for v in wanted_values if f"'{v}'" not in current_type]
+        if missing:
+            logger.info(
+                "migrate_schema: extending KeyStorage.storage_type ENUM with "
+                f"{missing}"
+            )
             cursor.execute(
                 "ALTER TABLE KeyStorage MODIFY COLUMN storage_type "
-                "ENUM('Encrypted', 'Plain', 'HSM', 'Symmetric') NOT NULL"
+                "ENUM('Encrypted', 'Plain', 'HSM', 'Symmetric', 'PassphraseEncrypted') NOT NULL"
             )
             self._local.connection.commit()
 
@@ -2621,6 +2658,29 @@ class PKIDataBase:
                 f"(HSM_PIN_KEK or other secret unavailable)."
             )
 
+    def _migrate_certificates_is_self_signed(self, cursor, db_name):
+        """
+        Add ``Certificates.is_self_signed`` on existing installs. Idempotent
+        — checks INFORMATION_SCHEMA before issuing the ALTER. Existing
+        rows default to FALSE, which matches the historical reality (only
+        CA-issued certificates existed before this column).
+        """
+        cursor.execute(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'Certificates' "
+            "AND COLUMN_NAME = 'is_self_signed'",
+            (db_name,)
+        )
+        row = cursor.fetchone()
+        if row is not None and row[0] == 0:
+            logger.info("migrate_schema: adding Certificates.is_self_signed")
+            cursor.execute(
+                "ALTER TABLE Certificates ADD COLUMN is_self_signed BOOLEAN "
+                "NOT NULL DEFAULT FALSE AFTER private_key_reference"
+            )
+            self._local.connection.commit()
+
+
     def _migrate_seed_softhsm_provider(self, cursor):
         """
         Idempotently seed a 'softhsm-dev' pkcs11 provider when the operator
@@ -2732,7 +2792,7 @@ class PKIDataBase:
                         private_key TEXT,
                         public_key TEXT,
                         label VARCHAR(255),
-                        storage_type ENUM('Encrypted', 'Plain', 'HSM', 'Symmetric') NOT NULL,
+                        storage_type ENUM('Encrypted', 'Plain', 'HSM', 'Symmetric', 'PassphraseEncrypted') NOT NULL,
                         key_owned BOOLEAN NOT NULL DEFAULT TRUE,
                         hsm_slot INT,
                         hsm_token_id VARCHAR(255),
@@ -2784,6 +2844,7 @@ class PKIDataBase:
                         not_after DATETIME,
                         public_key TEXT,
                         private_key_reference INT,
+                        is_self_signed BOOLEAN NOT NULL DEFAULT FALSE,
                         status ENUM('Active', 'Revoked', 'Expired') NOT NULL DEFAULT 'Active',
                         revoked_at TIMESTAMP,
                         revocation_reason INT,

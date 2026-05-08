@@ -16,6 +16,7 @@ arrive: this one is the strategic view, that one is the tactical status board.
 ## 2. Security Hardening
 
 - Encryption-at-rest for software keys and HSM PINs, behind a per-provider secret reference with an explicit auto-activation toggle. Specified in [kms-strategy.md §6–7](kms-strategy.md); tracked under HSM / PKCS#11 Support below to keep the work consolidated.
+- ~~Reconcile the end-entity key-escrow path with the per-provider KEK encryption regime.~~ **Done.** `generate_pkcs12(store_key=True)` now KEK-wraps in both passphrase and no-passphrase paths; the passphrase variant carries `storage_type='PassphraseEncrypted'` (a new enum value) so the regimes don't share a label. `build_pkcs12_for_certificate` KEK-unwraps and dispatches on storage type. `SoftwareBackend.load_key` refuses `'PassphraseEncrypted'` cleanly with a pointer to the re-download flow. See PROGRESS §2 for the implementation breakdown.
 - Add first-class secret management for admin/bootstrap credentials instead of relying only on generated local files.
 - Support stronger auth options for the management API and UI, including MFA and shorter-lived/rotatable tokens.
 - Expand EST authentication beyond Basic Auth to include client-certificate authentication where appropriate.

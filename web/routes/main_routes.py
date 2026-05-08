@@ -420,13 +420,26 @@ def issue_certificate_from_csr():
     if not data:
         abort(400, description="Missing JSON body")
 
-    # Required fields: ca_id, template_id, csr
-    if 'ca_id' not in data or 'template_id' not in data or 'csr' not in data:
-        abort(400, description="Missing 'ca_id', 'template_id', or 'csr' in request body")
+    # Required fields: template_id, csr. ca_id is optional — falsy values
+    # (None / 0) are interpreted as a self-signed request, but the CSR path
+    # does not yet support self-signed (the cert needs to be signed by the
+    # CSR's *private* key, which the server doesn't have). Self-signed via
+    # this endpoint is rejected with a clear 400; clients should use the
+    # server-side keygen path (/certificate/issue-pkcs12) for self-signed.
+    if 'template_id' not in data or 'csr' not in data:
+        abort(400, description="Missing 'template_id' or 'csr' in request body")
 
-    ca_id = data['ca_id']
+    ca_id = data.get('ca_id')
     template_id = data['template_id']
     csr_pem = data['csr'].encode('utf-8')
+
+    self_signed = ca_id in (None, 0)
+    if self_signed:
+        abort(400, description=(
+            "Self-signed certificates from a CSR are not supported (the server "
+            "would need the CSR's private key to sign). Use the server-side key "
+            "generation flow instead."
+        ))
 
     if not isinstance(ca_id, int) or not isinstance(template_id, int):
         abort(400, description="'ca_id' and 'template_id' must be integers")
@@ -449,7 +462,8 @@ def issue_certificate_from_csr():
 
     request_config = {
         "ca_id": ca_id,
-        "template_id": template_id
+        "template_id": template_id,
+        "self_signed": False,  # CSR path doesn't support self-signed (see above)
     }
 
     user_id = getattr(g, 'current_user', {}).get('id', 0)
@@ -489,13 +503,22 @@ def issue_certificate_pkcs12():
     data = request.get_json()
     if not data:
         abort(400, description="Missing JSON body")
-    if 'ca_id' not in data or 'template_id' not in data:
-        abort(400, description="Missing 'ca_id' or 'template_id' in request body")
+    if 'template_id' not in data:
+        abort(400, description="Missing 'template_id' in request body")
 
-    ca_id       = data['ca_id']
+    ca_id       = data.get('ca_id')
     template_id = data['template_id']
-    if not isinstance(ca_id, int) or not isinstance(template_id, int):
-        abort(400, description="'ca_id' and 'template_id' must be integers")
+
+    # ``ca_id`` of None or 0 is the self-signed sentinel: skip CA lookup,
+    # the freshly-generated key signs the certificate as its own issuer
+    # (subject == issuer). Validity is still capped by the template's
+    # max_validity unless that is INFINITE_VALIDITY.
+    self_signed = ca_id in (None, 0)
+
+    if not isinstance(template_id, int):
+        abort(400, description="'template_id' must be an integer")
+    if not self_signed and not isinstance(ca_id, int):
+        abort(400, description="'ca_id' must be an integer (or null/0 for self-signed)")
 
     key_algorithm = data.get('key_algorithm', 'RSA')
     key_type      = data.get('key_type', '2048')
@@ -515,7 +538,11 @@ def issue_certificate_pkcs12():
     else:
         request_json = None
 
-    request_config = {"ca_id": ca_id, "template_id": template_id}
+    request_config = {
+        "ca_id": ca_id,
+        "template_id": template_id,
+        "self_signed": self_signed,
+    }
     user_id = getattr(g, 'current_user', {}).get('id', 0)
 
     try:

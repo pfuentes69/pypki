@@ -340,14 +340,23 @@ class PyPKI:
         validity_days=PKITools.INFINITE_VALIDITY,
         key_algorithm="RSA",
         key_type="2048",
-        return_certificate = True
+        return_certificate = True,
+        self_signed: bool = False,
     ):
         certificate_key = KeyTools()
         certificate_key.generate_private_key(algorithm=key_algorithm, key_type=key_type)
 
-        # Resolve CA and template: prefer explicit IDs (thread-safe); fall back to
-        # stored active selection for single-threaded utility-script callers.
-        if ca_id is not None:
+        # Resolve CA and template. ``self_signed=True`` means no issuing CA;
+        # the certificate signs itself with ``certificate_key``. The template
+        # is still required and still drives subject/SAN/extensions/validity.
+        if self_signed:
+            if template_id is None:
+                raise ValueError("Self-signed: template_id is required")
+            issuing_ca = None
+            cert_tool = self._build_cert_tool(template_id)
+            used_ca_id = None
+            used_template_id = template_id
+        elif ca_id is not None:
             issuing_ca = self._build_ca(ca_id)
             cert_tool = self._build_cert_tool(template_id)
             used_ca_id = ca_id
@@ -376,7 +385,11 @@ class PyPKI:
                 return None
             try:
                 with self.__db.connection():
-                    new_cert_id = self.__db.insert_certificate(new_cert_pem, used_ca_id, used_template_id, private_key_reference=None)
+                    new_cert_id = self.__db.insert_certificate(
+                        new_cert_pem, used_ca_id, used_template_id,
+                        private_key_reference=None,
+                        is_self_signed=self_signed,
+                    )
                 break
             except DuplicateSerialError:
                 logger.warning(f"Serial collision on attempt {_attempt + 1}, retrying")
@@ -398,8 +411,22 @@ class PyPKI:
             use_active_ca: bool = True,
             validity_days=PKITools.INFINITE_VALIDITY,
             enforce_template: bool = False,
-            return_certificate = True
+            return_certificate = True,
+            self_signed: bool = False,
         ):
+        # ``self_signed=True`` requires the CSR to carry the keypair that
+        # will sign the certificate. The cert_tool layer signs with the
+        # CSR's public key's matching private key — but we don't have the
+        # private key here, only the CSR. Self-signed via a CSR alone is
+        # not supported; callers wanting self-signed must use
+        # generate_certificate_and_key (server-side keygen).
+        if self_signed:
+            raise ValueError(
+                "Self-signed certificates require server-side key generation; "
+                "use generate_certificate_and_key or generate_pkcs12 instead "
+                "of the CSR path."
+            )
+
         # Resolve CA and template: prefer explicit IDs (thread-safe); fall back to
         # stored active selection for single-threaded utility-script callers.
         if ca_id is not None:
@@ -455,13 +482,27 @@ class PyPKI:
             friendly_name: bytes = b"MyCert",
             validity_days=PKITools.INFINITE_VALIDITY,
             store_key: bool = False,
+            self_signed: bool = False,
         ):
         """Generate a certificate with a server-side key, store the private key in
         KeyStorage, insert the certificate with private_key_reference, and return
-        (pkcs12_bytes, cert_id)."""
+        (pkcs12_bytes, cert_id).
+
+        ``self_signed=True``: skip the issuing-CA lookup; the freshly-generated
+        key signs the certificate as its own issuer. The template still drives
+        subject / SAN / extensions / validity (capped to ``template.max_validity``
+        unless that is INFINITE_VALIDITY).
+        """
         from cryptography.hazmat.primitives.serialization import pkcs12 as _pkcs12
 
-        if ca_id is not None:
+        if self_signed:
+            if template_id is None:
+                raise ValueError("Self-signed: template_id is required")
+            issuing_ca = None
+            cert_tool = self._build_cert_tool(template_id)
+            used_ca_id = None
+            used_template_id = template_id
+        elif ca_id is not None:
             issuing_ca = self._build_ca(ca_id)
             cert_tool = self._build_cert_tool(template_id)
             used_ca_id = ca_id
@@ -479,23 +520,38 @@ class PyPKI:
         # Validate against template constraints
         cert_tool.validate_key_algorithm(certificate_key.get_public_key())
 
-        # Optionally store the private key in KeyStorage (done once, before cert retry loop)
+        # Optionally store the private key in KeyStorage (done once, before
+        # cert retry loop). Both branches KEK-wrap the PEM under the default
+        # provider's KEK so the row participates in the same encryption-at-
+        # rest regime as keys from KMS.generate_key. The storage_type
+        # distinguishes the two:
+        #   - 'Encrypted'           — KEK-wrapped *plaintext* PEM. Loadable
+        #                             through KMS.sign_digest with no extra
+        #                             secret. Used when no passphrase given.
+        #   - 'PassphraseEncrypted' — KEK-wrapped *passphrase-encrypted* PEM.
+        #                             Cannot be loaded by the sign path; the
+        #                             PKCS#12 re-download path supplies the
+        #                             operator's passphrase. Used when a
+        #                             passphrase is supplied.
+        # See roadmap §2 / PROGRESS §2 for the regime-collision background.
         key_id = None
         if store_key:
             public_key_pem = certificate_key.get_public_key_pem().decode()
             key_type_label = f"{key_algorithm}-{key_type}"
             if pfx_password:
-                stored_key_pem = certificate_key.get_private_key_pem(password=pfx_password).decode()
-                stored_storage_type = "Encrypted"
+                inner_pem = certificate_key.get_private_key_pem(password=pfx_password).decode()
+                stored_storage_type = "PassphraseEncrypted"
             else:
-                stored_key_pem = certificate_key.get_private_key_pem().decode()
-                stored_storage_type = "Plain"
+                inner_pem = certificate_key.get_private_key_pem().decode()
+                stored_storage_type = "Encrypted"
+            provider_id, kek_wrapped = self.__db.kek_wrap_pem(inner_pem)
             with self.__db.connection():
                 key_id = self.__db.insert_key(
-                    private_key=stored_key_pem,
+                    private_key=kek_wrapped,
                     storage_type=stored_storage_type,
                     public_key=public_key_pem,
                     key_type=key_type_label,
+                    provider_id=provider_id,
                 )
 
         # Generate the certificate and insert; retry on the (astronomically rare) serial collision
@@ -515,6 +571,7 @@ class PyPKI:
                     cert_id = self.__db.insert_certificate(
                         new_cert_pem, used_ca_id, used_template_id,
                         private_key_reference=key_id,
+                        is_self_signed=self_signed,
                     )
                 break
             except DuplicateSerialError:
@@ -561,7 +618,22 @@ class PyPKI:
 
 
     def build_pkcs12_for_certificate(self, certificate_id: int, pfx_password: bytes = b""):
-        """Re-assemble a PKCS12 for a certificate that has a stored private key."""
+        """Re-assemble a PKCS12 for a certificate that has a stored private key.
+
+        Dispatches on ``KeyStorage.storage_type`` (see roadmap §2 for the
+        regime alignment work):
+          - ``Plain``               — legacy plaintext PEM, load directly.
+          - ``Encrypted``           — KEK-wrapped *plaintext* PEM. Unwrap
+                                      under the provider's KEK, load
+                                      without a passphrase. ``pfx_password``
+                                      is only used to encrypt the resulting
+                                      PKCS#12 bag.
+          - ``PassphraseEncrypted`` — KEK-wrapped *passphrase-encrypted*
+                                      PEM. Unwrap under the KEK, then
+                                      load with ``pfx_password`` (which
+                                      doubles as the original PKCS#12 pass
+                                      and the resulting bag's password).
+        """
         from cryptography.hazmat.primitives.serialization import pkcs12 as _pkcs12
 
         with self.__db.connection():
@@ -584,12 +656,31 @@ class PyPKI:
         cert_obj = load_pem_x509_certificate(cert_pem, default_backend())
 
         from cryptography.hazmat.primitives.serialization import load_pem_private_key
-        priv_pem = key_record["private_key"]
-        if isinstance(priv_pem, str):
-            priv_pem = priv_pem.encode()
+        priv_value = key_record["private_key"]
         storage_type = key_record.get("storage_type", "Plain")
-        key_password = pfx_password if storage_type == "Encrypted" else None
-        private_key = load_pem_private_key(priv_pem, password=key_password)
+
+        if storage_type == "Plain":
+            priv_pem_bytes = priv_value.encode() if isinstance(priv_value, str) else priv_value
+            private_key = load_pem_private_key(priv_pem_bytes, password=None)
+        elif storage_type in ("Encrypted", "PassphraseEncrypted"):
+            from .key_encryption import decrypt_pem, get_provider_kek
+            provider_id = key_record.get("provider_id")
+            if provider_id is None:
+                raise ValueError(
+                    f"build_pkcs12: KeyStorage id={key_id} has storage_type="
+                    f"{storage_type!r} but no provider_id; cannot resolve KEK."
+                )
+            with self.__db.connection():
+                provider = self.__db.get_provider_by_id(provider_id)
+            kek = get_provider_kek(provider)
+            inner_pem = decrypt_pem(priv_value, kek)
+            inner_password = pfx_password if storage_type == "PassphraseEncrypted" else None
+            private_key = load_pem_private_key(inner_pem, password=inner_password)
+        else:
+            raise ValueError(
+                f"build_pkcs12: KeyStorage id={key_id} has unsupported "
+                f"storage_type={storage_type!r}"
+            )
 
         # Try to get the CA chain for context
         ca_certs = None
