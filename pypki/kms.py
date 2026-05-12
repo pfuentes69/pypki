@@ -44,7 +44,7 @@ class KeyManagementService:
         self.__db = db
         # key_id → KeyHandle. PKCS11Backend / SoftwareBackend produce these.
         self.__handle_cache: dict[int, KeyHandle] = {}
-        # provider_id → activated backend (one per provider, per kms-strategy.md §5/§6)
+        # provider_id → activated backend (one per provider, per kms-specs.md §5/§6)
         self.__backends: dict[int, CryptoBackend] = {}
         # Guards backend creation/activation against concurrent first-use.
         # Full per-key locking (Gap 7) lands in Phase 3.
@@ -85,7 +85,7 @@ class KeyManagementService:
         Force activation of a provider's backend now (rather than lazily on
         first use). Used by the management API
         (``POST /api/crypto-providers/{id}/activate``) — see
-        doc/kms-strategy.md §6.
+        doc/kms-specs.md §6.
 
         ``pin`` is the operator-supplied PIN for ``operator:prompt``
         providers; ignored otherwise. Raises :class:`KeyError` for unknown
@@ -159,7 +159,7 @@ class KeyManagementService:
         Activate every provider with ``auto_activate=TRUE`` at startup.
         Failures are logged loudly but do not raise — CAs bound to a
         failing provider will report "provider unavailable" cleanly on
-        first sign attempt (kms-strategy.md §6).
+        first sign attempt (kms-specs.md §6).
 
         Returns a summary dict with ``activated``, ``skipped``, and
         ``errors`` counts for the caller to log.
@@ -407,7 +407,7 @@ class KeyManagementService:
         Dispatches to the matching :class:`CryptoBackend` for the row's
         provider. ``token_password`` is accepted for backwards
         compatibility but is no longer consulted — provider PINs are
-        resolved through ``auth_secret_ref`` (kms-strategy.md §7).
+        resolved through ``auth_secret_ref`` (kms-specs.md §7).
         """
         with self.__db.connection():
             record = self.__db.get_key_record(key_id)

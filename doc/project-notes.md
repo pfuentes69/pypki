@@ -97,14 +97,14 @@ The local path uses:
 
 - All certificate and OCSP signing routes through `KeyManagementService.sign_digest()`;
   CAs and OCSP responders no longer hold key material directly. See
-  [kms-strategy.md](kms-strategy.md) for the design and the migration phases.
+  [kms-specs.md](kms-specs.md) for the design and the migration phases.
 - The KMS UI (`kms_keygen.html`) and `/kms/generate-key` endpoint can generate
   RSA, ECDSA, Ed25519, and AES keys — but only as software keys persisted with
   `storage_type='Plain'`.
 - The PKCS#11 / HSM path is wired end-to-end at the architecture level but has
   several correctness, portability, and operator-experience gaps that block
   production use. They are tracked in detail in
-  [hsm-gap-analysis.md](hsm-gap-analysis.md), with the corresponding work items
+  [hsm-support-specs.md](hsm-support-specs.md), with the corresponding work items
   reflected in [roadmap.md](roadmap.md).
 
 ## Operational Notes
@@ -122,7 +122,7 @@ The detailed list lives in [roadmap.md](roadmap.md). The headline themes:
 
 - HSM / PKCS#11 support has correctness blockers (RSA mechanism, missing ECDSA
   branch) and portability gaps (hard-coded macOS module path, ignored slot
-  number). See [hsm-gap-analysis.md](hsm-gap-analysis.md).
+  number). See [hsm-support-specs.md](hsm-support-specs.md).
 - Test coverage is still mostly script-based rather than automated; CI for
   linting and a disposable-MariaDB integration run is open.
 - Security hardening: encryption-at-rest for software keys in `KeyStorage`,

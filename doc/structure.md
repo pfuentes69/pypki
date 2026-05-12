@@ -86,10 +86,14 @@ pypki/
 ├── doc/                            # Documentation
 │   ├── database.md                 # Full database schema reference
 │   ├── certificate-templates.md    # Certificate template JSON format
-│   ├── kms-strategy.md             # KMS integration strategy and phases
+│   ├── ca-management-specs.md      # CA management specification
+│   ├── kms-specs.md                # KMS specification
+│   ├── hsm-support-specs.md        # HSM-specific contracts
+│   ├── softhsm2-manual.md          # SoftHSM2 operator manual
+│   ├── PROGRESS.md                 # Operational status board
 │   ├── project-notes.md            # Development notes
 │   ├── rest-api.md                 # REST API reference
-│   ├── roadmap.md                  # Future evolution ideas
+│   ├── roadmap.md                  # Strategic intent across all areas
 │   ├── structure.md                # This file
 │   ├── request_examples/           # Sample request JSONs, CSR, and key files
 │   └── learning/                   # Reference notes (architecture, patterns)

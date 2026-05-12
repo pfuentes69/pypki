@@ -10,7 +10,7 @@ backends based on the CryptoProviders row's ``kind``:
 - :class:`PKCS11Backend` — a PKCS#11 token (SoftHSM2 / Luna / YubiHSM /
   cloud HSM); one shared session per provider.
 
-See :doc:`../doc/kms-strategy.md` §3 (architecture), §5 (backend contract),
+See :doc:`../doc/kms-specs.md` §3 (architecture), §5 (backend contract),
 §6 (activation lifecycle).
 """
 from .base import CryptoBackend, KeyHandle, BackendError, BackendNotActive

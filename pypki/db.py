@@ -122,7 +122,7 @@ class PKIDataBase:
     # ── CryptoProviders helpers (Phase 0.1) ───────────────────────────────────
     #
     # CRUD over the CryptoProviders table. The full management API will be
-    # built on top of these in a later phase — see doc/kms-strategy.md §9.
+    # built on top of these in a later phase — see doc/kms-specs.md §9.
 
     def insert_provider(self, label: str, kind: str, auth_secret_ref: str,
                         module_path: str = None, slot_label: str = None,
@@ -253,7 +253,7 @@ class PKIDataBase:
     @staticmethod
     def validate_provider_auth_config(record: dict) -> None:
         """
-        Enforce the cross-field consistency rules from kms-strategy.md §4.1
+        Enforce the cross-field consistency rules from kms-specs.md §4.1
         on a CryptoProviders row before it is persisted:
 
           - auto_activate=TRUE  → auth_secret_ref must be one of
@@ -323,7 +323,7 @@ class PKIDataBase:
             logger.error(f"Error retrieving default provider id: {err}")
             return None
 
-    # Mutable provider fields per kms-strategy.md §9.1 (POST/PUT). `kind`
+    # Mutable provider fields per kms-specs.md §9.1 (POST/PUT). `kind`
     # and `is_default` are intentionally *not* in this set — kind is
     # immutable after creation, is_default flips through a dedicated path.
     _PROVIDER_UPDATABLE = frozenset({
@@ -461,7 +461,7 @@ class PKIDataBase:
     def count_key_usage(self, key_id: int) -> dict:
         """
         How many CAs / OCSP responders / certificates reference this key?
-        Used by delete_key to refuse removal of an in-use key (kms-strategy
+        Used by delete_key to refuse removal of an in-use key (kms-specs
         §9.2 — DELETE returns 409 when usage > 0).
         """
         out = {"cas": 0, "ocsp_responders": 0, "certificates": 0}
@@ -542,7 +542,7 @@ class PKIDataBase:
 
         If ``provider_id`` is not supplied the row is bound to the default
         crypto provider so every new key has a provider — see
-        doc/kms-strategy.md §3-4.
+        doc/kms-specs.md §3-4.
         """
         try:
             db_name = self.__config["database"]
@@ -2357,14 +2357,14 @@ class PKIDataBase:
                     self._local.connection.commit()
 
                 # ── KMS Phase 0.1 — crypto provider model scaffolding ────────────
-                # See doc/kms-strategy.md §3-4 for the design.
+                # See doc/kms-specs.md §3-4 for the design.
                 self._migrate_create_crypto_providers(cursor, db_name)
                 self._migrate_extend_keystorage_for_providers(cursor, db_name)
                 self._migrate_seed_default_provider(cursor)
                 self._migrate_backfill_keystorage_provider_id(cursor)
 
                 # ── KMS Phase 0.2 — encrypt-at-rest software keys ────────────────
-                # See doc/kms-strategy.md §6-7 for the design.
+                # See doc/kms-specs.md §6-7 for the design.
                 self._migrate_encrypt_software_keys(cursor)
 
                 # ── KMS Phase 0.4 — seed the SoftHSM2 dev provider ───────────────
@@ -3003,7 +3003,7 @@ class PKIDataBase:
 
             # Seed the default software crypto provider. New software keys default
             # to this provider unless the operator explicitly creates another one.
-            # See doc/kms-strategy.md §3-4 for the provider model.
+            # See doc/kms-specs.md §3-4 for the provider model.
             logger.info("Seeding default software provider")
             cursor.execute(
                 "INSERT INTO CryptoProviders ("

@@ -15,7 +15,7 @@ arrive: this one is the strategic view, that one is the tactical status board.
 
 ## 2. Security Hardening
 
-- Encryption-at-rest for software keys and HSM PINs, behind a per-provider secret reference with an explicit auto-activation toggle. Specified in [kms-strategy.md §6–7](kms-strategy.md); tracked under HSM / PKCS#11 Support below to keep the work consolidated.
+- Encryption-at-rest for software keys and HSM PINs, behind a per-provider secret reference with an explicit auto-activation toggle. Specified in [kms-specs.md §6–7](kms-specs.md); tracked under HSM / PKCS#11 Support below to keep the work consolidated.
 - ~~Reconcile the end-entity key-escrow path with the per-provider KEK encryption regime.~~ **Done.** `generate_pkcs12(store_key=True)` now KEK-wraps in both passphrase and no-passphrase paths; the passphrase variant carries `storage_type='PassphraseEncrypted'` (a new enum value) so the regimes don't share a label. `build_pkcs12_for_certificate` KEK-unwraps and dispatches on storage type. `SoftwareBackend.load_key` refuses `'PassphraseEncrypted'` cleanly with a pointer to the re-download flow. See PROGRESS §2 for the implementation breakdown.
 - Add first-class secret management for admin/bootstrap credentials instead of relying only on generated local files.
 - Support stronger auth options for the management API and UI, including MFA and shorter-lived/rotatable tokens.
@@ -23,30 +23,37 @@ arrive: this one is the strategic view, that one is the tactical status board.
 
 ## 3. HSM / PKCS#11 Support
 
-The full specification — architecture, data model, REST API, management UI,
-PKCS#11 conformance, dev environment, and phased order of work — lives in
-[kms-strategy.md](kms-strategy.md). The remaining concrete defects (with
-file/line pointers) are catalogued as a punch-list in
-[hsm-gap-analysis.md](hsm-gap-analysis.md). Current HSM support exists end-to-end
-on paper but has correctness, portability, and operator-experience gaps that
-block production use.
+A first-class HSM/PKCS#11 backend coexisting with software keys, with
+data-driven provider configuration, encrypted-at-rest secret handling,
+and a portable PKCS#11 subset that works against SoftHSM2, YubiHSM 2,
+and Thales Luna without code changes.
 
-- **Provider model.** Introduce `CryptoProviders` (kinds `software` and `pkcs11`) so each provider — software cryptotoken, SoftHSM dev, YubiHSM, Luna, … — is configured once with module path (when applicable), slot, and auth, and `KeyStorage` rows reference it by FK. Replaces the hard-coded macOS SafeNet path, the inline per-key connection columns, and the flat plaintext-PEM software bucket (kms-strategy.md §3–4; closes Gap 4).
-- **Correctness (blockers).** Fix the RSA-on-HSM mechanism so signatures verify against `sha256WithRSAEncryption` (Gap 1), and add the missing ECDSA branch in `KeyTools.sign_digest` (Gap 2).
-- **Slot addressing.** Thread the provider's `slot_label` through `open_session()` so multi-slot tokens and reinitialised SoftHSM2 tokens work (Gap 3).
-- **Stability.** Add per-key locking around `KMS.load_key` to prevent duplicate sessions under concurrent first-use (Gap 7); share one PKCS#11 session per provider, opened on activation and closed on deactivation/shutdown (Gap 6).
-- **Secret handling.** Move HSM PINs and software-key PEMs out of the plaintext database under a per-provider secret reference (`db:encrypted` / `env:` / `vault:` / `operator:prompt`) with an explicit auto-activation toggle per provider (kms-strategy.md §6–7; closes Gap 5).
-- **Operator UX.** Provider management API + UI (CRUD, activate/deactivate); per-provider key management API + UI (list, generate RSA/ECDSA, import on-token keys, delete) — kms-strategy.md §9–10, closes Gap 8.
-- **Hardening.** Validate `hsm_token_id` at insert/load (Gap 9); give symmetric keys their own storage taxonomy (Gap 11); update the stale `migrate_keys_to_kms.py` OCSP error reference (Gap 12).
-- **Dev environment.** SoftHSM2-based dev/CI environment first (already wired into the Docker setup; see kms-strategy.md §12 and [softhsm2-manual.md](softhsm2-manual.md)). Gaps 1, 2, 6, 7 are not safely fixable without it.
-- **Fidelity pass.** *Pending hardware/SDK availability.* Run the full HSM test suite against the YubiHSM 2 simulator and / or a Thales DPoD trial (or AWS CloudHSM as a Luna-equivalent fallback) before declaring HSM support release-ready against those vendors. SoftHSM2 remains the canonical regression target until then. See [kms-strategy.md §13 Phase 7](kms-strategy.md).
-- **Testing.** Parameterise the signing suite over the two backends so every test runs once against `software-default` and once against `softhsm-dev` in CI — recovers the test-parity benefit of unified PKCS#11 without making SoftHSM the production path.
+The full design lives in [kms-specs.md](kms-specs.md); the HSM-specific
+contracts (signing mechanisms, slot addressing, session lifecycle,
+storage-type semantics) live in
+[hsm-support-specs.md](hsm-support-specs.md); SoftHSM2 dev-environment
+operations live in [softhsm2-manual.md](softhsm2-manual.md).
+Implementation status per phase is in [PROGRESS.md §3](PROGRESS.md).
+
+The remaining initiative is the **vendor-fidelity validation pass**
+against real-vendor PKCS#11 implementations (YubiHSM 2 simulator,
+Thales DPoD, AWS CloudHSM as a Luna fallback), held back until the
+hardware / SDK becomes available. SoftHSM2 remains the canonical
+regression target until then. See
+[kms-specs.md §13 Phase 7](kms-specs.md).
 
 ## 4. PKI And Protocol Maturity
 
+CA-management lifecycle, signing pipeline, issuance policy, CRL
+distribution, and the operator-visible weaknesses + security risks are
+specified in [ca-management-specs.md](ca-management-specs.md). Phased
+work plan and acceptance criteria for declaring CA management
+feature-complete live in §14–15 of that doc; in-flight design
+proposals (`CR-NNNN`) are tracked in §17 of the same doc.
+
 - Add richer OCSP and CRL interoperability tests against common clients and relying-party stacks.
-- Improve CA/template validation before persistence so configuration errors are caught earlier.
-- Add certificate renewal workflows, key rollover flows, and safer decommissioning for CAs and OCSP responders.
+- Improve CA/template validation before persistence so configuration errors are caught earlier (CA-side risks catalogued in [ca-management-specs.md §13](ca-management-specs.md)).
+- Add certificate renewal workflows, key rollover flows, and safer decommissioning for CAs and OCSP responders ([ca-management-specs.md §14 Phase 3 + Phase 5](ca-management-specs.md)).
 - Consider publishing OpenAPI-style API documentation for the management endpoints.
 
 ## 5. Deployment And Operations
@@ -93,3 +100,10 @@ testing land here first; once accepted they get a corresponding
     NULL (already nullable in the schema) plus an explicit
     `is_self_signed` marker so the certificate list can show the
     distinction without a JOIN gymnastic.
+
+- **Generic signing services on top of the KMS.** A configurable
+  external sign surface for non-PKI use cases (raw hash signing
+  initially, richer formats later such as RFC 3161, CMS, JOSE, and
+  code-signing wrappers). Built as a sibling consumer of the KMS
+  alongside CAs / OCSP / EST, not as new KMS internals. Spec:
+  [kms-specs.md §17](kms-specs.md).

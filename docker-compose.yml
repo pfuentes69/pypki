@@ -32,7 +32,7 @@ services:
       PYPKI_CONFIG: config/config.json
       # KMS encryption-at-rest KEK. Encrypts software keys under per-provider
       # keys derived via HKDF. Must be set; rotating it invalidates every
-      # encrypted KeyStorage row. See doc/kms-strategy.md §6-7.
+      # encrypted KeyStorage row. See doc/kms-specs.md §6-7.
       HSM_PIN_KEK: ${HSM_PIN_KEK:?HSM_PIN_KEK must be set in .env}
       # SoftHSM2 — a development token is initialised on first boot.
       # CHANGE THESE for any non-dev deployment, or set SOFTHSM2_AUTO_INIT=false to skip.
@@ -41,7 +41,7 @@ services:
       SOFTHSM2_PIN: "1234"
       SOFTHSM2_SO_PIN: "5678"
       # Consumed by `pkcs11-tool` inside the container and by the seeded
-      # softhsm-dev pkcs11 provider (see doc/kms-strategy.md).
+      # softhsm-dev pkcs11 provider (see doc/kms-specs.md).
       PKCS11_MODULE: /usr/lib/softhsm/libsofthsm2.so
       PKCS11_TOKEN_LABEL: pypki-dev
       PKCS11_PIN: "1234"

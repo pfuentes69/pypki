@@ -3,12 +3,12 @@ Backend contract — :class:`CryptoBackend` and :class:`KeyHandle`.
 
 This is the internal interface :class:`KeyManagementService` dispatches
 through. Software and PKCS#11 are the only two implementations
-(see :doc:`../../doc/kms-strategy.md` §3 — backend topology). Future
+(see :doc:`../../doc/kms-specs.md` §3 — backend topology). Future
 backends (cloud KMS, etc.) plug in here.
 
 Scope at this phase: the minimum surface needed to load a key from a
 ``KeyStorage`` row and sign a pre-computed digest with it. The full
-surface from kms-strategy.md §5 (``generate_key``, ``import_key``,
+surface from kms-specs.md §5 (``generate_key``, ``import_key``,
 ``find_key``, ``list_keys``, ``delete_key``, ``get_public_key_der``)
 will be added in Phase 5 when the provider-aware management API lands.
 """

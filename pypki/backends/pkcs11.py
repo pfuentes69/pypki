@@ -6,7 +6,7 @@ of a provider activation: ``open()`` creates the session and logs in;
 ``load_key()`` re-uses it to find an on-token object handle by CKA_ID;
 ``sign_digest()`` signs through it; ``close()`` closes it. This closes
 Gap 6 (one session per provider, not per cached key) from
-:doc:`../../doc/hsm-gap-analysis.md`.
+:doc:`../../doc/hsm-support-specs.md`.
 
 A per-backend reentrant lock serialises ``load_key`` / ``sign_digest`` /
 ``close`` because PKCS#11 sessions are not thread-safe by spec —
@@ -33,7 +33,7 @@ from ..pkcs11_helper import PKCS11Helper
 from .base import BackendNotActive, KeyHandle
 
 
-# Conservative PKCS#11 subset (kms-strategy.md §8.1).
+# Conservative PKCS#11 subset (kms-specs.md §8.1).
 _RSA_BIT_SIZES = {2048, 3072, 4096}
 
 # Named-curve OIDs (DER-encoded ASN.1 OBJECT IDENTIFIER) for CKA_EC_PARAMS.
@@ -185,7 +185,7 @@ class PKCS11Backend:
     def generate_key(self, key_type: str, label: str, hsm_token_id: bytes = None) -> dict:
         """
         Generate a keypair on the token. Enforces the mandatory CKA_*
-        attribute set from kms-strategy.md §8.2 — Luna rejects keys that
+        attribute set from kms-specs.md §8.2 — Luna rejects keys that
         omit these and SoftHSM2 silently accepts weaker combinations, so
         this is the boundary that keeps SoftHSM-tested code portable.
 
@@ -216,7 +216,7 @@ class PKCS11Backend:
                 (PyKCS11.CKA_TOKEN, True),
                 (PyKCS11.CKA_ID, cka_id),
             ]
-            # Mandatory public-key attributes (kms-strategy.md §8.2).
+            # Mandatory public-key attributes (kms-specs.md §8.2).
             pub_template = common + [
                 (PyKCS11.CKA_VERIFY, True),
                 (PyKCS11.CKA_ENCRYPT, False),

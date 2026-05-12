@@ -27,7 +27,7 @@ from ..log import logger
 from .base import BackendNotActive, KeyHandle
 
 
-# Same conservative subset enforced in PKCS11Backend (kms-strategy.md §8.1).
+# Same conservative subset enforced in PKCS11Backend (kms-specs.md §8.1).
 _RSA_SIZES = {2048, 3072, 4096}
 _EC_CURVES = {
     "P-256": ec.SECP256R1(),
@@ -192,7 +192,7 @@ class SoftwareBackend:
             }
 
         ``key_type`` accepts the canonical labels documented in
-        kms-strategy.md §8.1: RSA-2048/3072/4096, ECDSA-P-256/P-384,
+        kms-specs.md §8.1: RSA-2048/3072/4096, ECDSA-P-256/P-384,
         Ed25519. The dict shape is intentionally flat so the KMS can pass
         it straight to ``PKIDataBase.insert_key``.
         """

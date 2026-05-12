@@ -4,7 +4,7 @@ A concise reference for the day-to-day operations against the SoftHSM2 software
 PKCS#11 token used by pyPKI for HSM development. SoftHSM2 stores keys
 unencrypted on disk — it is a development fixture, not a security boundary.
 Real-HSM portability concerns are tracked in
-[hsm-gap-analysis.md](hsm-gap-analysis.md).
+[hsm-support-specs.md](hsm-support-specs.md).
 
 All commands below assume `softhsm2` (token + utilities) and `opensc`
 (`pkcs11-tool`) are installed.
@@ -217,7 +217,7 @@ softhsm2-util --import private-key.pem \
 
 Export only works on keys whose `CKA_EXTRACTABLE=TRUE` — pyPKI generates CA
 keys with `CKA_EXTRACTABLE=FALSE` (see the "Mandatory private-key attributes"
-section in [hsm-gap-analysis.md](hsm-gap-analysis.md)), so production-grade keys
+section in [hsm-support-specs.md](hsm-support-specs.md)), so production-grade keys
 created through pyPKI cannot be exported. This is intentional and matches how
 real HSMs behave.
 

@@ -77,6 +77,28 @@ docker compose down -v          # stop containers and Compose-managed volumes; d
 
 To fully remove the database contents from a Docker deployment, stop the stack and delete `data/mariadb/` manually.
 
+### Updating to a new release
+
+Python source is baked into the `app` image at build time, so a plain `git pull` alone does not update a running container — you need to rebuild the image. Persistent data (`config/`, `out/`, `data/mariadb/`, `data/softhsm/tokens/`) is bind-mounted from the host and is preserved across rebuilds.
+
+```bash
+cd ~/pypki
+git pull
+sudo docker compose up -d --build app
+sudo docker compose logs -f app
+```
+
+Schema migrations are idempotent and run automatically on container startup (see [docker-entrypoint.sh](docker-entrypoint.sh)) — no separate migration step is required.
+
+If a particular release only changes files under `config/` (for example, an updated certificate template) and no Python sources, a plain restart picks up the changes without a rebuild:
+
+```bash
+git pull
+sudo docker compose restart app
+```
+
+`setup.sh` is also safe to re-run after a `git pull`. It detects the existing `.env` and reuses the current credentials, so it will not rotate `DB_PASSWORD` or `HSM_PIN_KEK`.
+
 ### Where data lives
 
 All persistent data is stored on the host as plain directories — easy to back up, inspect, and migrate:
@@ -100,7 +122,7 @@ Verify the token is present from the host:
 docker compose exec app pkcs11-tool --module "$PKCS11_MODULE" --list-slots
 ```
 
-End-to-end app integration with the HSM path is in progress — see [doc/hsm-gap-analysis.md](doc/hsm-gap-analysis.md).
+HSM-specific contracts (PKCS#11 mechanisms, slot addressing, session lifecycle, storage-type semantics) are specified in [doc/hsm-support-specs.md](doc/hsm-support-specs.md).
 
 ---
 
@@ -207,7 +229,7 @@ sudo dnf install python3 python3-devel mariadb-server mariadb-devel openssl \
 sudo systemctl enable --now mariadb
 ```
 
-`softhsm2` and `opensc` are needed for HSM development against the SoftHSM2 software token. They are optional for software-only signing but pyPKI's HSM gap-closure work assumes they are installed (see [doc/hsm-gap-analysis.md](doc/hsm-gap-analysis.md)).
+`softhsm2` and `opensc` are needed for HSM development against the SoftHSM2 software token. They are optional for software-only signing but pyPKI's HSM-backed paths assume they are installed (see [doc/hsm-support-specs.md](doc/hsm-support-specs.md)).
 
 ### 2. Create the virtual environment
 
@@ -264,7 +286,7 @@ openssl rand -base64 48 | tr -dc 'A-Za-z0-9_-' | head -c 64
 
 The secret key is used to sign JWT authentication tokens. Keep it stable across restarts to avoid invalidating active sessions.
 
-Also export `HSM_PIN_KEK` in the environment before running scripts or the server. This is the deployment-wide KEK used by the KMS to encrypt software private keys at rest under per-provider keys (see [doc/kms-strategy.md §6-7](doc/kms-strategy.md)). Generate a separate strong random value:
+Also export `HSM_PIN_KEK` in the environment before running scripts or the server. This is the deployment-wide KEK used by the KMS to encrypt software private keys at rest under per-provider keys (see [doc/kms-specs.md §6-7](doc/kms-specs.md)). Generate a separate strong random value:
 
 ```bash
 export HSM_PIN_KEK="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9_-' | head -c 64)"
@@ -304,7 +326,7 @@ pkcs11-tool --module /usr/lib/softhsm/libsofthsm2.so --list-slots
 pkcs11-tool --module /usr/lib64/pkcs11/libsofthsm2.so --list-slots
 ```
 
-End-to-end app integration with the HSM path is in progress — see [doc/hsm-gap-analysis.md](doc/hsm-gap-analysis.md). The token can be exercised today with `pkcs11-tool` for environment validation.
+HSM-specific contracts are specified in [doc/hsm-support-specs.md](doc/hsm-support-specs.md). The token can be exercised independently with `pkcs11-tool` for environment validation.
 
 ### 7. Start the server
 
@@ -450,11 +472,12 @@ PYTHONPATH=. python -m tests
 |---|---|
 | `doc/database.md` | Full schema — all tables, columns, and foreign keys |
 | `doc/certificate-templates.md` | Template JSON format and all supported fields |
-| `doc/kms-strategy.md` | KMS integration design and migration phases |
+| `doc/ca-management-specs.md` | CA management specification — lifecycle, creation paths, signing pipeline, issuance policy, CRL distribution, weaknesses + risks |
+| `doc/kms-specs.md` | KMS specification — provider model, backend topology, activation lifecycle, REST API, PKCS#11 conformance subset |
+| `doc/hsm-support-specs.md` | HSM-specific contracts — PKCS#11 mechanisms, slot addressing, session lifecycle, storage-type semantics |
 | `doc/softhsm2-manual.md` | SoftHSM2 operator manual — install, init, key ops, backup/restore |
 | `doc/rest-api.md` | REST API reference |
-| `doc/roadmap.md` | Proposed future evolutions and improvement areas |
-| `doc/PROGRESS.md` | Operational status board — every roadmap item broken down with done / partial / pending / deferred markers |
-| `doc/hsm-gap-analysis.md` | Closed-bug catalogue for the HSM / PKCS#11 work (Phases 0–6) |
+| `doc/roadmap.md` | Strategic intent across all areas — what we want to build and why |
+| `doc/PROGRESS.md` | Operational status board — one-line status per roadmap item with pointer to its spec |
 | `doc/structure.md` | Detailed project structure |
 | `doc/request_examples/` | Sample request JSON files and example CSR |

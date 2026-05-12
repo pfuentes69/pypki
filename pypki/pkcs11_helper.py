@@ -34,7 +34,7 @@ class PKCS11Helper:
         if not lib_path:
             raise ValueError(
                 "PKCS11Helper: lib_path is required (typically sourced from "
-                "CryptoProviders.module_path; see doc/kms-strategy.md §4.1)."
+                "CryptoProviders.module_path; see doc/kms-specs.md §4.1)."
             )
         self.__pkcs11 = PyKCS11.PyKCS11Lib()
         self.__pkcs11.load(lib_path)

@@ -280,7 +280,7 @@ def test_activate_auto_providers_does_not_raise_on_missing_env(
 ):
     """A misconfigured auto-activate provider must NOT prevent app startup
     — it gets logged and counted as an error, other providers continue.
-    Regression for kms-strategy.md §6 ('failure is logged loudly but does
+    Regression for kms-specs.md §6 ('failure is logged loudly but does
     not block app startup')."""
     monkeypatch.delenv("HSM_PIN_KEK", raising=False)
     monkeypatch.setenv("OK_PIN", "fine")

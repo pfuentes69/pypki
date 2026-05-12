@@ -551,7 +551,7 @@ def kms_generate_key(algorithm: str, persist: bool, **kwargs):
 # ── Crypto provider management (Phase 4: activation lifecycle) ───────────────
 #
 # Full CRUD lands in Phase 5; this is the read-only + activation surface.
-# See doc/kms-strategy.md §9.1.
+# See doc/kms-specs.md §9.1.
 
 def _sanitise_provider(record: dict) -> dict:
     """Drop secret material before returning a provider record over the API."""

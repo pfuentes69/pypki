@@ -1,284 +1,274 @@
-# HSM Support — Gap Analysis (Punch-List)
+# HSM Support Specification
 
-This document catalogues the concrete defects in pyPKI's HSM (PKCS#11)
-support that must be closed before HSM-backed keys are production-ready. It
-is the bug-tracker companion to [kms-strategy.md](kms-strategy.md) — the
-strategy document holds the architecture, data model, API, UI, and order of
-work; this document holds the file/line-level pointers to each remaining
-issue and a brief recommended fix.
+This document specifies the HSM (PKCS#11) support contracts in pyPKI: the
+signing mechanisms, slot addressing, session lifecycle, concurrency rules,
+and storage-type semantics that the PKCS#11 backend must honour to be
+portable across SoftHSM2, YubiHSM 2, and Thales Luna.
 
-The review covers: [pypki/kms.py](../pypki/kms.py),
-[pypki/key_tools.py](../pypki/key_tools.py),
-[pypki/pkcs11_helper.py](../pypki/pkcs11_helper.py), the `KeyStorage` schema
-and helpers in [pypki/db.py](../pypki/db.py), and the signing call sites in
-[pypki/ca.py](../pypki/ca.py) and
-[pypki/ocsp_responder.py](../pypki/ocsp_responder.py).
+It is the HSM-specific companion to [kms-specs.md](kms-specs.md), which
+holds the broader KMS architecture (provider model, backend topology,
+activation lifecycle, REST API, management UI). Where a contract is
+co-owned with the general KMS, this document references the matching
+section there rather than restating it.
 
----
-
-## What works today
-
-- `KeyManagementService` is the single signing entry point. CAs and OCSP
-  responders call `kms.sign_digest(key_id, digest)`; they no longer hold key
-  material.
-- A `KeyStorage` row with `storage_type='HSM'`, `hsm_token_id`, and
-  `token_password` is loadable by the KMS and produces a `KeyTools` whose
-  `sign_digest()` dispatches to PyKCS11.
-- The DER-patching flow (build with a dummy key → extract TBS → sign via
-  KMS → splice signature) works for both X.509 issuance and OCSP responses,
-  so the "software vs HSM" branch is hidden from the higher-level callers.
-
-Everything below is a real or latent defect in that pipeline. The
-architectural reshape that addresses several of them at once — provider
-records, encrypted-at-rest software keys, and a sibling-backend topology —
-is specified in [kms-strategy.md](kms-strategy.md).
+Status of each contract (implemented / pending / deferred) lives in
+[PROGRESS.md §3](PROGRESS.md). Strategic intent and cross-area framing
+live in [roadmap.md §3](roadmap.md).
 
 ---
 
-## Gap 1 — RSA-on-HSM signature is malformed
+## 1. Scope
 
-**Where:** [pypki/key_tools.py:158](../pypki/key_tools.py#L158)
+This spec covers the HSM-specific behaviour of the `PKCS11Backend` sibling
+defined in [kms-specs.md §5](kms-specs.md#5-internal-backend-contract):
 
-The HSM branch sends a bare 32-byte SHA-256 digest to the token using
-mechanism `CKM_RSA_PKCS`. PKCS#11 `CKM_RSA_PKCS` performs raw PKCS#1 v1.5
-padding over the bytes supplied — it does **not** prepend the SHA-256
-`DigestInfo` (the ASN.1 `AlgorithmIdentifier + OCTET STRING` envelope
-required by PKCS#1 v1.5 signatures). The signature produced will not verify
-against an `sha256WithRSAEncryption` certificate.
+- which PKCS#11 mechanisms are used to produce X.509-grade signatures
+  (§2);
+- how a token slot is addressed at session-open time (§3);
+- when sessions are opened, closed, and reconnected (§6);
+- how concurrent first-uses of the same key are serialised (§7);
+- the storage-type contracts (`hsm_token_id` format, `Encrypted` /
+  `Symmetric` semantics, §9).
 
-**Fix:** switch to `CKM_SHA256_RSA_PKCS` and pass the TBS bytes (HSM hashes
-and wraps). Matches what `CKM_SHA256_RSA_PKCS_PSS` would do for the PSS
-variant and avoids a magic prefix in application code.
-
-**Severity:** blocker for HSM-backed RSA CAs. Targeted in Phase 1 of the
-strategy doc.
-
----
-
-## Gap 2 — ECDSA-on-HSM is not implemented
-
-**Where:** [pypki/key_tools.py:155-162](../pypki/key_tools.py#L155-L162)
-
-The HSM branch has only the RSA mechanism. There is no `if ec` arm. An
-ECDSA key resident on the token will be signed with `CKM_RSA_PKCS` and
-either fail at the token or return garbage.
-
-**Fix:** key-type-aware mechanism selection — RSA via
-`CKM_SHA256_RSA_PKCS`, ECDSA via `CKM_ECDSA` over the SHA-256 digest with
-`(r, s)` DER-encoded before splicing. The patching layer already
-DER-encodes ECDSA signatures in `_patch_ocsp_signature`; the gap is purely
-in `KeyTools`.
-
-**Severity:** blocker for HSM-backed ECDSA CAs. Targeted in Phase 1.
+Behaviour shared with the software backend (provider records, secret
+resolution, REST API surface, key generation API, mandatory CKA_*
+attributes) is specified in [kms-specs.md](kms-specs.md) and pointed at
+from the relevant section here.
 
 ---
 
-## Gap 3 — `hsm_slot` is ignored
+## 2. Signing mechanisms
 
-**Where:** [pypki/pkcs11_helper.py:33-39](../pypki/pkcs11_helper.py#L33-L39)
+The HSM signing path produces signatures that verify against the X.509
+algorithm identifiers `sha256WithRSAEncryption` and `ecdsa-with-SHA256`,
+matching what the libcrypto path produces for the corresponding software
+keys.
 
-`open_session()` always picks `slots[0]`. The `hsm_slot` column in
-`KeyStorage` and the `slot_num` argument plumbed through
-[pypki/kms.py:69](../pypki/kms.py#L69) and
-[pypki/key_tools.py:24-27](../pypki/key_tools.py#L24-L27) are dead. Multi-slot
-tokens, or hosts with more than one PKCS#11 device, cannot be addressed.
+### 2.1 RSA
 
-SoftHSM2 also assigns randomised slot IDs at `--init-token` time
-specifically to force apps to address by label rather than numeric slot.
-Hard-coding `slots[0]` works on day 1 and breaks on day 2.
+- **Mechanism:** `CKM_SHA256_RSA_PKCS`.
+- **Input:** the TBS bytes (the token hashes and PKCS#1-v1.5-wraps).
 
-**Fix:** thread the provider's `slot_label` through `open_session()` and
-match by `CK_TOKEN_INFO.label`, not numeric slot id. Numeric slot only as a
-fallback when no label is configured.
+Rationale: `CKM_RSA_PKCS` does *not* prepend the SHA-256 `DigestInfo`
+ASN.1 envelope; it performs raw PKCS#1 v1.5 padding over whatever bytes
+are supplied. Sending a bare 32-byte SHA-256 digest under `CKM_RSA_PKCS`
+produces a signature that does not verify against
+`sha256WithRSAEncryption`. `CKM_SHA256_RSA_PKCS` does the digest and the
+DigestInfo wrap inside the token, removing a magic prefix from
+application code.
 
-**Severity:** blocker for any host with more than one slot. Targeted in
-Phase 2.
+A future PSS mechanism would follow the same shape: switch to
+`CKM_SHA256_RSA_PKCS_PSS` and supply PSS parameters at sign time.
 
----
+### 2.2 ECDSA
 
-## Gap 4 — No crypto provider abstraction
+- **Mechanism:** `CKM_ECDSA`.
+- **Input:** the SHA-256 digest (32 bytes for P-256, 48 for P-384).
+- **Output transform:** the token returns a fixed-width `r || s`
+  concatenation; the backend DER-encodes it with
+  `cryptography.hazmat.primitives.asymmetric.utils.encode_dss_signature`
+  before splicing into the certificate or OCSP response.
 
-**Where:** [pypki/pkcs11_helper.py:11](../pypki/pkcs11_helper.py#L11),
-`KeyStorage` schema in [pypki/db.py:1842](../pypki/db.py#L1842), and the
-`KMS.load_key` call in [pypki/kms.py:65-71](../pypki/kms.py#L65-L71).
+Rationale: `CKM_ECDSA` requires a pre-computed digest as input.
+`CKM_ECDSA_SHA256` would also work but is not universally supported —
+SoftHSM2 supports it, some hardware tokens do not. Hashing in-process and
+sending the digest is the portable path.
 
-Three faces of the same gap:
+### 2.3 Mechanism-selection logic
 
-- The PKCS#11 module path is a module-level constant (`/usr/local/lib/pkcs11/libeTPkcs11.dylib`
-  — the macOS SafeNet driver). It will not load on Linux, in Docker, on
-  Windows, or with any other vendor's module.
-- The schema embeds `hsm_slot`, `hsm_token_id`, and `token_password`
-  directly on every HSM `KeyStorage` row, so a single deployment cannot host
-  keys on more than one HSM without duplicating connection details.
-- Software keys have no grouping at all — flat plaintext PEM blobs with no
-  activation lifecycle.
-
-**Fix:** the `CryptoProviders` model specified in
-[kms-strategy.md §3–4](kms-strategy.md#3-architecture). Closes this gap and
-unblocks Gaps 5, 6 cleanly. Targeted in Phase 0.
-
-**Severity:** blocker for Docker deployment, blocker for any host with more
-than one HSM, prerequisite for Gap 5.
+Backend code must dispatch on the `KeyStorage.key_type` value, not on the
+mechanism set declared by the token. Tokens that advertise more
+mechanisms than this contract uses must still be driven through this
+narrow, portable subset.
 
 ---
 
-## Gap 5 — Token PIN is stored in clear in MySQL
+## 3. Slot addressing
 
-**Where:** `KeyStorage.token_password VARCHAR(255)` — schema in
-[pypki/db.py:1842](../pypki/db.py#L1842), read in
-[pypki/kms.py:65-71](../pypki/kms.py#L65-L71).
+Sessions are addressed by **token label**, not by numeric slot id.
 
-The activation PIN is stored in clear next to the token key id. Anyone with
-read access to the database can activate the token. The same column is also
-overloaded with three implicit meanings (NULL / empty / non-empty), making
-audit and rotation painful.
+- The provider record carries a `slot_label` string (specified in
+  [kms-specs.md §4.1](kms-specs.md#41-cryptoproviders-new-table)).
+- `PKCS11Backend.open` enumerates the module's slots and matches by
+  `CK_TOKEN_INFO.label`.
+- A numeric `slot_num` may be accepted as a fallback when no label is
+  configured, but is not the primary contract.
 
-The parallel exposure is the software side: `KeyStorage.private_key` stores
-PEM in plaintext for `storage_type='Plain'` rows. DB-only compromise leaks
-software CA private keys directly.
-
-**Fix:** the secret-handling story specified in
-[kms-strategy.md §7](kms-strategy.md#7-secret-resolution-backends-auth_secret_ref)
-— PIN moves to the provider record as `auth_secret_ref`, an opaque
-reference resolved at activation time (`db:encrypted` / `env:` / `vault:` /
-`operator:prompt`), with `auto_activate` controlling whether human
-interaction is required at startup. The same migration encrypts software
-PEMs at rest under the provider KEK.
-
-**Severity:** security — must be fixed before any production rollout.
-Targeted in Phase 4 (with scaffolding in Phase 0).
+Rationale: SoftHSM2 randomises slot ids at `--init-token` time
+specifically to discourage numeric-slot addressing; YubiHSM 2 and Luna
+multi-partition deployments routinely have more than one slot per
+module. Hard-coding `slots[0]` works on day 1 and breaks on day 2 when
+a second token is initialised.
 
 ---
 
-## Gap 6 — One PKCS#11 session per cached key, never closed
+## 4. Provider abstraction
 
-**Where:** [pypki/key_tools.py:22-28](../pypki/key_tools.py#L22-L28),
-[pypki/kms.py:79-83](../pypki/kms.py#L79-L83)
+PKCS#11 modules, slots, and authentication PINs are owned by the
+`CryptoProviders` table, not by individual `KeyStorage` rows. The
+schema, validation rules, and mutation semantics are specified in
+[kms-specs.md §3–4](kms-specs.md#3-architecture).
 
-`KeyTools.__init__` constructs a fresh `PKCS11Helper`, opens a session, and
-logs in. Two HSM keys in the cache = two sessions. `KMS.unload_key()` only
-deletes the dictionary entry; it does not call `close_session()`. Sessions
-leak to the token and may eventually exhaust limits on constrained tokens
-(YubiHSM 2 caps at 16 concurrent sessions per authkey). There is also no
-reconnect logic if the token is unplugged.
+The HSM-specific obligations on top of that:
 
-**Fix:** the sibling-backend contract specified in
-[kms-strategy.md §5](kms-strategy.md#5-internal-backend-contract) —
-one `PKCS11Backend` instance per provider, opened at activation, closed at
-deactivation/shutdown. `unload_key()` evicts only the in-memory cache entry;
-the session lifecycle is provider-scoped, not key-scoped. Reconnect on
-`CKR_SESSION_HANDLE_INVALID` / `CKR_DEVICE_REMOVED` once before failing.
-
-**Severity:** stability — leaks sessions in long-running processes.
-Targeted in Phase 3.
+- A `pkcs11` provider's `module_path` must be a path readable by the
+  app process. Validation runs at provider create / update time, not at
+  first sign.
+- Providers cannot be deleted while any `KeyStorage` row references
+  them (FK enforcement; cascading deletion is rejected at the API
+  layer with a 409).
 
 ---
 
-## Gap 7 — `load_key` is not thread-safe
+## 5. Secret handling
 
-**Where:** [pypki/kms.py:97-100](../pypki/kms.py#L97-L100)
+PINs and per-provider KEKs are resolved through `auth_secret_ref` —
+specified in
+[kms-specs.md §7](kms-specs.md#7-secret-resolution-backends-auth_secret_ref).
 
-```python
-if key_id not in self.__key_cache:
-    self.load_key(key_id)
-```
+The HSM-specific obligations on top of that:
 
-Classic check-then-act. Flask runs requests in threads; two concurrent
-first-uses of the same key both miss the cache and both call `load_key`.
-For software keys this is wasteful; for HSM keys it opens two sessions and
-runs two `C_Login` operations against the token.
-
-**Fix:** a `threading.Lock` guarding the cache, or per-key locks keyed by
-`key_id`. Apply globally — the symmetric case has the same shape.
-
-**Severity:** correctness under concurrency. Targeted in Phase 3.
+- A PIN is held in memory only between activation and deactivation.
+  Backend code must not log the PIN, must not write it to disk, and
+  must zero its buffer on `close()` where the language allows.
+- An `operator:prompt` provider with `auto_activate=TRUE` is rejected
+  at validation time — there is no operator at startup to prompt.
 
 ---
 
-## Gap 8 — No HSM-backed key generation through the KMS
+## 6. Session lifecycle
 
-**Where:** [pypki/kms.py:147-159](../pypki/kms.py#L147-L159) (algo
-dispatch), `PKCS11Helper.generate_private_key` exists at
-[pypki/pkcs11_helper.py:83](../pypki/pkcs11_helper.py#L83) but is never
-called from the KMS, the web routes, or the CLI utilities.
+One PKCS#11 session per provider, opened at activation, closed at
+deactivation or shutdown.
 
-Consequences:
+- `PKCS11Backend.open(provider, secret)` opens the session, calls
+  `C_Login`, and stores the session handle on the backend instance.
+- `PKCS11Backend.close()` calls `C_Logout` (where applicable) and
+  `C_CloseSession`. Idempotent.
+- `KMS.unload_key(key_id)` evicts the in-memory cache entry only; it
+  does *not* close the session. Session lifetime is provider-scoped,
+  not key-scoped.
 
-- `generate_key` always writes `storage_type='Plain'` (see
-  [pypki/kms.py:174](../pypki/kms.py#L174),
-  [pypki/kms.py:188](../pypki/kms.py#L188), etc.).
-- The `kms_keygen.html` UI and `/api/kms/generate-key` endpoint cannot
-  create an HSM-resident key.
-- There is no `import_hsm_key()` to register a *pre-existing* on-token key
-  into `KeyStorage`. HSM rows must be inserted by hand-crafted SQL today.
+### 6.1 Reconnect
 
-**Fix:** the API and UI specified in
-[kms-strategy.md §9–10](kms-strategy.md#9-rest-api-specification) —
-`POST /api/kms/keys` (provider-scoped generate), `POST /api/kms/keys/import`
-(register existing on-token key). Generated keys carry the mandatory
-attribute set from
-[kms-strategy.md §8.2](kms-strategy.md#82-mandatory-private-key-attributes-pkcs11-backend).
+On `CKR_SESSION_HANDLE_INVALID` or `CKR_DEVICE_REMOVED` during a sign
+operation, the backend reopens the session **once** with the cached
+secret and retries the operation. A second consecutive failure raises
+to the caller.
 
-**Severity:** feature gap — without this, HSM is read-only and
-operator-unfriendly. Targeted in Phase 5.
+Rationale: a single transparent reconnect handles the common case (token
+unplugged briefly, intermediate process restarted upstream, session
+table flushed). Looping reconnects mask genuine token failures and
+extend the request beyond useful timeouts.
 
----
+### 6.2 Session limits
 
-## Gap 9 — `hsm_token_id` contract is unchecked  ✅ CLOSED (Phase 6)
-
-**Was:** [pypki/pkcs11_helper.py:184](../pypki/pkcs11_helper.py#L184)
-called `bytes.fromhex(key_id)` deep in the sign path, so a typo at insert
-or import time produced a confusing PKCS#11 error on first sign rather
-than a clear validation failure.
-
-**Now:** validation lives at the API boundaries — `KMS.import_pkcs11_key`
-and `PKCS11Backend` (load / find / delete) all route through
-`pypki.backends.pkcs11._validate_cka_id_hex`, which checks for
-non-empty + even-length + all-hex and produces a `ValueError` with the
-offending value. The hex-text contract is documented; storing as raw
-`VARBINARY` was deferred (would require a per-row migration with no
-operational benefit beyond size).
+Constrained tokens (YubiHSM 2 caps at 16 concurrent sessions per
+authkey) require that a long-running app process holds at most one
+session per provider — never one per cached key. This is the load-
+bearing reason for the provider-scoped lifecycle above; per-key
+sessions exhaust the token within minutes under realistic load.
 
 ---
 
-## Gap 10 — `storage_type='Encrypted'` is enum-only, no decrypt path  ✅ CLOSED (Phase 0.2 + Phase 6)
+## 7. Concurrency
 
-**Was:** `load_key` treated `'Encrypted'` exactly like `'Plain'` — ran
-`load_pem_private_key()` on the raw column.
+`KMS.load_key` uses double-checked locking around its in-memory cache;
+`KMS.sign_digest` serialises sign calls per backend with an `RLock`.
 
-**Now:** `'Encrypted'` is a real, exercised storage type:
-- Phase 0.2 migration encrypts `'Plain'` software rows under the per-
-  provider KEK and rewrites them as `'Encrypted'`. `KMS._finalise` and
-  the inline insert paths in `insert_ca` / OCSP creation also write
-  `'Encrypted'` for any new asymmetric software key.
-- `SoftwareBackend.load_key` decrypts `'Encrypted'` via
-  `decrypt_pem(blob, kek)`, with a defensive fallback that detects
-  legacy plaintext-PEM-in-Encrypted rows (operators who upgraded from a
-  pre-Phase-0 deployment) and loads them as plaintext with a loud
-  warning until the migration runs again with a configured `HSM_PIN_KEK`.
-- The Phase 0.2 migration also picks up those legacy plaintext-in-
-  Encrypted rows and re-encrypts them properly when the KEK is available.
+- The cache check is `if key_id not in cache: lock; if key_id not in
+  cache: load_key`. Both checks are required.
+- Per-backend `RLock` (not per-key) — PKCS#11 sessions are
+  single-threaded; concurrent sign calls on the same session interleave
+  unpredictably on some tokens.
+- Software backends acquire the same `RLock` for symmetry, which costs
+  nothing measurable and keeps the contract uniform.
 
----
-
-## Gap 11 — AES key entries cannot round-trip through the cache  ✅ CLOSED (Phase 6)
-
-**Was:** `KMS._finalise_symmetric` wrote AES keys with `storage_type='Plain'`
-and the load path tried to parse them as PEM private keys, crashing.
-
-**Now:** `_finalise_symmetric` writes `'Symmetric'`. The Phase 0.1 schema
-already had `'Symmetric'` in the `KeyStorage.storage_type` enum;
-`SoftwareBackend.load_key` now rejects it explicitly with a clear message
-(`"the asymmetric load/sign path does not handle these. Symmetric-key
-operations are not yet exposed through the KMS API."`) instead of silently
-crashing the PEM parser. Symmetric-key signing / wrapping / unwrapping is
-out of scope for the current KMS contract; the rejection is the explicit
-contract boundary.
+Rationale: Flask runs requests in threads. Two concurrent first-uses of
+the same key both miss the cache, both call `load_key`, and on HSM
+keys both open a session and run `C_Login`. The double-checked lock
+collapses this to one. Per-backend (rather than per-key) serialisation
+of sign calls avoids token-level races without the bookkeeping cost of
+per-key locks.
 
 ---
 
-## Gap 12 — Stale documentation reference in OCSP error  ✅ CLOSED (Phase 6)
+## 8. Key generation and import
 
-The OCSP responder's "no KMS key" error now points at the management API
-(`OCSPResponders.private_key_reference`) instead of the long-retired
-`migrate_keys_to_kms.py` script.
+The provider-scoped key API is specified in
+[kms-specs.md §9.2](kms-specs.md#92-key-management-apikmskeys).
+HSM-specific obligations:
+
+- `POST /api/kms/keys` against a `pkcs11` provider generates the
+  keypair on the token. The mandatory CKA_* attribute set
+  ([kms-specs.md §8.2](kms-specs.md#82-mandatory-private-key-attributes-pkcs11-backend))
+  is enforced; tokens that reject any required attribute fail loudly
+  at generation time, not at first sign.
+- `POST /api/kms/keys/import` registers a *pre-existing* on-token key
+  into `KeyStorage`. The `key_owned` column is set FALSE; subsequent
+  `DELETE /api/kms/keys/{id}` removes the registration but leaves the
+  token object intact.
+
+---
+
+## 9. Storage-type contracts
+
+### 9.1 `hsm_token_id` hex format
+
+- Type: hex-text (lowercase or uppercase, even length).
+- Validated at the API boundary by
+  `pypki.backends.pkcs11._validate_cka_id_hex` on insert / import /
+  delete. Empty, odd-length, and non-hex values produce a `ValueError`
+  with the offending value before any PKCS#11 call.
+- Not stored as raw `VARBINARY`: a per-row migration delivers no
+  operational benefit beyond a small storage saving. Hex-text is the
+  long-term contract.
+
+### 9.2 `Encrypted` software keys
+
+- `KeyStorage.private_key` for `storage_type='Encrypted'` rows holds
+  AES-256-GCM ciphertext under the per-provider KEK
+  ([kms-specs.md §6–7](kms-specs.md#6-activation-lifecycle)).
+- `SoftwareBackend.load_key` decrypts via `decrypt_pem(blob, kek)`.
+- A defensive fallback handles legacy rows where `Encrypted` was set
+  but the blob is plaintext PEM (operators upgrading from a
+  pre-Phase-0 deployment): the row is loaded with a loud warning
+  until the encrypt-at-rest migration runs again with `HSM_PIN_KEK`
+  configured.
+
+### 9.3 `Symmetric` keys
+
+- AES keys are persisted with `storage_type='Symmetric'`.
+- `SoftwareBackend.load_key` rejects `'Symmetric'` explicitly with a
+  message pointing at the missing API surface — symmetric-key signing,
+  wrapping, and unwrapping are out of scope for the current KMS
+  contract.
+- This is an explicit boundary, not a placeholder: when symmetric-key
+  operations are added, this rejection becomes a dispatch.
+
+### 9.4 `PassphraseEncrypted` end-entity escrow keys
+
+- `generate_pkcs12(store_key=True, passphrase=...)` writes the key as
+  `storage_type='PassphraseEncrypted'`: the PEM is KEK-wrapped under
+  the per-provider KEK like an `Encrypted` row, but is decryptable
+  only with the operator-supplied passphrase the original PKCS#12
+  carried.
+- `SoftwareBackend.load_key` refuses `'PassphraseEncrypted'` with a
+  pointer to the re-download flow. The KMS does not hold the
+  passphrase; this storage type is a parking spot for escrowed keys,
+  not a sign-path key.
+
+---
+
+## 10. Cross-references
+
+- [kms-specs.md](kms-specs.md) — the full KMS specification (provider
+  model, backend topology, activation lifecycle, REST API, management
+  UI, PKCS#11 conformance subset).
+- [softhsm2-manual.md](softhsm2-manual.md) — operator manual for the
+  SoftHSM2 dev environment that this spec is regression-tested
+  against.
+- [database.md](database.md) — current schema; the `KeyStorage` and
+  `CryptoProviders` definitions referenced here.
+- [PROGRESS.md §3](PROGRESS.md) — implementation status per contract.
+- [roadmap.md §3](roadmap.md) — strategic intent and remaining work.

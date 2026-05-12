@@ -1,19 +1,19 @@
-# KMS Strategy & Specification
+# KMS Specification
 
 This is the consolidated specification for the Key Management Service (KMS)
-layer in pyPKI. It describes the current state of the KMS, the target
-architecture for first-class HSM support coexisting with software keys, the
-data model, the REST API and management UI, the development environment, and
-the order in which the work is to be carried out.
+layer in pyPKI. It is the single source of truth for the KMS design:
+architecture, data model, backend contract, activation lifecycle, REST API,
+management UI, PKCS#11 conformance subset, development environment, and the
+order in which the work is to be carried out.
 
-This document supersedes the prior phased migration plan (Phase 1–3 are done
-— DB migration, `KeyManagementService` module, and routing all signing
-through it). The remaining work is captured here and cross-referenced from
-[hsm-gap-analysis.md](hsm-gap-analysis.md), which keeps the punch-list of
-concrete defects to fix.
+Status of each work item lives in [PROGRESS.md §3](PROGRESS.md); the
+strategic intent and cross-area framing live in [roadmap.md §3](roadmap.md).
+HSM-specific contracts (PKCS#11 mechanisms, slot addressing, session
+lifecycle, storage-type semantics) are specified in
+[hsm-support-specs.md](hsm-support-specs.md).
 
-A developer reading only this document should have everything needed to start
-implementation.
+A developer reading only this document should have everything needed to
+start implementation.
 
 ---
 
@@ -70,7 +70,7 @@ implementation.
   `DELETE /api/kms/keys/{id}` (refused with 409 if in-use; honours
   `key_owned` so imported keys leave the on-token objects intact).
 - Mandatory CKA_* attribute set enforced on every PKCS#11-generated
-  key (kms-strategy.md §8.2).
+  key (kms-specs.md §8.2).
 - Pytest suite parametrised over both backends; 54 tests covering the
   full API surface, multi-threaded sign safety, lifecycle invariants,
   and Phase 6 hardening (hex validation, symmetric-type rejection,
@@ -82,12 +82,27 @@ implementation.
   (YubiHSM 2 simulator, Thales DPoD, AWS CloudHSM). Held back until
   the hardware / SDK becomes available to the project. SoftHSM2 is
   the canonical regression target until then. See §13 Phase 7.
+- **Token-aware key listing.** `GET /api/kms/keys` and the
+  per-provider keys table on the Crypto Provider Details page
+  enumerate only rows in `KeyStorage`. For `pkcs11` providers there
+  is no way to *see* keys that exist on the token but have not been
+  registered in pyPKI yet — an operator cannot tell from the UI
+  which on-token objects are importable. The generic "Import HSM
+  key" button asks the operator to type the `CKA_ID` from memory.
+  Designed in [§18.1 CR-0001](#181-cr-0001--token-aware-key-listing--key-details-page).
+- **Key details page.** Today the keys list surfaces a `Delete`
+  button inline and a single `usage` count; there is no view that
+  shows the public key, the bound CAs / certificates / OCSP
+  responders by name, or that scopes destructive and (future)
+  export actions away from the bulk list. Designed in
+  [§18.1 CR-0001](#181-cr-0001--token-aware-key-listing--key-details-page).
 - `vault:` resolver — placeholder in the data model; raises
   `NotImplementedError`. Concrete implementation is a separate
   initiative.
 
-The historical 12-gap punch list is fully closed; details and
-file-line pointers are in [hsm-gap-analysis.md](hsm-gap-analysis.md).
+The HSM-specific contracts (mechanisms, slot addressing, session
+lifecycle, storage types) are specified in
+[hsm-support-specs.md](hsm-support-specs.md).
 
 ---
 
@@ -744,8 +759,9 @@ For the consolidated plan to be considered "done":
 
 ## 16. Cross-references
 
-- [hsm-gap-analysis.md](hsm-gap-analysis.md) — punch-list of the 12 concrete
-  defects this spec closes, with file/line pointers.
+- [hsm-support-specs.md](hsm-support-specs.md) — HSM-specific contracts
+  (PKCS#11 mechanisms, slot addressing, session lifecycle, storage
+  types) on top of this KMS spec.
 - [softhsm2-manual.md](softhsm2-manual.md) — operator manual for the
   SoftHSM2 dev environment.
 - [database.md](database.md) — current schema; will be regenerated when the
@@ -754,3 +770,489 @@ For the consolidated plan to be considered "done":
   endpoints in Section 9.
 - [roadmap.md](roadmap.md) — broader project roadmap; the HSM section
   references this spec.
+
+---
+
+## 17. Future direction — Signing Services
+
+A planned extension that turns the KMS from an internal-only signing
+substrate for X.509 / OCSP / EST into one that can also expose
+**signing services to external callers**. Captured here so the
+abstraction boundary is preserved when the work lands; not in scope for
+the current spec. Tracked in [roadmap.md §8](roadmap.md) and
+[PROGRESS.md §8](PROGRESS.md).
+
+### 17.1 Concept
+
+A **Signing Service** is a configurable consumer of the KMS, addressable
+over the REST API, that:
+
+- is bound to **one** KMS signing key (`KeyStorage.id`);
+- has a configured **signature type** (see §17.4);
+- has its own **access policy** (which callers may invoke it, with
+  what audit identity);
+- can be enabled / disabled independently of the underlying key.
+
+Signing services sit at the same architectural tier as CAs, OCSP
+responders, and EST aliases — they are *consumers* of the KMS, not
+part of it. The `CryptoBackend` contract (§5), the provider model
+(§4), and the activation lifecycle (§6) are unchanged. The only
+KMS-internal extension is that a key can now be referenced by
+something other than a CA or an OCSP responder.
+
+### 17.2 Why a sibling service rather than a new KMS endpoint
+
+The current `/api/kms/keys` surface is key-CRUD, not an operation
+surface — it intentionally hides the signing primitive from external
+callers because access to it is implicit (CAs and OCSP responders
+running inside the app are trusted). Exposing
+`POST /api/kms/keys/{id}/sign` directly would create an unbounded,
+per-key external signing surface with no policy, no audit identity
+contract, and no usage scoping. Signing Services give each external
+use case a **named, configured, audited** entry point on top of the
+same primitive.
+
+### 17.3 Data model addition
+
+A new `SigningServices` table joins the existing data model:
+
+| Column | Notes |
+|---|---|
+| `id` | PK. |
+| `name` | Unique, operator-facing. |
+| `key_id` | FK → `KeyStorage(id)`. `ON DELETE RESTRICT` — a key bound to a service may not be silently deleted. |
+| `signature_type` | Enum (initially `raw_hash`; see §17.4). |
+| `signature_config` | JSON. Type-specific parameters (e.g. allowed hash algorithms, digest-length policy). |
+| `is_enabled` | BOOLEAN. Disabled services return 503 cleanly without touching the KMS. |
+| `auth_policy` | JSON. Per-service auth (token scopes / roles / mTLS subject patterns). Specifics deferred to the implementation phase. |
+| `created_at`, `updated_at` | Timestamps. |
+
+`KeyStorage.usage` (today implicit "signing") becomes explicit so a
+key bound to a CA cannot also be bound to a signing service unless
+the operator opts in — preserving the auditability of which key
+signed which artefact.
+
+### 17.4 Signature types
+
+Signature types are pluggable. The initial type is intentionally
+minimal:
+
+- **`raw_hash` (initial).** Caller submits a pre-computed digest plus
+  a hash-algorithm identifier; the service returns the raw signature
+  bytes (RSA PKCS#1 v1.5 or ECDSA `(r,s)` DER per the key's
+  algorithm — the same primitive the X.509 path already uses). No
+  envelope, no certificate embedding, no timestamping.
+
+Subsequent types (each its own ticket) layer formatting on top:
+
+- `cms_detached` — RFC 5652 detached CMS signature.
+- `rfc3161_timestamp` — TSA response. Also needs a TSA certificate,
+  response policy OID config, and a trusted time source.
+- `jose_jws` — RFC 7515 compact JWS over a caller-supplied payload.
+- `pe_authenticode`, `jar`, `rpm` — code-signing format wrappers.
+- `pdf`, `xmldsig` — document-signing format wrappers.
+
+Each new type is data-driven (`signature_type` enum value plus a
+type-specific `signature_config` schema); none requires changes to
+`CryptoBackend`.
+
+### 17.5 REST API additions (sketch)
+
+```
+POST   /api/signing-services                    create
+GET    /api/signing-services                    list
+GET    /api/signing-services/{id}               read
+PATCH  /api/signing-services/{id}               update (incl. enable/disable)
+DELETE /api/signing-services/{id}               delete
+
+POST   /api/signing-services/{id}/sign          invoke
+```
+
+The invocation endpoint dispatches on `signature_type` and routes the
+final `sign()` call through the existing KMS path. It enforces the
+service's own `auth_policy` against the caller, independently of the
+management-API role check used by the CRUD endpoints.
+
+### 17.6 Audit
+
+Every successful or failed `/sign` invocation MUST produce an audit
+log entry referencing the signing service id, the caller identity
+(resolved per §17.3 `auth_policy`), the key id, and an integrity hash
+of the input digest. Volume is per-operation rather than per-PKI-event,
+so a separate retention policy from the existing audit log is likely.
+
+### 17.7 Out of scope for this future direction
+
+- **Encryption services.** A second sibling surface (encrypt / decrypt)
+  is a distinct initiative; it requires `verify` / `encrypt` / `decrypt`
+  on `CryptoBackend` (§5) and a parallel key-purpose story
+  (`KeyStorage.usage`). Tracked separately if pursued.
+- **Format-specific code-signing engines.** PE Authenticode, JAR, RPM,
+  etc. are follow-up `signature_type`s, not part of the initial
+  signing-service scaffold.
+- **Hardware-attested signing claims.** No vendor-attestation
+  envelopes; `raw_hash` returns the bare signature.
+
+---
+
+## 18. Design proposals
+
+This section holds in-progress designs for capabilities listed in
+§2.2 that reshape the existing API or UI surface. A proposal lives
+here only while the design is being negotiated. Once accepted and
+shipped, its content is folded into the relevant canonical sections
+(§5 for the backend contract, §9 for API, §10 for UI, §11 for audit,
+§13 for the phase plan) and the proposal entry is removed.
+
+Each proposal follows a fixed shape: **Status**, **Motivation**,
+**Proposed behaviour**, **Impact on existing sections**, **Action
+plan**, **Open questions**, **Acceptance criteria**. Proposals are
+numbered `CR-NNNN` with zero-padded four-digit ids, allocated in
+order of creation; numbers are never reused. This is the same
+convention used in
+[ca-management-specs.md §17](ca-management-specs.md).
+
+### 18.1 CR-0001 — Token-aware key listing + key details page
+
+**Status:** Accepted (2026-05-12). Implementation pending; entry stays
+here until the fold-in commit lands per the §18 preamble.
+
+**Motivation:** §2.2 — the keys surface today (the global
+`/kms_keys.html` page and the per-provider keys table on
+`/crypto_provider_details.html`) only shows rows that already exist
+in `KeyStorage`. For `pkcs11` providers this is half the picture:
+keys that live on the token but have never been registered in
+pyPKI are invisible. The only way to register one today is the
+"Import HSM key" modal, which requires the operator to remember
+and type the `CKA_ID` hex.
+
+At the same time, the list view exposes a per-row "Delete" button
+and reduces *usage* (which CAs / certificates / OCSP responders
+hold the key) to a single integer. There is no view that names
+the dependents, no place to land a future "Export" action (§15
+out-of-scope today, but the surface needs a home), and the
+destructive action is one mis-click away inline.
+
+This proposal closes both gaps with one design: a token-aware list
+view that merges KMS-registered keys with on-token objects, and a
+dedicated key details page that owns key-level actions.
+
+**Proposed behaviour:**
+
+#### Backend — on-token enumeration
+
+`CryptoBackend.list_keys()` already appears in the Protocol (§5)
+but `PKCS11Backend.list_keys()` is unimplemented. Implement it as
+a `C_FindObjectsInit` / `C_FindObjects` / `C_FindObjectsFinal`
+sweep over `CKO_PRIVATE_KEY` objects, returning per key:
+
+- raw `CKA_ID` bytes
+- `CKA_LABEL` (may be empty)
+- algorithm + parameter set (`RSA-3072`, `ECDSA-P-256`, …),
+  derived from `CKA_KEY_TYPE` + `CKA_MODULUS_BITS` /
+  `CKA_EC_PARAMS`. When the algorithm cannot be parametrised
+  against the conservative subset (§8.1), the field is set to
+  `null` and the row carries `unimportable_reason =
+  "unsupported_key_type"` (see API below).
+- public-key DER **only** when a paired `CKO_PUBLIC_KEY` object
+  exists on the token. The raw-attribute fallback
+  (`CKA_MODULUS` / `CKA_EC_POINT`) is intentionally deferred to
+  a follow-up — when the paired object is missing the row is
+  surfaced with `unimportable_reason = "public_key_unavailable"`
+  and no PEM.
+
+`SoftwareBackend.list_keys()` returns the empty set — software
+keys are 100% DB-backed, so `KeyStorage` is authoritative; there
+is no parallel store to enumerate.
+
+Enumeration runs only when the provider is `active` (§6). On an
+inactive `pkcs11` provider the API returns the DB rows alone plus
+an envelope flag (see API below).
+
+#### API — `GET /api/kms/keys` (merged listing)
+
+Behaviour depends on the query:
+
+- **`?provider_id=<software>`** — unchanged. Returns `KeyStorage`
+  rows for the provider; every row is `registered_and_present`.
+- **`?provider_id=<pkcs11>`, provider active** — returns the
+  *merged* set:
+  - every `KeyStorage` row for the provider, joined against the
+    backend's `list_keys()` by `hsm_token_id`;
+  - every on-token key with no matching `KeyStorage` row.
+- **`?provider_id=<pkcs11>`, provider inactive** — returns DB
+  rows only, with `token_enumeration.available = false`.
+- **No `provider_id`** — returns DB rows across all providers
+  (the existing behaviour). On-token-only entries are **never**
+  merged into the global view; the operator must scope to a
+  `pkcs11` provider to see unregistered on-token keys.
+
+Each row carries a `state` field:
+
+| `state` | Meaning |
+|---|---|
+| `registered_and_present` | In `KeyStorage`; for `pkcs11`, also found on the token. Normal case. |
+| `present_only` | On the token, no `KeyStorage` row. `id = null`, `usage = null`, `created_at = null`. Carries an additional `unimportable_reason ∈ {null, "unsupported_key_type", "public_key_unavailable"}`; when `null` the row is importable, otherwise it is visible but read-only. |
+| `registered_only` | `KeyStorage` row exists; for `pkcs11`, the matching `hsm_token_id` was *not* found on the token. Drift / error state — surfaced so the operator can investigate, detected on every list call (no separate "verify keys" probe in this proposal). |
+
+Response envelope additions:
+
+```json
+{
+  "keys": [ … ],
+  "token_enumeration": {
+    "available": true,
+    "reason":   null            // when available=false: "provider-inactive" | "backend-error"
+  }
+}
+```
+
+#### API — `GET /api/kms/keys/{key_id}` (details)
+
+Already listed in §9.2; expanded to return the dependent objects
+by name, not just a count:
+
+```json
+{
+  "id":            42,
+  "provider_id":   3,
+  "provider_label":"hsm-root",
+  "key_type":      "ECDSA-P-256",
+  "label":         "acme-root-2026",
+  "hsm_token_id":  "0a1b2c…",        // pkcs11 only
+  "public_key":    "-----BEGIN PUBLIC KEY-----\n…",
+  "state":         "registered_and_present",
+  "key_owned":     true,
+  "created_at":    "2026-04-12T08:30:00Z",
+  "usage": {
+    "count": 2,
+    "items": [
+      {"type": "ca",              "id": 5,  "name": "Acme Root CA"},
+      {"type": "certificate",     "id": 12, "name": "service.acme.ch", "ca_id": 5},
+      {"type": "ocsp_responder",  "id": 1,  "name": "Acme OCSP Responder"},
+      {"type": "signing_service", "id": 2,  "name": "Code-signing", "note": "reserved, §17"}
+    ]
+  }
+}
+```
+
+The `usage.items` array is the authoritative list of objects
+preventing deletion (the 409-rejection path checks the same
+relations).
+
+#### API — `POST /api/kms/keys/{key_id}/export`
+
+New endpoint, reserved. Returns **501 Not Implemented** with
+`{"description": "export action will be specified separately"}`.
+Scoped here only so the route exists and the UI can wire a
+"coming soon" button to a real endpoint id; the actual export
+semantics (formats, allowed key types, allowed providers,
+authorisation) are defined in a follow-up proposal.
+
+#### UI — keys list (`/kms_keys.html` and per-provider table)
+
+- Replace the per-row `Delete` button with a `Details` button
+  that navigates to `/key_details.html?id=<key_id>` (registered
+  rows) or opens the import flow pre-populated (unregistered
+  rows; see below).
+- Drop the global `Delete` bulk action. Deletion lives on the
+  details page.
+- New row state column rendering `state`:
+  - `registered_and_present` — no badge.
+  - `present_only`, `unimportable_reason = null` — "Not
+    registered" badge + an inline `Import` button. Clicking
+    opens a one-field prompt pre-filled with the row's
+    `CKA_LABEL`; the operator confirms (or renames) and the
+    handler POSTs `POST /api/kms/keys/import` with
+    `provider_id`, `hsm_token_id`, and the (possibly edited)
+    `label`. The prompt is inline — it does not leave the keys
+    list. On success the row rerenders as
+    `registered_and_present` with its new `id`.
+  - `present_only`, `unimportable_reason = "unsupported_key_type"`
+    — muted "Unsupported key type" badge. The row is visible so
+    the operator knows the slot has something there, but no
+    inline action is offered (no Import, no Details — the row
+    has no `id` to address).
+  - `present_only`, `unimportable_reason = "public_key_unavailable"`
+    — muted "Public key unavailable" badge. Same affordance as
+    above: visible, no action. The fallback that would recover
+    the public key from raw attributes is a follow-up; until it
+    lands, these rows stay read-only.
+  - `registered_only` — "Missing on token" badge in muted red.
+    No inline action (the operator opens the details page to
+    investigate or delete).
+- The existing "Import HSM key" button is kept as a fallback for
+  pasting a `CKA_ID` directly (e.g. for a token where
+  enumeration failed). The merged listing is the primary path.
+- When the scoped `pkcs11` provider is inactive, render a banner
+  "Token enumeration unavailable — activate the provider to see
+  unregistered keys" sourced from
+  `token_enumeration.reason = "provider-inactive"`.
+
+#### UI — new key details page (`/key_details.html?id=<key_id>`)
+
+- Header: label, key type, provider (with link), state badge,
+  `key_owned` indicator.
+- Public-key panel: PEM display + copy / download buttons.
+- For `pkcs11` rows: token attributes (`hsm_token_id` hex,
+  `CKA_LABEL` from the token if different from `label`).
+- Usage panel: a table of the dependents from `usage.items` with
+  per-row links to the dependent's detail page (CA, certificate,
+  OCSP responder, future signing service).
+- Audit-log panel: the key's lifecycle trail (`key_generate`,
+  `key_import`, `key_export` when implemented, `key_delete`)
+  filtered from `AuditLogs` by `resource_type='kms_key'` and
+  the key's id, newest first. Sourced from the existing audit
+  endpoint; no new event types are introduced by this proposal.
+- Action bar at the bottom:
+  - **Export** — calls `POST /api/kms/keys/{id}/export`; the
+    501 surfaces as a "Export is not yet implemented" toast.
+    Button stays visible so the affordance is discoverable.
+  - **Delete** — confirms with the dependents enumerated in the
+    usage panel; calls `DELETE /api/kms/keys/{id}`, which still
+    refuses with 409 when `usage.count > 0`. On success,
+    redirects to the keys list.
+- For `registered_only` rows (drift), the details page replaces
+  the usage panel with a "Key missing on token" notice and
+  surfaces only the Delete action — Export is hidden because
+  there is no private material to export.
+
+**Impact on existing sections:**
+
+- §2.2 — both pending bullets close.
+- §5 — `PKCS11Backend.list_keys()` becomes a required
+  implementation, not "future Phase 5 work" in the docstring at
+  [base.py:12](../pypki/backends/base.py#L12).
+- §9.2 — `GET /api/kms/keys` response gains `state` per row and a
+  `token_enumeration` envelope; `GET /api/kms/keys/{id}` response
+  shape grows to include the named `usage.items`;
+  `POST /api/kms/keys/{id}/export` (reserved, 501) is added to the
+  route table.
+- §10.2 — keys page loses the inline `Delete` button; gains the
+  `Details` button, the `state` badge column, the per-row
+  `Import` action for `present_only` rows.
+- §10 — add §10.5 *Key details page* describing the new page.
+- §11 — `key_export` event reserved (no rows written today;
+  endpoint returns 501 before any audit).
+- §14 — acceptance criteria gain "operator can see and import an
+  on-token key without typing the CKA_ID" and "no destructive key
+  action lives on a list view".
+
+**Action plan:**
+
+Each step ends with passing tests.
+
+1. **Backend — `PKCS11Backend.list_keys()`.** Implement the
+   `CKO_PRIVATE_KEY` sweep + public-key resolution.
+   Add a pytest fixture that generates two keys on the SoftHSM
+   token outside pyPKI's import path and asserts both come back
+   from `list_keys()` with usable algorithm metadata and PEM
+   public keys. `SoftwareBackend.list_keys()` returns `[]`
+   explicitly.
+2. **API — merged listing for pkcs11 providers.** Extend
+   `list_kms_keys` in
+   [api_adapters.py:735](../web/services/api_adapters.py#L735)
+   to call the backend's `list_keys()` when scoped to a `pkcs11`
+   provider, merge by `hsm_token_id`, attach the `state` per
+   row. Add the `token_enumeration` envelope. Inactive-provider
+   case returns DB rows only with `available=false`. Pytest
+   parametrised over backends; the SoftHSM fixture verifies all
+   three `state` values surface (generate one via pyPKI, one
+   directly on the token, then delete the on-token copy of a
+   third pre-registered key to produce `registered_only`).
+3. **API — details endpoint.** Implement
+   `GET /api/kms/keys/{key_id}` returning the expanded shape with
+   `usage.items`. The same query that today produces the `usage`
+   integer is widened to fetch the dependent rows' names. Pytest:
+   create a CA + a certificate + an OCSP responder bound to one
+   key, hit the details endpoint, assert all three appear.
+4. **API — export placeholder.** Wire
+   `POST /api/kms/keys/{key_id}/export` to a handler that
+   returns 501 with the documented description. One test
+   asserting the status and body.
+5. **UI — keys list.** Modify
+   [kms_keys.html](../web/templates/kms_keys.html) to:
+   render the `state` column with the three badges; replace the
+   per-row Delete with a Details link; for `present_only` rows,
+   render an inline Import button that POSTs the prefilled
+   `import` request. Inactive-provider banner. Visual regression
+   test (Playwright or similar) on the three states.
+6. **UI — key details page.** New
+   `web/templates/key_details.html` plus a route in
+   `web/routes/main_routes.py` (`GET /key_details.html`) that
+   renders the page. Implement Export (501 toast) and Delete
+   (confirm + DELETE) actions. Reuse the existing
+   confirm-with-dependents component from
+   `crypto_provider_details.html` where applicable.
+7. **UI — per-provider keys table.** Apply the same row
+   changes to the keys table embedded in
+   [crypto_provider_details.html](../web/templates/crypto_provider_details.html).
+   Verify the inactive-provider banner is consistent.
+8. **Docs cleanup.** Fold the canonical bits of this proposal
+   into §5, §9.2, §10.2, §10 (new §10.5), §11, §13, §14; remove
+   §18.1 entry; update [PROGRESS.md §3](PROGRESS.md) and
+   [roadmap.md §3](roadmap.md) to reference the closed work.
+
+**Resolved decisions** (settled 2026-05-12, folded into the
+proposed behaviour above):
+
+1. **Global keys list — DB-only.** When no `provider_id` is
+   supplied, `present_only` rows are not merged into the
+   response. Operators scope to a `pkcs11` provider to see
+   unregistered on-token keys. Keeps the global view bounded
+   and paginatable.
+2. **Drift — detect on list only.** `registered_only` is
+   surfaced on every list call against a `pkcs11` provider by
+   comparing `KeyStorage.hsm_token_id` to the backend's
+   `list_keys()` output. No separate "verify keys" probe ships
+   in this proposal; if drift becomes operationally noisy, a
+   follow-up adds an explicit check button.
+3. **Unsupported key types — visible, muted, no action.** Rows
+   whose `CKA_KEY_TYPE` does not map to the §8.1 conservative
+   subset render with a "Unsupported key type" badge and no
+   Import / Details affordance. The operator sees that the slot
+   has something there; pyPKI does not pretend it can manage it.
+4. **Paired-object public keys only — no raw-attribute
+   fallback.** Step 1 of the action plan reads public-key DER
+   exclusively from a paired `CKO_PUBLIC_KEY` object on the
+   token. Private keys whose paired object is missing surface
+   as `present_only` with `unimportable_reason =
+   "public_key_unavailable"`; recovering them via raw attribute
+   reads is a follow-up.
+5. **Per-row Import — one-field prompt, pre-filled from
+   `CKA_LABEL`.** Clicking Import on a `present_only` row opens
+   an inline prompt with the row's `CKA_LABEL` already filled
+   in; the operator confirms or renames and the request POSTs
+   without leaving the list view.
+6. **Audit-log trail on the details page — yes.** The details
+   page renders the key's `AuditLogs` history below the usage
+   panel. No new event types are introduced — the existing
+   `key_generate`, `key_import`, and `key_delete` events
+   already cover the trail; the reserved `key_export` event
+   joins it when the export action lands.
+
+**Acceptance criteria** (in addition to §14):
+
+- An operator can land on a `pkcs11` provider's details page,
+  see every key on the slot in one table (including those not
+  in pyPKI), and click Import on an unregistered row without
+  typing a `CKA_ID` anywhere.
+- The keys list in
+  [kms_keys.html](../web/templates/kms_keys.html) and the keys
+  table embedded in
+  [crypto_provider_details.html](../web/templates/crypto_provider_details.html)
+  surface no destructive button inline. Destructive actions
+  live on the details page only.
+- The details page lists every dependent (CA, certificate, OCSP
+  responder, signing service when §17 lands) by name. The set is
+  identical to the relations that drive the
+  `DELETE /api/kms/keys/{id}` 409 path.
+- The Export button is visible on the details page for
+  registered keys and returns the documented 501 with a
+  user-visible "not yet implemented" toast. No partial export
+  flow exists.
+- Provider deactivation does not break the list view; rows
+  registered in `KeyStorage` remain visible with the documented
+  envelope flag, only on-token-only rows disappear.
+- The parametrised test suite (Phase 0 §13) covers both backends
+  and exercises all three `state` values on the `pkcs11` side.

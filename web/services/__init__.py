@@ -66,7 +66,7 @@ pki = PyPKI(CONFIG_PATH)
 
 # Activate every crypto provider with auto_activate=TRUE so PKCS#11
 # sessions and software KEKs are ready before the first signing request.
-# Failures are logged but non-fatal (kms-strategy.md §6).
+# Failures are logged but non-fatal (kms-specs.md §6).
 try:
     pki.get_kms().activate_auto_providers()
 except Exception:
@@ -79,7 +79,7 @@ def generate_crls():
     """
     Refresh CRLs for every loaded CA. Per-CA failures (typically: the CA's
     crypto provider is inactive because its PIN/KEK is unavailable) are
-    logged but do not abort the whole pass — kms-strategy.md §6 mandates
+    logged but do not abort the whole pass — kms-specs.md §6 mandates
     that a failing provider must not take the management surface down.
     """
     ca_collection = pki.get_ca_collection()
@@ -118,5 +118,5 @@ scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
 
 # Close every active KMS backend (PKCS#11 sessions, software KEKs) on
-# process exit — see doc/kms-strategy.md §6 (activation lifecycle).
+# process exit — see doc/kms-specs.md §6 (activation lifecycle).
 atexit.register(lambda: pki.get_kms().shutdown())

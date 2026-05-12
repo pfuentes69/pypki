@@ -4,7 +4,7 @@ encryption-at-rest helpers.
 
 A `software` CryptoProvider has a PIN, resolved via its ``auth_secret_ref``
 (`env:` / `vault:` / `db:encrypted` / `operator:prompt` — see
-[kms-strategy.md §7](../doc/kms-strategy.md)). The PIN is then run through
+[kms-specs.md §7](../doc/kms-specs.md)). The PIN is then run through
 HKDF-SHA256 to derive a per-provider 256-bit KEK, which is used with
 AES-256-GCM to encrypt PEM-encoded private keys for at-rest storage in
 ``KeyStorage.private_key``.
@@ -40,7 +40,7 @@ from .log import logger
 _KEK_INFO = b"pypki:provider-kek:v1"
 
 # Master-KEK domain separation. The master KEK wraps provider PINs stored
-# under `auth_secret_ref='db:encrypted'` (see kms-strategy.md §7). It is
+# under `auth_secret_ref='db:encrypted'` (see kms-specs.md §7). It is
 # derived from the same `HSM_PIN_KEK` env var as the per-provider KEKs but
 # with a distinct salt+info so the two key families never collide.
 _MASTER_KEK_ENV_VAR = "HSM_PIN_KEK"
@@ -81,7 +81,7 @@ def resolve_provider_secret(provider_record: dict) -> bytes:
             raise KEKUnavailable(
                 f"Provider '{label}': environment variable {var_name} is not set. "
                 f"Set it to a strong, deployment-wide secret kept outside the database "
-                f"(see doc/kms-strategy.md §7)."
+                f"(see doc/kms-specs.md §7)."
             )
         return value.encode("utf-8")
 
@@ -200,7 +200,7 @@ def get_master_kek() -> bytes:
         raise KEKUnavailable(
             f"Master KEK: environment variable {_MASTER_KEK_ENV_VAR} is not set. "
             f"It is required for `db:encrypted` provider PINs and for software-key "
-            f"encryption-at-rest (see doc/kms-strategy.md §7)."
+            f"encryption-at-rest (see doc/kms-specs.md §7)."
         )
     hkdf = HKDF(
         algorithm=hashes.SHA256(),
