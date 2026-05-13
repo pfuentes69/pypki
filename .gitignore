@@ -32,6 +32,12 @@ out
 config/config.aws.json
 config/config.local.json
 
+# Per-deployment secrets — must be generated on each install (see
+# .env.example for the template). Each deployment has its own
+# HSM_PIN_KEK that wraps every encrypted KeyStorage row; never share
+# across boxes.
+.env
+
 # Runtime state — never commit. The MariaDB container writes its
 # datadir here under uid 999; tracking it pollutes the repo and
 # breaks `git pull` on production boxes because the host user can't
