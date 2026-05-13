@@ -39,6 +39,22 @@
       <label class="form-label">CRL Validity (days)</label>
       <input type="number" class="form-control" id="crlValidity" value="365" min="1">
     </div>
+    <div class="col-md-3">
+      <label class="form-label">Signing Algorithm <span class="text-danger">*</span></label>
+      <select class="form-select" id="signingAlgorithm">
+        <optgroup label="RSA (PKCS#1 v1.5)">
+          <option value="rsa-sha256">rsa-sha256</option>
+          <option value="rsa-sha384">rsa-sha384</option>
+          <option value="rsa-sha512">rsa-sha512</option>
+        </optgroup>
+        <optgroup label="ECDSA">
+          <option value="ecdsa-sha256">ecdsa-sha256</option>
+          <option value="ecdsa-sha384">ecdsa-sha384</option>
+          <option value="ecdsa-sha512">ecdsa-sha512</option>
+        </optgroup>
+      </select>
+      <div class="form-text">Immutable once the CA is created (CR-0003).</div>
+    </div>
   </div>
 </div>
 
@@ -50,17 +66,17 @@
     <!-- Top-level mode selector (CR-0001 + CR-0002 extend this to 4 modes) -->
     <div class="mb-4">
       <div class="btn-group flex-wrap" role="group">
-        <input type="radio" class="btn-check" name="keyMode" id="modePem" value="pem" checked>
+        <input type="radio" class="btn-check" name="keyMode" id="modeGenerate" value="generate" checked>
+        <label class="btn btn-outline-primary btn-sm" for="modeGenerate">
+          <i class="bi bi-stars me-1"></i>Generate / Issue
+        </label>
+        <input type="radio" class="btn-check" name="keyMode" id="modePem" value="pem">
         <label class="btn btn-outline-primary btn-sm" for="modePem">
           <i class="bi bi-file-text me-1"></i>PEM (paste or upload)
         </label>
         <input type="radio" class="btn-check" name="keyMode" id="modeP12" value="p12">
         <label class="btn btn-outline-primary btn-sm" for="modeP12">
           <i class="bi bi-archive me-1"></i>PKCS12 (.p12 / .pfx)
-        </label>
-        <input type="radio" class="btn-check" name="keyMode" id="modeGenerate" value="generate">
-        <label class="btn btn-outline-primary btn-sm" for="modeGenerate">
-          <i class="bi bi-stars me-1"></i>Generate / Issue
         </label>
         <input type="radio" class="btn-check" name="keyMode" id="modeBind" value="bind">
         <label class="btn btn-outline-primary btn-sm" for="modeBind">
@@ -70,7 +86,7 @@
     </div>
 
     <!-- ── PEM section (legacy) ───────────────────────────────────────────── -->
-    <div id="pemSection">
+    <div id="pemSection" class="d-none">
       <div class="row g-3">
         <div class="col-md-6">
           <label class="form-label">CA Certificate (PEM) <span class="text-danger">*</span></label>
@@ -119,7 +135,7 @@
     </div>
 
     <!-- ── Generate / Issue section (CR-0001) ─────────────────────────────── -->
-    <div id="generateSection" class="d-none">
+    <div id="generateSection">
 
       <!-- Issuance scenario -->
       <div class="mb-3">
@@ -393,6 +409,46 @@
     });
   });
 
+  // ── Signing algorithm default-selection (CR-0003 decision 4) ────────────────
+  // Match the SHA-256 variant to the selected key family. Only the wired
+  // tokens (rsa-sha256, ecdsa-sha256) are listed today; the dropdown stays
+  // operator-overridable.
+  function defaultSigningAlgorithmForKeyType(keyType) {
+    if (!keyType) return null;
+    const upper = keyType.toUpperCase();
+    if (upper.startsWith('RSA-')) return 'rsa-sha256';
+    if (upper.startsWith('ECDSA-')) return 'ecdsa-sha256';
+    return null;
+  }
+  function applySigningAlgorithmDefault(keyType) {
+    const def = defaultSigningAlgorithmForKeyType(keyType);
+    if (!def) return;
+    const sel = document.getElementById('signingAlgorithm');
+    // Only override if the user hasn't picked something incompatible yet.
+    if (sel.value && sel.value !== def && sel.dataset.userTouched === 'true') return;
+    sel.value = def;
+  }
+  document.getElementById('signingAlgorithm').addEventListener('change', (e) => {
+    e.target.dataset.userTouched = 'true';
+  });
+  document.getElementById('genKeyType').addEventListener('change', (e) => {
+    applySigningAlgorithmDefault(e.target.value);
+  });
+  // When the user picks an unbound key in either bind dropdown, pull the
+  // key_type from the option's display text ("…— ECDSA-P-256 — …") and
+  // apply the matching default.
+  function watchUnboundKeyDropdown(selectId) {
+    document.getElementById(selectId).addEventListener('change', (e) => {
+      const text = e.target.selectedOptions[0]?.textContent || '';
+      // Format: "<label> — provider #N — <key_type> — <spki_fp8>"
+      const parts = text.split('—').map(s => s.trim());
+      // key_type is the 3rd field (index 2) when present.
+      if (parts.length >= 3) applySigningAlgorithmDefault(parts[2]);
+    });
+  }
+  watchUnboundKeyDropdown('genUnboundKeyId');
+  watchUnboundKeyDropdown('bindKmsKeyId');
+
   // ── State ────────────────────────────────────────────────────────────────────
   const _loaded = { generate: false, bind: false };
   let _template = null;          // currently-loaded certificate template definition
@@ -654,6 +710,9 @@
     if (isNaN(serialLength) || serialLength < 1)       { showAlert('Serial number length must be a positive integer.'); return; }
     if (isNaN(crlValidity)  || crlValidity  < 1)       { showAlert('CRL validity must be a positive integer.'); return; }
 
+    const signingAlgorithm = document.getElementById('signingAlgorithm').value;
+    if (!signingAlgorithm) { showAlert('Signing Algorithm is required.'); return; }
+
     const mode = document.querySelector('input[name="keyMode"]:checked').value;
     const basePayload = {
       name,
@@ -661,6 +720,7 @@
       serial_number_length: serialLength,
       crl_validity: crlValidity,
       extensions: buildExtensions(),
+      signing_algorithm: signingAlgorithm,
     };
 
     const btn = document.getElementById('saveBtn');
@@ -791,5 +851,12 @@
       setTimeout(() => { window.location.href = `/ca_details.html?id=${id}`; }, 800);
     }
   }
+
+  // ── Init ─────────────────────────────────────────────────────────────────────
+  // Generate / Issue is the default mode; its data loaders are normally
+  // triggered by the keyMode change listener, which doesn't fire for the
+  // initially-`checked` radio. Kick them off explicitly on page load.
+  loadGenerateData();
+  updateSaveLabel();
 </script>
 {% endblock %}

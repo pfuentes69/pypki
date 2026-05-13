@@ -5,6 +5,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from .key_tools import KeyTools
+from . import signing_algorithm as _sa
 
 
 class CertificationAuthority:
@@ -16,6 +17,7 @@ class CertificationAuthority:
         self.__local_key: KeyTools = None   # direct key when KMS is not used
         self.__certificate: x509.Certificate = b""
         self.__certificate_chain_pem: str = ""
+        self.__signing_algorithm: str = None
 
 
     def load_config_json(self, ca_config_json: str):
@@ -49,25 +51,55 @@ class CertificationAuthority:
             )
             self.__local_key = kt
 
+        # CR-0003: pick up the per-CA signing algorithm. Required by the
+        # API layer at creation time; for offline / utility-script callers
+        # without a runtime DB we derive a reasonable default from the
+        # cert's signatureAlgorithm OID so direct config loading still
+        # works.
+        self.__signing_algorithm = self.__config.get("signing_algorithm")
+        if not self.__signing_algorithm:
+            try:
+                self.__signing_algorithm = _sa.token_from_certificate(self.__certificate)
+            except _sa.UnknownSigningAlgorithm:
+                self.__signing_algorithm = _sa.default_token_for_public_key(
+                    self.__certificate.public_key()
+                )
+
 
     def set_kms(self, kms) -> None:
         """Inject the KeyManagementService instance used for signing operations."""
         self.__kms = kms
 
 
+    def get_signing_algorithm(self) -> str:
+        """Return the CR-0003 `signing_algorithm` token bound to this CA."""
+        return self.__signing_algorithm
+
+
     def sign_tbs_digest(self, tbs_digest: bytes) -> bytes:
         """
-        Sign a pre-computed SHA-256 digest.
+        Sign a pre-computed digest under the CA's `signing_algorithm`
+        (CR-0003).
+
+        The digest's hash function must match the CA's `signing_algorithm`
+        — callers are expected to use ``signing_algorithm.hash_for_token``
+        when building both the TBS bytes and the digest, so the embedded
+        ``signatureAlgorithm`` OID and the hash agree.
 
         Priority:
           1. KMS (when set_kms() has been called and kms_key_id is configured).
           2. Local KeyTools (when a private_key was supplied in the config).
         """
         if self.__kms is not None and self.__kms_key_id is not None:
-            return self.__kms.sign_digest(self.__kms_key_id, tbs_digest)
+            return self.__kms.sign_digest(
+                self.__kms_key_id, tbs_digest,
+                signing_algorithm=self.__signing_algorithm,
+            )
 
         if self.__local_key is not None:
-            return self.__local_key.sign_digest(tbs_digest)
+            return self.__local_key.sign_digest(
+                tbs_digest, signing_algorithm=self.__signing_algorithm
+            )
 
         raise RuntimeError(
             f"No signing method available for CA '{self.__config.get('ca_name')}'. "

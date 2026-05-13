@@ -153,8 +153,19 @@ class CryptoBackend(Protocol):
         """
         ...
 
-    def sign_digest(self, handle: KeyHandle, tbs_digest: bytes) -> bytes:
-        """Sign a pre-computed digest. Returns the raw signature bytes."""
+    def sign_digest(
+        self,
+        handle: KeyHandle,
+        tbs_digest: bytes,
+        signing_algorithm: str = None,
+    ) -> bytes:
+        """Sign a pre-computed digest. Returns the raw signature bytes.
+
+        ``signing_algorithm`` is the CR-0003 token (`rsa-sha256`,
+        `ecdsa-sha256`, …). The digest's hash function must match the
+        token. When omitted, backends fall back to legacy SHA-256
+        behaviour.
+        """
         ...
 
     def list_keys(self) -> list[dict]:

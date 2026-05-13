@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives import serialization
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from pypki import PKITools, PKIDataBase
+from pypki import signing_algorithm as _sa
 
 from . import pki
 
@@ -111,7 +112,15 @@ def update_ca(ca_id: int, data: dict, user_id: int = 0):
 
     Accepted keys: name, max_validity, serial_number_length, crl_validity, extensions.
     `extensions` should be a dict; it is serialised to JSON here.
+
+    Raises ``ValueError`` (mapped to HTTP 400 by the route handler) if
+    the request carries ``signing_algorithm`` — that field is immutable
+    after creation per CR-0003.
     """
+    if "signing_algorithm" in data:
+        raise ValueError(
+            "immutable_field: signing_algorithm cannot be changed after CA creation"
+        )
     fields = {}
     if "name" in data and data["name"]:
         fields["name"] = data["name"].strip()
@@ -188,7 +197,8 @@ def create_ca(data: dict, user_id: int = 0) -> int:
     Create a new CA from a validated data dict.
 
     Required keys:
-        name, certificate (PEM), and either private_key (PEM) or kms_key_id (int)
+        name, certificate (PEM), signing_algorithm (CR-0003 token),
+        and either private_key (PEM) or kms_key_id (int).
     Optional keys:
         certificate_chain (PEM), max_validity (int, default -1),
         serial_number_length (int, default 10), crl_validity (int, default 365),
@@ -205,12 +215,30 @@ def create_ca(data: dict, user_id: int = 0) -> int:
             raise ValueError("kms_key_id must be an integer")
         _verify_kms_key_for_ca(kms_key_id, data["certificate"])
 
+    # CR-0003 validation. Run after the kms-key match check so SPKI
+    # mismatches surface first (they're more fundamental). Self-signed
+    # imports cross-check the cert's signatureAlgorithm against the
+    # supplied token; intermediate imports skip that check per
+    # resolved decision 3.
+    try:
+        cert = x509.load_pem_x509_certificate(data["certificate"].encode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"Invalid CA certificate PEM: {e}")
+    cert_pub_key = cert.public_key()
+    signing_algorithm = _sa.validate_for_creation(
+        data.get("signing_algorithm"),
+        public_key=cert_pub_key,
+        certificate=cert,
+        enforce_cert_match=_sa.is_self_signed(cert),
+    )
+
     config = {
         "ca_name": data["name"],
         "max_validity": int(data.get("max_validity", -1)),
         "serial_number_length": int(data.get("serial_number_length", 10)),
         "crl_validity": int(data.get("crl_validity", 365)),
         "extensions": data.get("extensions") or {},
+        "signing_algorithm": signing_algorithm,
         "crypto": {
             "certificate": data["certificate"],
             "private_key": data.get("private_key"),
@@ -230,7 +258,9 @@ def create_ca(data: dict, user_id: int = 0) -> int:
         gen_mode = "kms_bind"
     else:
         gen_mode = "pem"
-    write_audit_log("cas", new_id, "CREATE", user_id, metadata={"generation_mode": gen_mode})
+    write_audit_log("cas", new_id, "CREATE", user_id,
+                    metadata={"generation_mode": gen_mode,
+                              "signing_algorithm": signing_algorithm})
     return new_id
 
 

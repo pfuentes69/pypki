@@ -22,6 +22,7 @@ from asn1crypto.csr import CertificationRequest as asn1_csr
 from asn1crypto.core import OctetBitString
 
 from pypki import logger
+from pypki import signing_algorithm as _sa
 from pypki.db import CAStateError
 from . import pki
 from .api_adapters import write_audit_log
@@ -165,7 +166,7 @@ def _resolve_key_source(data: dict):
 
 # ── Phase 1 builders ─────────────────────────────────────────────────────────
 
-def _build_root_cert(data, signing_key_id, signing_pub_key) -> str:
+def _build_root_cert(data, signing_key_id, signing_pub_key, signing_algorithm) -> str:
     """Build a self-signed root CA certificate signed via the KMS. Returns PEM."""
     subject = _parse_dn(data["subject_dn"])
     validity_days = int(data["validity_days"])
@@ -185,13 +186,17 @@ def _build_root_cert(data, signing_key_id, signing_pub_key) -> str:
         builder = builder.add_extension(ext, critical)
 
     dummy_key, is_ecdsa = _dummy_key_matching(signing_pub_key)
-    pre_cert = builder.sign(private_key=dummy_key, algorithm=hashes.SHA256())
+    pre_cert = builder.sign(
+        private_key=dummy_key, algorithm=_sa.hash_for_token(signing_algorithm)
+    )
 
-    digest = hashes.Hash(hashes.SHA256())
+    digest = hashes.Hash(_sa.hash_for_token(signing_algorithm))
     digest.update(pre_cert.tbs_certificate_bytes)
     tbs_digest = digest.finalize()
 
-    signature = pki.get_kms().sign_digest(signing_key_id, tbs_digest)
+    signature = pki.get_kms().sign_digest(
+        signing_key_id, tbs_digest, signing_algorithm=signing_algorithm
+    )
     final_der = _patch_cert_signature(
         pre_cert.public_bytes(Encoding.DER), signature, is_ecdsa
     )
@@ -204,9 +209,19 @@ def _build_internal_sub_cert(data, signing_key_id, signing_pub_key, parent_recor
     Returns (cert_pem, chain_pem). Honours decision 2 (chain derived from
     parent, operator override permitted) and decision 3 (validity capped
     by parent's notAfter).
+
+    CR-0003: the *parent's* `signing_algorithm` governs the algorithm
+    used to sign this CA cert (the new CA's own `signing_algorithm`
+    governs its future outbound issuance, not its own cert).
     """
     parent_cert = x509.load_pem_x509_certificate(parent_record["certificate"].encode("utf-8"))
     parent_pub_key = parent_cert.public_key()
+    parent_signing_algorithm = parent_record.get("signing_algorithm")
+    if not parent_signing_algorithm:
+        raise ValueError(
+            f"Parent CA id={parent_record.get('id')} has no signing_algorithm "
+            "set — this indicates a stale row predating the CR-0003 migration"
+        )
 
     subject = _parse_dn(data["subject_dn"])
     validity_days = int(data["validity_days"])
@@ -233,14 +248,19 @@ def _build_internal_sub_cert(data, signing_key_id, signing_pub_key, parent_recor
         builder = builder.add_extension(ext, critical)
 
     dummy_key, is_ecdsa = _dummy_key_matching(parent_pub_key)
-    pre_cert = builder.sign(private_key=dummy_key, algorithm=hashes.SHA256())
+    pre_cert = builder.sign(
+        private_key=dummy_key,
+        algorithm=_sa.hash_for_token(parent_signing_algorithm),
+    )
 
-    digest = hashes.Hash(hashes.SHA256())
+    digest = hashes.Hash(_sa.hash_for_token(parent_signing_algorithm))
     digest.update(pre_cert.tbs_certificate_bytes)
     tbs_digest = digest.finalize()
 
     parent_key_id = parent_record["private_key_reference"]
-    signature = pki.get_kms().sign_digest(parent_key_id, tbs_digest)
+    signature = pki.get_kms().sign_digest(
+        parent_key_id, tbs_digest, signing_algorithm=parent_signing_algorithm
+    )
 
     final_der = _patch_cert_signature(
         pre_cert.public_bytes(Encoding.DER), signature, is_ecdsa
@@ -254,24 +274,32 @@ def _build_internal_sub_cert(data, signing_key_id, signing_pub_key, parent_recor
     return cert_pem, chain
 
 
-def _build_external_sub_csr(data, signing_key_id, signing_pub_key) -> str:
+def _build_external_sub_csr(data, signing_key_id, signing_pub_key, signing_algorithm) -> str:
     """Build a CSR for external-subordinate phase 1. Returns PEM.
 
     Per resolved decision 6: the CSR has no requested-extensions attribute
     — its purpose is to convey the public key, subject DN, and proof of
     possession. The external issuer chooses the resulting cert's extensions.
+
+    CR-0003 decision 7: the CSR is signed under the new CA's chosen
+    `signing_algorithm` (proof of possession). The external issuer
+    independently chooses the algorithm of the resulting CA cert.
     """
     subject = _parse_dn(data["subject_dn"])
     builder = x509.CertificateSigningRequestBuilder().subject_name(subject)
 
     dummy_key, is_ecdsa = _dummy_key_matching(signing_pub_key)
-    pre_csr = builder.sign(private_key=dummy_key, algorithm=hashes.SHA256())
+    pre_csr = builder.sign(
+        private_key=dummy_key, algorithm=_sa.hash_for_token(signing_algorithm)
+    )
 
-    digest = hashes.Hash(hashes.SHA256())
+    digest = hashes.Hash(_sa.hash_for_token(signing_algorithm))
     digest.update(pre_csr.tbs_certrequest_bytes)
     tbs_digest = digest.finalize()
 
-    signature = pki.get_kms().sign_digest(signing_key_id, tbs_digest)
+    signature = pki.get_kms().sign_digest(
+        signing_key_id, tbs_digest, signing_algorithm=signing_algorithm
+    )
     final_der = _patch_csr_signature(
         pre_csr.public_bytes(Encoding.DER), signature, is_ecdsa
     )
@@ -315,7 +343,24 @@ def generate_ca(data: dict, user_id: int = 0) -> dict:
         if data.get("validity_days") is None:
             raise ValueError(f"validity_days is required for mode={mode!r}")
 
+    if not (data.get("signing_algorithm") or "").strip():
+        raise _sa.UnknownSigningAlgorithm(
+            "signing_algorithm is required (CR-0003)"
+        )
+
     signing_key_id, key_owned, signing_pub_key = _resolve_key_source(data)
+
+    # CR-0003 validation: token must exist, be compatible with the
+    # bound key's type, and be wired in the current backend. For the
+    # generate flow there is no certificate to cross-check against
+    # (cert is built later for root/internal-sub; absent for
+    # external-sub) so `enforce_cert_match=False`.
+    signing_algorithm = _sa.validate_for_creation(
+        data["signing_algorithm"],
+        public_key=signing_pub_key,
+        certificate=None,
+        enforce_cert_match=False,
+    )
 
     db = pki.get_db()
     kms = pki.get_kms()
@@ -332,7 +377,9 @@ def generate_ca(data: dict, user_id: int = 0) -> dict:
 
     try:
         if mode == "root":
-            cert_pem = _build_root_cert(data, signing_key_id, signing_pub_key)
+            cert_pem = _build_root_cert(
+                data, signing_key_id, signing_pub_key, signing_algorithm
+            )
             chain_pem = ""
             gen_mode = "generate-root" if key_owned else "bind-root"
         elif mode == "internal-subordinate":
@@ -352,7 +399,9 @@ def generate_ca(data: dict, user_id: int = 0) -> dict:
             )
             gen_mode = "generate-internal-subordinate" if key_owned else "bind-internal-subordinate"
         else:  # external-subordinate
-            csr_pem = _build_external_sub_csr(data, signing_key_id, signing_pub_key)
+            csr_pem = _build_external_sub_csr(
+                data, signing_key_id, signing_pub_key, signing_algorithm
+            )
             with db.connection():
                 new_id = db.insert_pending_ca(
                     name=data["name"],
@@ -363,10 +412,12 @@ def generate_ca(data: dict, user_id: int = 0) -> dict:
                     serial_number_length=int(data.get("serial_number_length", 10)),
                     crl_validity=int(data.get("crl_validity", 365)),
                     extensions=data.get("extensions") or {},
+                    signing_algorithm=signing_algorithm,
                 )
             gen_mode = "generate-external-subordinate" if key_owned else "bind-external-subordinate"
             write_audit_log("cas", new_id, "GENERATE_REQUEST", user_id,
-                            metadata={"generation_mode": gen_mode})
+                            metadata={"generation_mode": gen_mode,
+                                      "signing_algorithm": signing_algorithm})
             with db.connection():
                 key_rec = db.get_key_record(signing_key_id) or {}
             return {
@@ -385,6 +436,7 @@ def generate_ca(data: dict, user_id: int = 0) -> dict:
             "serial_number_length": int(data.get("serial_number_length", 10)),
             "crl_validity": int(data.get("crl_validity", 365)),
             "extensions": data.get("extensions") or {},
+            "signing_algorithm": signing_algorithm,
             "crypto": {
                 "certificate": cert_pem,
                 "private_key": None,
@@ -395,7 +447,8 @@ def generate_ca(data: dict, user_id: int = 0) -> dict:
         }
         new_id = pki.create_ca_from_config_json(json.dumps(config))
         write_audit_log("cas", new_id, "CREATE", user_id,
-                        metadata={"generation_mode": gen_mode})
+                        metadata={"generation_mode": gen_mode,
+                                  "signing_algorithm": signing_algorithm})
         with db.connection():
             return db.get_ca_record_by_id(new_id)
     except Exception:

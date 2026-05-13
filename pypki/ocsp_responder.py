@@ -57,6 +57,7 @@ class OCSPResponder:
         include_cert_in_response: bool = True,
         responder_id_encoding: str = "hash",
         hash_algorithm: str = "sha1",
+        ca_signing_algorithm: str = None,
     ):
         """
         Initialise an OCSPResponder.
@@ -70,6 +71,12 @@ class OCSPResponder:
         include_cert_in_response: embed the responder certificate in the response.
         responder_id_encoding: 'hash' (by key hash) or 'name' (by subject DN).
         hash_algorithm: 'sha1' or 'sha256' for the CertID hash algorithm.
+        ca_signing_algorithm: parent CA's CR-0003 signing_algorithm token.
+            Per resolved decision 5 the responder reuses the CA's algorithm
+            (adjusted to the responder's key family if it differs — see
+            `signing_algorithm.derive_responder_token`). Required for
+            response signing; absent only during initial construction
+            before the row is loaded from the DB.
         """
         self.__config = {}
         self.__name = name
@@ -82,6 +89,7 @@ class OCSPResponder:
         self.__kms = None
         self.__kms_key_id = kms_key_id
         self.__ca_id = ca_id
+        self.__ca_signing_algorithm = ca_signing_algorithm
 
         if issuer_certificate:
             self.__issuer_certificate = x509.load_pem_x509_certificate(
@@ -217,14 +225,30 @@ class OCSPResponder:
             )
             is_ecdsa = False
 
-        pre_response = builder.sign(private_key=dummy_key, algorithm=hashes.SHA256())
+        # CR-0003 decision 5: pick the response-signing token from the
+        # parent CA's `signing_algorithm`, adjusted to the responder's
+        # own key family. Falls back to a key-family-appropriate SHA-256
+        # variant when the parent CA's algorithm is unknown (legacy
+        # responders loaded before the CR-0003 join landed).
+        from . import signing_algorithm as _sa
+        if self.__ca_signing_algorithm:
+            response_token = _sa.derive_responder_token(
+                self.__ca_signing_algorithm, responder_pub_key
+            )
+        else:
+            response_token = _sa.default_token_for_public_key(responder_pub_key)
+        sign_hash = _sa.hash_for_token(response_token)
+
+        pre_response = builder.sign(private_key=dummy_key, algorithm=sign_hash)
 
         # Hash the TBS bytes and sign via KMS
-        digest = hashes.Hash(hashes.SHA256())
+        digest = hashes.Hash(_sa.hash_for_token(response_token))
         digest.update(pre_response.tbs_response_bytes)
         tbs_digest = digest.finalize()
 
-        real_signature = self.__kms.sign_digest(self.__kms_key_id, tbs_digest)
+        real_signature = self.__kms.sign_digest(
+            self.__kms_key_id, tbs_digest, signing_algorithm=response_token
+        )
 
         # Patch the signature in the DER and return a proper OCSPResponse
         patched_der = _patch_ocsp_signature(

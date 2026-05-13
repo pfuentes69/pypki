@@ -101,20 +101,60 @@ class KeyTools:
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
 
-    def sign_digest(self, tbs_digest: bytes) -> bytes:
+    def sign_digest(self, tbs_digest: bytes, signing_algorithm: str = None) -> bytes:
         """
-        Sign a pre-computed SHA-256 digest with the in-memory private key.
+        Sign a pre-computed digest with the in-memory private key.
+
+        ``signing_algorithm`` is the CR-0003 token (`rsa-sha256`,
+        `ecdsa-sha256`, …). The digest's hash function must match the
+        token. Today only the SHA-256 RSA-PKCS1v1.5 and ECDSA variants
+        are wired; reserved tokens (PSS, SHA-384/512, EdDSA) raise
+        ``UnsupportedSigningAlgorithm``.
+
+        When ``signing_algorithm`` is None, the legacy SHA-256 behaviour
+        is preserved — used by `KMS.sign_data` and offline utility
+        scripts that don't carry algorithm context.
+
         RSA → PKCS#1 v1.5; ECDSA → fixed nonce per ``cryptography``'s
         defaults. The signature shape matches what
         :class:`PKCS11Backend.sign_digest` produces, so callers above the
         backend layer don't need to branch on the backend kind.
         """
-        if isinstance(self.__private_key, rsa.RSAPrivateKey):
+        from . import signing_algorithm as _sa
+
+        token = signing_algorithm
+        if token is None:
+            # Legacy path: infer SHA-256 from key type.
+            if isinstance(self.__private_key, rsa.RSAPrivateKey):
+                token = _sa.RSA_SHA256
+            elif isinstance(self.__private_key, ec.EllipticCurvePrivateKey):
+                token = _sa.ECDSA_SHA256
+            else:
+                raise ValueError(f"Unsupported key type: {type(self.__private_key)!r}")
+
+        hash_obj = _sa.hash_for_token(token)  # raises UnsupportedSigningAlgorithm for reserved tokens
+
+        if _sa.is_rsa_pkcs1_token(token):
+            if not isinstance(self.__private_key, rsa.RSAPrivateKey):
+                raise _sa.SigningAlgorithmKeyMismatch(
+                    f"signing_algorithm {token!r} requires an RSA key; "
+                    f"got {type(self.__private_key)!r}"
+                )
             return self.__private_key.sign(
-                tbs_digest, padding.PKCS1v15(), Prehashed(hashes.SHA256())
+                tbs_digest, padding.PKCS1v15(), Prehashed(hash_obj)
             )
-        if isinstance(self.__private_key, ec.EllipticCurvePrivateKey):
+        if _sa.is_ecdsa_token(token):
+            if not isinstance(self.__private_key, ec.EllipticCurvePrivateKey):
+                raise _sa.SigningAlgorithmKeyMismatch(
+                    f"signing_algorithm {token!r} requires an ECDSA key; "
+                    f"got {type(self.__private_key)!r}"
+                )
             return self.__private_key.sign(
-                tbs_digest, ec.ECDSA(Prehashed(hashes.SHA256()))
+                tbs_digest, ec.ECDSA(Prehashed(hash_obj))
             )
-        raise ValueError(f"Unsupported key type: {type(self.__private_key)!r}")
+        # Hash dispatch reached but no signing branch matched — should be
+        # impossible given hash_for_token's coverage matches the two
+        # families above.
+        raise _sa.UnsupportedSigningAlgorithm(
+            f"signing_algorithm {token!r} has no software-backend signing path"
+        )

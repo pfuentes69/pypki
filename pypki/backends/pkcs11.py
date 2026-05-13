@@ -187,12 +187,24 @@ class _Pkcs11KeyState:
         self.token_object = token_object
 
 
-# RFC 8017 §9.2 — DigestInfo prefix that PKCS#1 v1.5 SHA-256 signatures
-# carry before the digest. Identical to the constant in pypki/key_tools.py;
-# duplicated here to keep the backend self-contained.
-_SHA256_RSA_PKCS_DIGESTINFO = bytes.fromhex(
-    "3031300d060960864801650304020105000420"
-)
+# RFC 8017 §9.2 — DigestInfo prefix that PKCS#1 v1.5 signatures carry
+# before the digest. Keyed by hash name so the CR-0003 dispatch in
+# `_sign_with_state` can pick the right one for `rsa-sha256`,
+# `rsa-sha384`, and `rsa-sha512`. Each prefix is the DER-encoded
+# `DigestInfo` structure ending with the `OCTET STRING` tag + length;
+# the actual digest bytes follow immediately.
+_RSA_PKCS_DIGESTINFO_BY_HASH = {
+    "sha256": bytes.fromhex("3031300d060960864801650304020105000420"),
+    "sha384": bytes.fromhex("3041300d060960864801650304020205000430"),
+    "sha512": bytes.fromhex("3051300d060960864801650304020305000440"),
+}
+# Expected raw-digest length per hash (used to reject malformed inputs
+# before the token call).
+_RSA_DIGEST_LEN_BY_HASH = {"sha256": 32, "sha384": 48, "sha512": 64}
+
+# Back-compat alias for any out-of-tree caller — same bytes as SHA-256
+# entry above. Kept temporarily; new code should use the by-hash table.
+_SHA256_RSA_PKCS_DIGESTINFO = _RSA_PKCS_DIGESTINFO_BY_HASH["sha256"]
 
 
 class PKCS11Backend:
@@ -664,12 +676,27 @@ class PKCS11Backend:
                             f"(CKA_ID={hsm_token_id}, class={obj_class}): {e}"
                         )
 
-    def sign_digest(self, handle: KeyHandle, tbs_digest: bytes) -> bytes:
+    def sign_digest(
+        self,
+        handle: KeyHandle,
+        tbs_digest: bytes,
+        signing_algorithm: str = None,
+    ) -> bytes:
+        """Sign a TBS digest. ``signing_algorithm`` is the CR-0003 token.
+
+        Today only `rsa-sha256` and `ecdsa-sha256` are wired in this
+        backend; any other token raises ``UnsupportedSigningAlgorithm``
+        before the session is touched. When ``signing_algorithm`` is
+        None the legacy SHA-256 behaviour is preserved (utility
+        callers that don't carry algorithm context).
+        """
         with self._lock:
             if self._helper is None:
                 raise BackendNotActive("PKCS11Backend.sign_digest: backend is not open")
             try:
-                return self._sign_with_state(handle._state, tbs_digest)
+                return self._sign_with_state(
+                    handle._state, tbs_digest, signing_algorithm=signing_algorithm
+                )
             except PyKCS11.PyKCS11Error as e:
                 # Mid-session classification (CR-0004). The reconnect
                 # path covers any CKR code where retrying the session
@@ -698,29 +725,72 @@ class PKCS11Backend:
                 # raises ``KeyMissingOnToken`` which propagates cleanly.
                 cka_id_bytes = _validate_cka_id_hex(handle._state.cka_id)
                 handle._state.token_object = self._find_private_by_id(cka_id_bytes)
-                return self._sign_with_state(handle._state, tbs_digest)
+                return self._sign_with_state(
+                    handle._state, tbs_digest, signing_algorithm=signing_algorithm
+                )
 
     # ── internal helpers ─────────────────────────────────────────────────────
 
-    def _sign_with_state(self, state: _Pkcs11KeyState, tbs_digest: bytes) -> bytes:
+    def _sign_with_state(
+        self,
+        state: _Pkcs11KeyState,
+        tbs_digest: bytes,
+        signing_algorithm: str = None,
+    ) -> bytes:
         """Run the actual sign call. Caller must hold ``self._lock``."""
+        from .. import signing_algorithm as _sa
+
+        # Default to SHA-256 if no token was supplied (legacy callers).
+        token = signing_algorithm
+        if token is None:
+            if state.cka_key_type == PyKCS11.CKK_RSA:
+                token = _sa.RSA_SHA256
+            elif state.cka_key_type == PyKCS11.CKK_EC:
+                token = _sa.ECDSA_SHA256
+
+        # Validate token is wired in this backend. PSS / EdDSA stay
+        # reserved until their dedicated mechanisms (and dummy-sign
+        # builder shape, for PSS) land.
+        _RSA_TOKENS = (_sa.RSA_SHA256, _sa.RSA_SHA384, _sa.RSA_SHA512)
+        _ECDSA_TOKENS = (_sa.ECDSA_SHA256, _sa.ECDSA_SHA384, _sa.ECDSA_SHA512)
+        if token not in _RSA_TOKENS + _ECDSA_TOKENS:
+            raise _sa.UnsupportedSigningAlgorithm(
+                f"PKCS11Backend: signing_algorithm {token!r} is not wired in "
+                "this backend yet"
+            )
+
         session = self._helper.get_session()
+        hash_name = _sa.hash_family_of(token)  # "sha256" | "sha384" | "sha512"
 
         if state.cka_key_type == PyKCS11.CKK_RSA:
-            # RSA PKCS#1 v1.5 — prepend SHA-256 DigestInfo so CKM_RSA_PKCS
-            # produces a verifiable signature (Gap 1 fix; see key_tools.py).
-            if len(tbs_digest) != 32:
+            if token not in _RSA_TOKENS:
+                raise _sa.SigningAlgorithmKeyMismatch(
+                    f"PKCS11Backend: signing_algorithm {token!r} not compatible "
+                    "with RSA HSM key"
+                )
+            # RSA PKCS#1 v1.5 — prepend the matching DigestInfo so
+            # CKM_RSA_PKCS (which does padding only, not hashing — see
+            # kms-specs.md §5) produces a verifiable signature.
+            expected_len = _RSA_DIGEST_LEN_BY_HASH[hash_name]
+            if len(tbs_digest) != expected_len:
                 raise ValueError(
-                    f"PKCS11Backend: RSA sign expects a 32-byte SHA-256 digest, "
+                    f"PKCS11Backend: RSA sign for {token!r} expects a "
+                    f"{expected_len}-byte {hash_name.upper()} digest, "
                     f"got {len(tbs_digest)} bytes"
                 )
-            payload = _SHA256_RSA_PKCS_DIGESTINFO + tbs_digest
+            payload = _RSA_PKCS_DIGESTINFO_BY_HASH[hash_name] + tbs_digest
             mech = PyKCS11.Mechanism(PyKCS11.CKM_RSA_PKCS, None)
             return bytes(session.sign(state.token_object, payload, mech))
 
         if state.cka_key_type == PyKCS11.CKK_EC:
-            # ECDSA — token returns raw r || s; encode as DER SEQUENCE
-            # (Gap 2 fix; matches what the software backend produces).
+            if token not in _ECDSA_TOKENS:
+                raise _sa.SigningAlgorithmKeyMismatch(
+                    f"PKCS11Backend: signing_algorithm {token!r} not compatible "
+                    "with ECDSA HSM key"
+                )
+            # ECDSA — CKM_ECDSA is hash-agnostic; the token signs whatever
+            # digest length we hand it. Output is raw r||s; encode as DER
+            # SEQUENCE to match the software backend.
             mech = PyKCS11.Mechanism(PyKCS11.CKM_ECDSA, None)
             raw = bytes(session.sign(state.token_object, tbs_digest, mech))
             if not raw or len(raw) % 2 != 0:

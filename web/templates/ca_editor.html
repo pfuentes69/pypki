@@ -37,6 +37,11 @@
       <label class="form-label">CRL Validity (days)</label>
       <input type="number" class="form-control" id="crlValidity" min="1">
     </div>
+    <div class="col-md-3">
+      <label class="form-label">Signing Algorithm</label>
+      <input type="text" class="form-control font-monospace" id="signingAlgorithm" readonly>
+      <div class="form-text">Immutable after creation (CR-0003).</div>
+    </div>
   </div>
 </div>
 
@@ -122,6 +127,7 @@
     document.getElementById('maxValidity').value      = ca.max_validity ?? '';
     document.getElementById('serialNumberLength').value = ca.serial_number_length ?? '';
     document.getElementById('crlValidity').value      = ca.crl_validity ?? '';
+    document.getElementById('signingAlgorithm').value = ca.signing_algorithm ?? '';
 
     let ext = {};
     try { ext = typeof ca.extensions === 'string' ? JSON.parse(ca.extensions) : (ca.extensions || {}); } catch (_) {}

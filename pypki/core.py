@@ -239,6 +239,7 @@ class PyPKI:
             "serial_number_length": ca_item.get("serial_number_length"),
             "crl_validity": ca_item.get("crl_validity"),
             "extensions": json.loads(ca_item.get("extensions", "{}")),
+            "signing_algorithm": ca_item.get("signing_algorithm"),
             "crypto": {
                 "certificate": ca_item.get("certificate"),
                 "certificate_chain": ca_item.get("certificate_chain"),
@@ -857,6 +858,9 @@ class PyPKI:
 
         # Sign with a dummy key matching the CA's algorithm so the
         # signatureAlgorithm field in the TBS bytes is correct.
+        from . import signing_algorithm as _sa
+        token = ca.get_signing_algorithm()
+        hash_obj = _sa.hash_for_token(token)
         ca_pub_key = ca.get_certificate().public_key()
         if isinstance(ca_pub_key, ec.EllipticCurvePublicKey):
             dummy_key = ec.generate_private_key(ca_pub_key.curve)
@@ -868,9 +872,9 @@ class PyPKI:
             )
             is_ecdsa = False
 
-        pre_crl = crl_builder.sign(private_key=dummy_key, algorithm=hashes.SHA256())
+        pre_crl = crl_builder.sign(private_key=dummy_key, algorithm=hash_obj)
 
-        digest = hashes.Hash(hashes.SHA256())
+        digest = hashes.Hash(_sa.hash_for_token(token))
         digest.update(pre_crl.tbs_certlist_bytes)
         tbs_digest = digest.finalize()
 

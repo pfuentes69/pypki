@@ -28,10 +28,13 @@ from .base import BackendNotActive, KeyHandle
 
 
 # Same conservative subset enforced in PKCS11Backend (kms-specs.md §8.1).
+# P-521 added alongside CR-0003's `ecdsa-sha512` wiring — the token has no
+# operational use without a P-521 key generator.
 _RSA_SIZES = {2048, 3072, 4096}
 _EC_CURVES = {
     "P-256": ec.SECP256R1(),
     "P-384": ec.SECP384R1(),
+    "P-521": ec.SECP521R1(),
 }
 
 
@@ -169,11 +172,16 @@ class SoftwareBackend:
         # provider-scoped to clean up per-key.
         pass
 
-    def sign_digest(self, handle: KeyHandle, tbs_digest: bytes) -> bytes:
+    def sign_digest(
+        self,
+        handle: KeyHandle,
+        tbs_digest: bytes,
+        signing_algorithm: str = None,
+    ) -> bytes:
         if not self.is_active():
             raise BackendNotActive("SoftwareBackend.sign_digest: backend is not open")
         kt: KeyTools = handle._state
-        return kt.sign_digest(tbs_digest)
+        return kt.sign_digest(tbs_digest, signing_algorithm=signing_algorithm)
 
     # ── Generation / deletion (Phase 5a) ──────────────────────────────────────
 
@@ -279,6 +287,7 @@ def _generate_software_keypair(key_type: str):
         normalised_curve = (
             "P-256" if "256" in suffix else
             "P-384" if "384" in suffix else
+            "P-521" if "521" in suffix else
             None
         )
         if normalised_curve not in _EC_CURVES:

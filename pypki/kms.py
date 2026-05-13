@@ -705,10 +705,28 @@ class KeyManagementService:
 
     # ── Signing ──────────────────────────────────────────────────────────────
 
-    def sign_digest(self, key_id: int, tbs_digest: bytes) -> bytes:
+    def sign_digest(
+        self,
+        key_id: int,
+        tbs_digest: bytes,
+        signing_algorithm: str = None,
+    ) -> bytes:
         """
-        Sign a pre-computed SHA-256 digest. The key is loaded on first use
-        and cached for subsequent calls. Returns the raw signature bytes.
+        Sign a pre-computed digest. The key is loaded on first use and
+        cached for subsequent calls. Returns the raw signature bytes.
+
+        ``signing_algorithm`` is the CR-0003 token (`rsa-sha256`,
+        `ecdsa-sha256`, …). It is forwarded to the backend so the
+        correct mechanism is selected and so reserved-but-not-yet-wired
+        tokens raise a typed ``UnsupportedSigningAlgorithm`` error
+        before reaching the token. The digest's hash function must
+        match the token (callers should produce it via
+        ``signing_algorithm.hash_for_token``).
+
+        When ``signing_algorithm`` is omitted, the legacy SHA-256-only
+        behaviour is preserved — ``sign_data`` and a handful of
+        utility callers still pass None. Those will be migrated as
+        their callers grow algorithm awareness.
 
         Loading is serialised by ``self.__lock`` (double-checked) so two
         threads first-using the same key do not both run :meth:`load_key`
@@ -725,7 +743,9 @@ class KeyManagementService:
                     self.load_key(key_id)
                     handle = self.__handle_cache[key_id]
 
-        logger.debug(f"KMS: sign_digest key_id={key_id}")
+        logger.debug(
+            f"KMS: sign_digest key_id={key_id} signing_algorithm={signing_algorithm!r}"
+        )
         # CR-0004 decision 3: a hard failure during sign — typically
         # surfaced when ``PKCS11Backend.sign_digest``'s single
         # reconnect attempt itself fails because the slot is gone or
@@ -733,10 +753,16 @@ class KeyManagementService:
         # signing attempt re-runs activation.
         with self._evict_on_hard_failure(handle.provider_id):
             backend = self._get_backend(handle.provider_id)
-            return backend.sign_digest(handle, tbs_digest)
+            return backend.sign_digest(
+                handle, tbs_digest, signing_algorithm=signing_algorithm
+            )
 
     def sign_data(self, key_id: int, data: bytes) -> bytes:
-        """Hash data with SHA-256 then sign the digest."""
+        """Hash data with SHA-256 then sign the digest.
+
+        Legacy callsite; preserves the pre-CR-0003 SHA-256-only path for
+        utility scripts that don't carry a signing_algorithm context.
+        """
         digest = hashes.Hash(hashes.SHA256())
         digest.update(data)
         return self.sign_digest(key_id, digest.finalize())

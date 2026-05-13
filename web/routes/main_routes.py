@@ -320,7 +320,12 @@ def update_ca(ca_id):
     if not data:
         abort(400, description="Missing JSON body")
     user_id = getattr(g, 'current_user', {}).get('id', 0)
-    ok = api_adapters.update_ca(ca_id, data, user_id=user_id)
+    try:
+        ok = api_adapters.update_ca(ca_id, data, user_id=user_id)
+    except ValueError as e:
+        # CR-0003: surfaces `immutable_field: signing_algorithm ...` (and
+        # any future immutable-field rejection) with a typed 400.
+        abort(400, description=str(e))
     if not ok:
         abort(404, description="CA not found or nothing to update")
     return jsonify({"message": "CA updated successfully"}), 200

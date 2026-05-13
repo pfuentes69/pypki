@@ -607,6 +607,9 @@ class CertificateTools:
         # CA-signed: use the dummy-key + KMS patch approach.
         # A dummy key matching the CA's algorithm is used so that the
         # signatureAlgorithm field in the TBS bytes is correct before we hash them.
+        from . import signing_algorithm as _sa
+        token = issuing_ca.get_signing_algorithm()
+        hash_obj = _sa.hash_for_token(token)
         ca_pub_key = issuing_ca.get_certificate().public_key()
         if isinstance(ca_pub_key, ec.EllipticCurvePublicKey):
             dummy_key = ec.generate_private_key(ca_pub_key.curve)
@@ -618,9 +621,9 @@ class CertificateTools:
             )
             is_ecdsa = False
 
-        pre_cert = cert_builder.sign(private_key=dummy_key, algorithm=hashes.SHA256())
+        pre_cert = cert_builder.sign(private_key=dummy_key, algorithm=hash_obj)
 
-        digest = hashes.Hash(hashes.SHA256())
+        digest = hashes.Hash(_sa.hash_for_token(token))
         digest.update(pre_cert.tbs_certificate_bytes)
         tbs_digest = digest.finalize()
 

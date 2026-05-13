@@ -740,12 +740,38 @@ class PKIDataBase:
                 private_key_reference = None
                 key_owned = True
 
+            # CR-0003: `signing_algorithm` is required on the row but the
+            # web API is what validates the operator-supplied value
+            # (see `web/services/api_adapters.create_ca` and
+            # `web/services/ca_generate.generate_ca`). Offline / utility
+            # callers — notably the seed-CA loader run by
+            # `PyPKI.reset_pki()` against
+            # `config/ca_store/*.json` — predate CR-0003 and supply no
+            # token. For those paths we derive from the cert itself, the
+            # same fallback `CertificationAuthority.load_config_json`
+            # uses, so the configs stay backwards compatible without
+            # weakening the API contract.
+            signing_algorithm = ca.get_config().get("signing_algorithm")
+            if not signing_algorithm:
+                from . import signing_algorithm as _sa
+                try:
+                    signing_algorithm = _sa.token_from_certificate(cert)
+                except _sa.UnknownSigningAlgorithm:
+                    signing_algorithm = _sa.default_token_for_public_key(public_key)
+                if not signing_algorithm:
+                    raise ValueError(
+                        "CA config is missing 'signing_algorithm' and the "
+                        "certificate's signatureAlgorithm does not map to "
+                        "any supported CR-0003 token; supply 'signing_algorithm' "
+                        "explicitly in the config."
+                    )
+
             insert_query = """
                 INSERT INTO CertificationAuthorities (
                     name, certificate, ski, private_key_reference, key_owned, certificate_chain,
                     max_validity, serial_number_length,
-                    crl_validity, extensions
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    crl_validity, extensions, signing_algorithm
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
 
             data = (
@@ -758,7 +784,8 @@ class PKIDataBase:
                 ca.get_config()["max_validity"],
                 ca.get_config()["serial_number_length"],
                 ca.get_config()["crl_validity"],
-                json.dumps(ca.get_config()["extensions"])
+                json.dumps(ca.get_config()["extensions"]),
+                signing_algorithm,
             )
 
             cursor.execute(insert_query, data)
@@ -854,6 +881,12 @@ class PKIDataBase:
             logger.error(f"Error: {err}")
             return None
 
+    # Fields explicitly rejected on update with a typed error (rather than
+    # silently dropped by the ALLOWED filter). Keeps the API layer's
+    # `immutable_field` 400 honest — the DB layer raises ValueError before
+    # touching the row.
+    _IMMUTABLE_FIELDS = frozenset({"signing_algorithm"})
+
     def update_ca(self, ca_id: int, fields: dict):
         """
         Update editable fields of a CertificationAuthority row.
@@ -861,9 +894,15 @@ class PKIDataBase:
         Allowed keys in `fields`: name, max_validity, serial_number_length,
         crl_validity, extensions (must already be a JSON string).
 
-        Returns True on success, False otherwise.
+        Returns True on success, False otherwise. Raises ``ValueError`` if
+        the caller tries to mutate one of ``_IMMUTABLE_FIELDS`` (CR-0003).
         """
         ALLOWED = {"name", "max_validity", "serial_number_length", "crl_validity", "extensions"}
+        immutable_present = [k for k in fields if k in self._IMMUTABLE_FIELDS]
+        if immutable_present:
+            raise ValueError(
+                f"immutable_field: {immutable_present[0]} cannot be changed via update_ca"
+            )
         updates = {k: v for k, v in fields.items() if k in ALLOWED}
         if not updates:
             return False
@@ -966,7 +1005,8 @@ class PKIDataBase:
                           max_validity: int,
                           serial_number_length: int,
                           crl_validity: int,
-                          extensions: dict) -> int:
+                          extensions: dict,
+                          signing_algorithm: str) -> int:
         """Insert a `pending-issuance` CA row (CR-0001 external-subordinate phase 1).
 
         The row has no `certificate`, `ski`, or `certificate_chain` yet —
@@ -990,8 +1030,9 @@ class PKIDataBase:
                 """
                 INSERT INTO CertificationAuthorities (
                     name, state, private_key_reference, key_owned, pending_csr,
-                    max_validity, serial_number_length, crl_validity, extensions
-                ) VALUES (%s, 'pending-issuance', %s, %s, %s, %s, %s, %s, %s)
+                    max_validity, serial_number_length, crl_validity, extensions,
+                    signing_algorithm
+                ) VALUES (%s, 'pending-issuance', %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     name,
@@ -1002,6 +1043,7 @@ class PKIDataBase:
                     serial_number_length,
                     crl_validity,
                     json.dumps(extensions) if not isinstance(extensions, str) else extensions,
+                    signing_algorithm,
                 ),
             )
             new_id = cursor.lastrowid
@@ -1327,7 +1369,15 @@ class PKIDataBase:
             cursor = self._local.connection.cursor(dictionary=True, buffered=True)
             cursor.execute(f"USE {db_name}")
 
-            query = "SELECT * FROM OCSPResponders"
+            # CR-0003 decision 5: the responder reuses the parent CA's
+            # signing_algorithm. Left-join keeps backward-compat for any
+            # responder row that pre-dates the CR-0003 migration (the
+            # column will be NULL until the CA row backfills).
+            query = (
+                "SELECT r.*, ca.signing_algorithm AS ca_signing_algorithm "
+                "FROM OCSPResponders AS r "
+                "LEFT JOIN CertificationAuthorities AS ca ON r.ca_id = ca.id"
+            )
             cursor.execute(query)
 
             # Build the list of OCSPResponder objects
@@ -1345,6 +1395,7 @@ class PKIDataBase:
                     include_cert_in_response=bool(row.get('include_cert_in_response', True)),
                     responder_id_encoding=row.get('responder_id_encoding') or 'hash',
                     hash_algorithm=row.get('hash_algorithm') or 'sha1',
+                    ca_signing_algorithm=row.get('ca_signing_algorithm'),
                 )
                 ocsp_responders.append(responder)
 
@@ -2704,6 +2755,24 @@ class PKIDataBase:
                     )
                     self._local.connection.commit()
 
+                # Migration: add CertificationAuthorities.signing_algorithm (CR-0003).
+                # Three-step migration: add nullable, backfill from each
+                # row's signatureAlgorithm OID (or key_type for pending-issuance
+                # rows that have no cert), then ALTER to NOT NULL. Aborts with
+                # a typed error if any row's OID does not map to a supported
+                # token so the operator can resolve it explicitly.
+                cursor.execute(
+                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+                    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'CertificationAuthorities' "
+                    "AND COLUMN_NAME = 'signing_algorithm'",
+                    (db_name,)
+                )
+                row = cursor.fetchone()
+                if row is not None and row[0] == 0:
+                    logger.info("migrate_schema: adding CertificationAuthorities.signing_algorithm")
+                    self._migrate_add_signing_algorithm(cursor)
+                    self._local.connection.commit()
+
                 # ── KMS Phase 0.1 — crypto provider model scaffolding ────────────
                 # See doc/kms-specs.md §3-4 for the design.
                 self._migrate_create_crypto_providers(cursor, db_name)
@@ -3021,6 +3090,96 @@ class PKIDataBase:
                 f"(HSM_PIN_KEK or other secret unavailable)."
             )
 
+    def _migrate_add_signing_algorithm(self, cursor):
+        """Add ``CertificationAuthorities.signing_algorithm`` (CR-0003).
+
+        Three-step migration so we can land an OID-derived backfill without
+        violating the eventual NOT NULL constraint:
+
+        1. ``ADD COLUMN signing_algorithm VARCHAR(32) NULL`` after
+           ``extensions`` (the last policy field, keeping the column order
+           readable).
+        2. Backfill each existing row:
+           - rows with a certificate → parse
+             ``cert.signature_algorithm_oid`` (and PSS hash parameter when
+             applicable) and write the matching CR-0003 token via
+             ``signing_algorithm.token_from_certificate``;
+           - rows without a certificate (``state='pending-issuance'``) →
+             fall back to the SHA-256 variant of the bound key's
+             ``KeyStorage.key_type`` (CSRs in this codebase have been
+             signed with SHA-256 since CR-0001 landed; that's the only
+             value historically producible).
+           Any row whose mapping fails raises
+           ``UnknownSigningAlgorithm`` so the operator can resolve it
+           explicitly before re-running the migration; the ALTER
+           statements above are rolled back by the outer transaction
+           because we have not committed them.
+        3. ``ALTER COLUMN signing_algorithm VARCHAR(32) NOT NULL`` once
+           every row carries a value.
+        """
+        from cryptography import x509
+        from . import signing_algorithm as sa
+
+        cursor.execute(
+            "ALTER TABLE CertificationAuthorities "
+            "ADD COLUMN signing_algorithm VARCHAR(32) NULL "
+            "AFTER extensions"
+        )
+
+        cursor.execute(
+            "SELECT ca.id, ca.certificate, ca.state, ks.key_type "
+            "FROM CertificationAuthorities AS ca "
+            "LEFT JOIN KeyStorage AS ks ON ca.private_key_reference = ks.id"
+        )
+        rows = cursor.fetchall()
+
+        for (ca_id, cert_pem, state, key_type) in rows:
+            token = None
+            if cert_pem:
+                try:
+                    cert = x509.load_pem_x509_certificate(cert_pem.encode("utf-8"))
+                except Exception as e:
+                    raise sa.UnknownSigningAlgorithm(
+                        f"CA id={ca_id} has unparseable certificate during "
+                        f"signing_algorithm backfill: {e}"
+                    ) from e
+                try:
+                    token = sa.token_from_certificate(cert)
+                except sa.UnknownSigningAlgorithm as e:
+                    raise sa.UnknownSigningAlgorithm(
+                        f"CA id={ca_id} certificate signatureAlgorithm "
+                        f"does not map to any supported CR-0003 token: {e}. "
+                        "Resolve manually (e.g. set the column directly) "
+                        "before re-running the migration."
+                    ) from e
+            else:
+                # No cert yet — pending-issuance row from CR-0001. The CSR
+                # produced by phase 1 has always been SHA-256 in this
+                # codebase, so derive from the bound key's key_type.
+                token = sa.default_token_for_key_type(key_type or "")
+                if token is None:
+                    raise sa.UnknownSigningAlgorithm(
+                        f"CA id={ca_id} is in state {state!r} without a "
+                        f"certificate and the bound key's key_type "
+                        f"({key_type!r}) does not map to any default "
+                        "CR-0003 token. Resolve manually."
+                    )
+            cursor.execute(
+                "UPDATE CertificationAuthorities SET signing_algorithm = %s "
+                "WHERE id = %s",
+                (token, ca_id),
+            )
+            logger.info(
+                f"migrate_schema: CA id={ca_id} signing_algorithm backfilled to "
+                f"{token!r}"
+            )
+
+        cursor.execute(
+            "ALTER TABLE CertificationAuthorities "
+            "MODIFY COLUMN signing_algorithm VARCHAR(32) NOT NULL"
+        )
+
+
     def _migrate_certificates_is_self_signed(self, cursor, db_name):
         """
         Add ``Certificates.is_self_signed`` on existing installs. Idempotent
@@ -3182,6 +3341,7 @@ class PKIDataBase:
                         serial_number_length INT,
                         crl_validity  INT DEFAULT 365,
                         extensions JSON NOT NULL,
+                        signing_algorithm VARCHAR(32) NOT NULL,
                         is_default BOOLEAN DEFAULT FALSE,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP

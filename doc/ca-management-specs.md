@@ -176,6 +176,10 @@ remaining work.
   status / CRL distribution" state. A retired CA must either keep
   serving issuance (wrong) or be deleted (loses CRL hosting).
 - **Cross-signing / cross-certification.** Not modelled.
+- **Operator-selectable signing algorithm.** The signing algorithm
+  is hard-coded to SHA-256 (RSA → `sha256WithRSAEncryption`,
+  ECDSA → `ecdsa-with-SHA256`). No per-CA control; SHA-384 / SHA-512,
+  RSA-PSS, and EdDSA are unreachable. Designed in [§17.3 CR-0003](#173-cr-0003--per-ca-signing-algorithm).
 
 **Validation and integrity gaps**
 - **Public-key ↔ certificate match on the PEM upload path.** The
@@ -343,6 +347,8 @@ the first place.
   for in-app CA generation (CR-0001); idempotent migrations
   alongside the `key_owned` block in
   [db.py migrate_schema](../pypki/db.py).
+- Pending — `signing_algorithm` VARCHAR(32) for operator-selectable
+  CA signing algorithm (see §17.3 CR-0003).
 - Pending — `parent_ca_id` FK + `is_self_signed BOOLEAN` for
   hierarchy modelling (see §2.2).
 
@@ -1361,6 +1367,269 @@ UI-only. Extends [ca_add.html](../web/templates/ca_add.html):
 - SPKI mismatch produces a clear in-page error without leaving
   the form.
 - No regression in the PEM and PKCS#12 modes.
+
+### 17.3 CR-0003 — Per-CA signing algorithm
+
+**Status:** Accepted.
+
+**Motivation:** §2.2 — the signing algorithm used by every CA is
+currently hard-coded to SHA-256 (RSA →
+`sha256WithRSAEncryption`, ECDSA → `ecdsa-with-SHA256`) in the
+signing backends per
+[hsm-support-specs.md §2](hsm-support-specs.md#2-signing-mechanisms).
+Deployments that require SHA-384 / SHA-512, RSA-PSS, or EdDSA
+have no way to express that intent; the only "control" today is
+to pick the key type. This blocks both compliance use cases
+(profiles mandating SHA-384) and Ed25519 / Ed448 adoption.
+
+The fix is a single immutable column on the CA row, chosen at
+creation time, validated against the bound key's `key_type` and
+the active backend's supported mechanism set, and threaded
+through the §7 signing pipeline.
+
+**Proposed behaviour:**
+
+A new `signing_algorithm` field on every CA-creation request and a
+matching `signing_algorithm VARCHAR(32) NOT NULL` column on
+`CertificationAuthorities`. The value governs the algorithm the
+CA uses to sign:
+
+- certificates issued under this CA,
+- CRLs generated for this CA (§9),
+- OCSP responses produced by responders bound to this CA (the
+  responder always reuses its parent CA's value; no separate
+  column on `OCSPResponders` — see resolved decision 5), and
+- for in-app generated **root** CAs only (CR-0001 mode `root`),
+  the CA's own self-signature.
+
+For all other creation paths the CA certificate's own signature is
+whatever the original signer produced and is independent of this
+column; the column only describes the CA's *outbound* signing.
+
+**Supported token set.** A flat lower-kebab string, validated in
+code (no DB-level ENUM — keeps adding algorithms a code change,
+not a schema migration):
+
+| Token | X.509 identifier | Permitted `key_type` family |
+|---|---|---|
+| `rsa-sha256` | `sha256WithRSAEncryption` (1.2.840.113549.1.1.11) | `RSA-*` |
+| `rsa-sha384` | `sha384WithRSAEncryption` (1.2.840.113549.1.1.12) | `RSA-*` |
+| `rsa-sha512` | `sha512WithRSAEncryption` (1.2.840.113549.1.1.13) | `RSA-*` |
+| `rsa-pss-sha256` | `id-RSASSA-PSS` (1.2.840.113549.1.1.10) + SHA-256 params | `RSA-*` |
+| `rsa-pss-sha384` | `id-RSASSA-PSS` + SHA-384 params | `RSA-*` |
+| `rsa-pss-sha512` | `id-RSASSA-PSS` + SHA-512 params | `RSA-*` |
+| `ecdsa-sha256` | `ecdsa-with-SHA256` (1.2.840.10045.4.3.2) | `ECDSA-P-256`, `ECDSA-P-384`, `ECDSA-P-521` |
+| `ecdsa-sha384` | `ecdsa-with-SHA384` (1.2.840.10045.4.3.3) | `ECDSA-P-384`, `ECDSA-P-521` |
+| `ecdsa-sha512` | `ecdsa-with-SHA512` (1.2.840.10045.4.3.4) | `ECDSA-P-521` |
+| `ed25519` | `id-Ed25519` (1.3.101.112) | `Ed25519` |
+| `ed448` | `id-Ed448` (1.3.101.113) | `Ed448` |
+
+Only `rsa-sha256` and `ecdsa-sha256` are wired through the signing
+backends today. The remainder are reserved tokens that activate
+as backend support lands (PSS, SHA-384/512, EdDSA each unblock
+once their mechanism appears in the KMS dispatch table — see
+**Dependencies** below). Creation requests carrying a
+reserved-but-not-yet-supported token are rejected with 400
+(`unsupported_signing_algorithm`).
+
+**Per-path request shape.** `signing_algorithm` is required on
+every CA-creation path:
+
+- §6.1 PEM upload — required.
+- §6.2 PKCS#12 upload — required.
+- §6.3 KMS-key bind — required.
+- CR-0001 `POST /api/ca/generate` (root, internal-subordinate,
+  external-subordinate; both key-source variants) — required.
+
+**Validation rules at insert / generate time:**
+
+1. The value is one of the supported tokens above. Reject
+   otherwise (`unknown_signing_algorithm`).
+2. The value is compatible with the bound key's `key_type` per
+   the table above. Reject otherwise
+   (`signing_algorithm_key_mismatch`).
+3. The signing backend serving the bound key's provider supports
+   the value (mechanism present in the KMS dispatch table).
+   Reject otherwise (`unsupported_signing_algorithm`).
+4. **Self-signed-only cross-check** — when the supplied
+   `certificate` has `subject == issuer` (§6.1, §6.2, §6.3 paths),
+   the value must equal the token derived from the certificate's
+   `signatureAlgorithm` OID. Reject otherwise
+   (`signing_algorithm_cert_mismatch`). Intermediate-CA imports
+   skip this check — the parent's choice of algorithm for the CA
+   cert is unrelated to what this CA will use going forward.
+5. For CR-0001 mode `root`, the supplied `signing_algorithm` is
+   the algorithm used to build the CA's own self-signature; rule
+   4 is satisfied by construction.
+6. For CR-0001 mode `internal-subordinate`, the new CA's
+   `signing_algorithm` describes *its* future issuance; the
+   algorithm used to sign the CA cert itself comes from the
+   parent CA's `signing_algorithm`, not this column.
+7. For CR-0001 mode `external-subordinate`, the CSR emitted in
+   phase 1 is signed with `signing_algorithm` (proof of
+   possession). The external issuer chooses the algorithm of the
+   issued CA certificate independently; phase 2 (`install-cert`)
+   does not re-validate this column against the installed cert.
+
+**Immutability.** `PUT /api/ca/{id}` rejects any attempt to change
+`signing_algorithm` (`immutable_field`). Rolling a CA to a
+different algorithm requires the CA-renewal / rekey flow (Phase 5,
+§14) — the same row keeps its audit history, but a new key + cert
++ algorithm tuple replaces the old.
+
+**Signing pipeline (§7) update.** `CertificationAuthority` reads
+`signing_algorithm` from the row at construction time and passes
+it through to `KMS.sign_digest(key_id, tbs, signing_algorithm)`.
+The KMS dispatches to the matching backend mechanism. The same
+threading applies to OCSP and CRL signing paths.
+
+**Migration.** Idempotent column add in the same style as the
+`key_owned` block ([db.py:2341–2356](../pypki/db.py#L2341-L2356)).
+Existing rows are backfilled by parsing each CA certificate's
+`signatureAlgorithm` OID and mapping to the token table above
+(e.g. `1.2.840.113549.1.1.11` → `rsa-sha256`,
+`1.2.840.10045.4.3.2` → `ecdsa-sha256`). Any row whose OID does
+not map to a supported token aborts the migration with a typed
+error so the operator can resolve the row explicitly before
+re-running; this is safe because the only OIDs currently
+producible by this codebase are the two SHA-256 variants, so a
+mismatch means an out-of-band import that warrants attention.
+After backfill the column is `NOT NULL`.
+
+**UI.** [ca_add.html](../web/templates/ca_add.html) gains a
+`signing_algorithm` dropdown common to all four creation modes
+(PEM, PKCS#12, KMS-bind, Generate / Issue). Options are filtered
+client-side by the selected key's `key_type` (for KMS-bind and
+Generate / Issue) or by the parsed certificate's public-key
+algorithm (for PEM and PKCS#12 — once the file is parsed in the
+browser, or after a server-side pre-check). For self-signed
+imports the dropdown pre-selects the value derived from the
+parsed `signatureAlgorithm` and locks it (rule 4); the operator
+can still confirm but cannot diverge.
+
+**Dependencies.** The KMS contract ([kms-specs.md](kms-specs.md))
+and HSM mechanism table
+([hsm-support-specs.md §2](hsm-support-specs.md#2-signing-mechanisms))
+must grow `sign_digest(key_id, tbs, signing_algorithm)` and the
+corresponding `CKM_*` rows for any token beyond
+`rsa-sha256` / `ecdsa-sha256`. CR-0003 ships the column, the
+validation, the audit, and the §7 plumbing; expanding the
+backend mechanism table is a separate follow-up tracked in the
+order-of-work below (Phase 1 here = today's supported subset
+only; later phases add SHA-384/512, PSS, EdDSA each behind their
+own backend change).
+
+**Impact on existing sections:**
+
+- §2.2 — "Operator-selectable signing algorithm" bullet closes.
+- §4.1 — add `signing_algorithm VARCHAR(32) NOT NULL` row to the
+  column table.
+- §4.3 — "Pending — `signing_algorithm` VARCHAR(32) …" entry
+  moves from `Pending` to `Recent` once the migration lands.
+- §6.1, §6.2, §6.3 — request body examples gain
+  `signing_algorithm`; the paragraph following each example
+  notes the per-path validation rules.
+- §6 — once CR-0001 has folded in, §6.4 also documents the
+  field as required on `POST /api/ca/generate` for all six
+  (scenario × key-source) combinations.
+- §7 — `sign_tbs_digest` and `KMS.sign_digest` signatures grow
+  the algorithm parameter; the paragraph documenting the
+  mechanism table cross-references the §6.5-equivalent token
+  table above (or moves to its own §6.5 once folded).
+- §8 — `signing_algorithm` listed as the first per-CA issuance
+  policy control with an "(immutable)" tag.
+- §10 — `PUT /api/ca/{id}` immutability list explicitly names
+  `signing_algorithm`.
+- §12 — `CREATE` audit events gain `signing_algorithm` in the
+  metadata payload (alongside `generation_mode` from CR-0001).
+- §13 — no new risk entry; the column closes a gap rather than
+  introducing one.
+- §14 — new bullet under Phase 1 (Validation and integrity
+  hardening): "Per-CA `signing_algorithm` column + per-path
+  validation (CR-0003)". Expanding the backend mechanism table
+  beyond SHA-256 is a separate downstream item, not blocking
+  Phase 1.
+- §15 — new acceptance criterion: every CA carries an explicit,
+  immutable `signing_algorithm`, validated against the bound
+  key's `key_type` and (for self-signed imports) against the
+  imported certificate's `signatureAlgorithm`.
+- [kms-specs.md](kms-specs.md) — `KMS.sign_digest` signature
+  change; new dispatch table column keyed on the
+  `signing_algorithm` token.
+- [hsm-support-specs.md §2](hsm-support-specs.md#2-signing-mechanisms) —
+  mechanism table grows entries for the tokens that get wired up
+  next; the SHA-256 entries stay as today.
+
+**Resolved decisions:**
+
+1. **Storage: `VARCHAR(32)` validated in code, not a DB-level
+   ENUM.** Mirrors `KeyStorage.key_type`. Adding a new algorithm
+   is a code change, not a schema migration; the trade-off (no
+   DB-enforced enumeration) is acceptable because validation
+   happens at the only write paths (`POST /api/ca`,
+   `POST /api/ca/generate`) and the column is never user-edited
+   after insert.
+2. **Existing rows backfilled by parsing the CA certificate's
+   `signatureAlgorithm` OID** at migration time. Preserves
+   current behaviour exactly for every already-deployed CA. The
+   alternative (default to `rsa-sha256` / `ecdsa-sha256` by
+   `key_type`) was rejected because it would silently rewrite
+   the policy for any pre-existing CA whose cert happened to use
+   SHA-384 or SHA-512, masking a real divergence between the
+   column and the cert.
+3. **PEM / PKCS#12 / KMS-bind imports: the value must match the
+   cert's `signatureAlgorithm` only when the cert is self-signed
+   (`subject == issuer`).** Intermediate-CA imports are
+   unconstrained — the parent's choice of algorithm has no
+   bearing on what *this* CA will use to issue. Always-match was
+   rejected because it would block legitimate intermediate-CA
+   imports (e.g. parent signed with SHA-256, intermediate intends
+   to issue with SHA-384).
+4. **UI dropdown defaults to the SHA-256 variant matching the
+   selected key's `key_type`** (`RSA-*` → `rsa-sha256`,
+   `ECDSA-*` → `ecdsa-sha256`, `Ed25519` → `ed25519`, `Ed448` →
+   `ed448`). Applies to the CR-0001 generate flow and the
+   KMS-bind path where the cert is not parsed client-side.
+   Preserves continuity with today's hard-coded behaviour; the
+   operator can still pick a stronger variant explicitly.
+   Self-signed PEM / PKCS#12 imports override this default with
+   the value parsed from the certificate's `signatureAlgorithm`
+   (per resolved decision 3, that value is also locked).
+5. **OCSP responder algorithm always equals the parent CA's
+   `signing_algorithm`.** No column on `OCSPResponders`, no
+   separate operator choice. Rationale: responders are
+   per-CA-bound and never sign anything outside that CA's trust
+   surface; a divergent algorithm would create relying-party
+   inconsistency without a use case. If a future requirement
+   needs to split them, a new column can be added without
+   breaking the contract (reuse becomes the default, override
+   the opt-in).
+
+**Acceptance criteria** (in addition to §15):
+
+- Every CA row carries a non-null `signing_algorithm` from one of
+  the supported tokens.
+- `POST /api/ca` (all three paths) and `POST /api/ca/generate`
+  (all six CR-0001 combinations) reject requests missing
+  `signing_algorithm` with 400, and reject incompatible
+  combinations with the typed errors above.
+- `PUT /api/ca/{id}` carrying `signing_algorithm` returns 400
+  (`immutable_field`) without mutating any row.
+- The migration backfills every existing row by OID-parsing the
+  CA cert; rows whose OID does not map to a supported token
+  abort the migration with a typed error and leave the schema
+  unchanged.
+- A self-signed CA imported via PEM / PKCS#12 / KMS-bind whose
+  request `signing_algorithm` disagrees with the cert's
+  `signatureAlgorithm` is rejected before any row is written.
+- An intermediate CA imported via the same paths accepts any
+  supported, key-compatible `signing_algorithm`; the cert's own
+  `signatureAlgorithm` is not consulted.
+- The §7 signing pipeline passes the algorithm to the KMS
+  dispatch table; signing requests for tokens not yet wired up
+  in a backend produce a typed `unsupported_signing_algorithm`
+  error before reaching the token.
+- `CREATE` audit events carry the `signing_algorithm` value.
 
 ---
 

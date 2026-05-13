@@ -126,6 +126,7 @@
             ${row('Serial Number', ca.cert_serial ? `<span class="font-monospace">${ca.cert_serial}</span>` : null)}
             ${row('Max Certificate Validity', ca.max_validity != null ? ca.max_validity + ' days' : null)}
             ${row('Serial Number Length', ca.serial_number_length != null ? ca.serial_number_length + ' bytes' : null)}
+            ${row('Signing Algorithm', ca.signing_algorithm ? `<span class="font-monospace small">${ca.signing_algorithm}</span> <span class="text-muted small">(immutable)</span>` : null)}
             ${row('SKI', ca.ski ? `<span class="font-monospace small">${ca.ski}</span>` : null)}
           </tbody></table>
         </div>
