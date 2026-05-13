@@ -16,12 +16,67 @@ from typing import Protocol, runtime_checkable
 
 
 class BackendError(RuntimeError):
-    """Backend-level error not specific to a particular vendor."""
+    """Backend-level error not specific to a particular vendor.
+
+    Carries optional ``key_id`` / ``provider_id`` metadata so the Flask
+    error handler (CR-0005) can render a structured 503 body naming
+    the failing component without re-deriving it. The fields default
+    to ``None``; the backend / KMS layer attaches them on the throw
+    site when the context is available."""
+
+    def __init__(self, message: str = "", *, key_id: int | None = None,
+                 provider_id: int | None = None):
+        super().__init__(message)
+        self.key_id = key_id
+        self.provider_id = provider_id
 
 
 class BackendNotActive(BackendError):
     """Raised when an operation is attempted on a backend that has not
     been opened yet (or has been closed)."""
+
+
+class KeyMissingOnToken(BackendError):
+    """Raised by a PKCS#11 backend when an operation references a
+    ``KeyStorage`` row whose on-token ``CKO_PRIVATE_KEY`` object can no
+    longer be located by ``CKA_ID``.
+
+    Distinct from :class:`BackendNotActive` (which means the backend
+    itself is not open). A ``KeyMissingOnToken`` means the backend is
+    healthy but the on-token material has gone missing — typically
+    because an operator deleted it out-of-band (``pkcs11-tool
+    --delete-object`` etc.) and the ``KeyStorage`` row is now drifted.
+    Caught and re-surfaced cleanly by the management UI and routes."""
+
+
+# ── Subclasses of BackendNotActive that distinguish *why* a PKCS#11
+# backend could not be opened. All three are ``BackendNotActive`` so
+# existing ``except BackendNotActive:`` patterns keep working
+# unchanged; new call sites that want to render specific guidance to
+# the operator can catch the subclass instead.
+
+class SlotNotFound(BackendNotActive):
+    """The PKCS#11 module loaded but the configured slot / token label
+    is not present. Typical causes: the token was deleted out-of-band
+    (``softhsm2-util --delete-token``, removed hardware partition),
+    the slot was never initialised, or the operator misconfigured
+    ``slot_label``. Surfaces as ``token_check.reason="slot-missing"``
+    on the management API."""
+
+
+class AuthenticationFailed(BackendNotActive):
+    """The module loaded and the slot was found, but ``C_Login``
+    rejected the credentials — wrong PIN, token reinitialised with a
+    new PIN, PIN locked after too many failed attempts, or role
+    mismatch. Surfaces as ``token_check.reason="auth-failed"``."""
+
+
+class ModuleLoadFailed(BackendNotActive):
+    """The PKCS#11 shared library could not be loaded (path wrong,
+    ABI mismatch, missing dependency). Distinct from the above
+    because the diagnosis points the operator at deployment config
+    rather than token state. Surfaces as
+    ``token_check.reason="module-error"``."""
 
 
 class KeyHandle:
@@ -100,4 +155,21 @@ class CryptoBackend(Protocol):
 
     def sign_digest(self, handle: KeyHandle, tbs_digest: bytes) -> bytes:
         """Sign a pre-computed digest. Returns the raw signature bytes."""
+        ...
+
+    def list_keys(self) -> list[dict]:
+        """Enumerate the backend's native key store and return one dict per
+        key. Used by the token-aware key listing (kms-specs.md §18.1).
+
+        - :class:`SoftwareBackend` returns ``[]`` — software keys live
+          exclusively in ``KeyStorage``, there is nothing parallel to
+          enumerate.
+        - :class:`PKCS11Backend` returns one entry per on-token
+          ``CKO_PRIVATE_KEY`` object, carrying its hex CKA_ID, label,
+          normalised key type, paired public key PEM, and an
+          ``unimportable_reason`` discriminator for rows the API must
+          surface but cannot import.
+
+        Raises :class:`BackendNotActive` when the backend is not open.
+        """
         ...

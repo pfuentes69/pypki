@@ -266,10 +266,16 @@
 
   async function loadKeyCounts() {
     // Single list call → bucket counts by provider_id.
+    // The endpoint now returns the §18.1 envelope {keys, token_enumeration};
+    // we only need the keys array here and the global scope is DB-only by
+    // construction (CR-0001 decision 1), so present_only rows from other
+    // providers won't inflate the count.
     try {
-      const keys = await fetchJson(`${apiBase}/kms/keys`);
+      const body = await fetchJson(`${apiBase}/kms/keys`);
+      const keys = Array.isArray(body) ? body : (body.keys || []);
       const counts = {};
-      for (const k of (keys || [])) {
+      for (const k of keys) {
+        if (k.id == null) continue;  // skip any present_only rows defensively
         counts[k.provider_id] = (counts[k.provider_id] || 0) + 1;
       }
       return counts;

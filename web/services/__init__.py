@@ -78,10 +78,15 @@ except Exception:
 def generate_crls():
     """
     Refresh CRLs for every loaded CA. Per-CA failures (typically: the CA's
-    crypto provider is inactive because its PIN/KEK is unavailable) are
-    logged but do not abort the whole pass — kms-specs.md §6 mandates
-    that a failing provider must not take the management surface down.
+    crypto provider is inactive because its PIN/KEK is unavailable, or
+    the bound signing key has drifted from the token) are logged but do
+    not abort the whole pass — kms-specs.md §6 mandates that a failing
+    provider must not take the management surface down. CR-0005 step 4
+    upgrades the per-CA log to identify ``BackendError`` cases with the
+    typed reason so an operator scanning the log can tell at a glance
+    *which* failure mode each skipped CA hit.
     """
+    from pypki.backends.base import BackendError
     ca_collection = pki.get_ca_collection()
     for ca_item in ca_collection:
         try:
@@ -91,6 +96,15 @@ def generate_crls():
                 crl_file.write(crl.public_bytes(serialization.Encoding.DER))
             with open(f"out/crl/{ca_name}.pem.crl", "wb") as crl_file:
                 crl_file.write(crl.public_bytes(serialization.Encoding.PEM))
+        except BackendError as e:
+            # Typed: name the failure class + the key / provider so the
+            # log line is actionable on its own.
+            logger.warning(
+                f"CRL generation skipped for CA '{ca_item.get('name')}' "
+                f"(id={ca_item.get('id')}): {type(e).__name__} "
+                f"(key_id={getattr(e, 'key_id', None)}, "
+                f"provider_id={getattr(e, 'provider_id', None)}): {e}"
+            )
         except Exception as e:
             logger.error(
                 f"CRL generation failed for CA '{ca_item.get('name')}' "

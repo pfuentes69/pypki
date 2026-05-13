@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/test_kms_pkcs11_backend.py -k \"list_keys or software_backend_list_keys\" -x -v)",
+      "Bash(python -m pytest tests/test_kms_phase5_keymgmt.py -k \"list_kms_keys\" -x -v)",
+      "Bash(python -m pytest tests/test_kms_phase5_keymgmt.py -k \"get_kms_key or list_kms_keys\" -x -v)",
+      "Bash(python -m pytest tests/test_kms_phase5_keymgmt.py tests/test_kms_pkcs11_backend.py tests/test_kms_software_backend.py tests/test_kms_phase4_secrets.py tests/test_kms_phase6_hardening.py)",
+      "Bash(python -m pytest tests/)",
+      "Bash(python -m pytest tests/test_kms_pkcs11_backend.py -v)",
+      "Bash(grep -n \"^### 18.1\\\\|^## 18\\\\|^---$\" /Users/pedro/Development/Python/pypki/doc/kms-specs.md)",
+      "Bash(python -m pytest tests/test_kms_phase5_keymgmt.py -k \"list_kms_keys\" -v)",
+      "Bash(python -m pytest tests/test_kms_pkcs11_backend.py::test_pkcs11_backend_list_keys_surfaces_public_key_unavailable -xvs)",
+      "Bash(python -m pytest tests/test_kms_pkcs11_backend.py -k \"list_keys or residual or fallback\" -xvs)",
+      "Bash(awk '/^### What is pending/,/^---$/' /Users/pedro/Development/Python/pypki/doc/kms-specs.md)",
+      "Bash(python -m pytest tests/test_kms_phase5_keymgmt.py -k \"export\" -xvs)",
+      "Bash(grep -n \"POST | \\\\`/api/kms/keys/{key_id}/export\\\\`\" /Users/pedro/Development/Python/pypki/doc/kms-specs.md)",
+      "Bash(grep -n \"key_generate\\\\||\\\\s*\\\\`key_\" /Users/pedro/Development/Python/pypki/doc/kms-specs.md)",
+      "Bash(python -m pytest tests/test_kms_pkcs11_backend.py -k \"midsession\" -xvs)",
+      "Bash(python -m pytest tests/test_kms_phase5_keymgmt.py -k \"backend_error_body or scheduler_skips\" -xvs)",
+      "Bash(python -m pytest tests/test_kms_phase5_keymgmt.py -k \"scheduler_skips\" -xvs)",
+      "Bash(python -m pytest tests/test_kms_phase5_keymgmt.py::test_list_kms_keys_software_provider_marks_not_applicable -xvs)",
+      "Bash(docker compose *)",
+      "Bash(open -a Docker)",
+      "Bash(python -m pytest tests/test_kms_phase5_keymgmt.py::test_backend_error_body_key_missing_on_token_carries_recovery_url -xvs)",
+      "Bash(brew services *)",
+      "Bash(lsof -nP -iTCP:3306 -sTCP:LISTEN)",
+      "Bash(python -c \"from web.services import api_adapters as A; print\\('OK'\\)\")",
+      "Bash(docker exec *)",
+      "Bash(brew list *)",
+      "Bash(docker run *)",
+      "Bash(python -m pytest tests/test_kms_phase5_keymgmt.py::test_list_kms_keys_no_provider_returns_envelope_with_db_rows_only -xvs)",
+      "Bash(docker stop *)",
+      "Bash(python -m pytest tests/test_kms_pkcs11_backend.py tests/test_kms_software_backend.py tests/test_kms_phase4_secrets.py tests/test_kms_phase6_hardening.py tests/test_pkcs12_storage_regime.py)"
+    ]
+  }
+}

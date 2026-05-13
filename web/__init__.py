@@ -21,6 +21,7 @@ _PAGES = {
     'csr_tool.html':            ('csr_tool',            'CSR Tool'),
     'kms_keygen.html':          ('kms_keys',            'KMS Key Generation'),
     'kms_keys.html':            ('kms_keys',            'KMS Keys'),
+    'key_details.html':         ('kms_keys',            'Key Details'),
     'crypto_providers.html':    ('crypto_providers',    'Crypto Providers'),
     'crypto_provider_details.html': ('crypto_providers', 'Crypto Provider Details'),
     'users_list.html':          ('users_list',          'Users'),
@@ -60,7 +61,7 @@ def create_app():
                                title=title)
 
     # Register Blueprints
-    from .routes.main_routes import bp as main_bp
+    from .routes.main_routes import bp as main_bp, handle_backend_error
     from .routes.auth_routes import bp as auth_bp
     from .routes.est_routes import bp as est_bp
     from .routes.ocsp_routes import bp as ocsp_bp
@@ -69,5 +70,12 @@ def create_app():
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(main_bp, url_prefix='/api')
     app.register_blueprint(est_bp, url_prefix='/.well-known')
+
+    # CR-0005: structured 503 surface for backend errors raised from
+    # any blueprint. Registered at the app level so main / ocsp / est
+    # all return the same `{description, code, key_id, provider_id,
+    # recovery}` envelope.
+    from pypki.backends.base import BackendError
+    app.register_error_handler(BackendError, handle_backend_error)
 
     return app

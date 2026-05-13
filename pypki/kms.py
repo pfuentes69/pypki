@@ -1,5 +1,6 @@
 import os
 import base64
+import contextlib
 import threading
 
 from cryptography.hazmat.primitives import hashes, serialization
@@ -51,6 +52,48 @@ class KeyManagementService:
         self.__lock = threading.RLock()
 
     # ── Backend lookup ───────────────────────────────────────────────────────
+
+    @contextlib.contextmanager
+    def _evict_on_hard_failure(self, provider_id: int):
+        """Context manager: evict the cached backend for ``provider_id``
+        when the wrapped block raises :class:`SlotNotFound`,
+        :class:`AuthenticationFailed`, or :class:`ModuleLoadFailed`.
+        Activation-time failures and mid-session classifications use
+        the same set, so this wrapper covers both. CR-0004 decision 3.
+        """
+        from .backends.base import (
+            SlotNotFound, AuthenticationFailed, ModuleLoadFailed,
+        )
+        try:
+            yield
+        except (SlotNotFound, AuthenticationFailed, ModuleLoadFailed) as e:
+            self._evict_provider(provider_id, reason=type(e).__name__)
+            raise
+
+    def _evict_provider(self, provider_id: int, reason: str = "hard-failure") -> None:
+        """Remove the cached backend for ``provider_id`` and clear any
+        handles it owned. Used after a hard activation / mid-session
+        failure (``SlotNotFound`` / ``AuthenticationFailed`` /
+        ``ModuleLoadFailed``) per CR-0004 decision 3 — otherwise the
+        cached broken backend keeps replaying the same exception even
+        after the operator fixes the slot."""
+        with self.__lock:
+            backend = self.__backends.pop(provider_id, None)
+            if backend is not None:
+                try:
+                    backend.close()
+                except Exception:
+                    logger.exception(
+                        f"KMS._evict_provider: backend.close() failed for "
+                        f"provider id={provider_id}"
+                    )
+            for kid in list(self.__handle_cache.keys()):
+                if self.__handle_cache[kid].provider_id == provider_id:
+                    del self.__handle_cache[kid]
+        logger.info(
+            f"KMS._evict_provider: evicted provider id={provider_id} "
+            f"(reason={reason})"
+        )
 
     def _get_backend(self, provider_id: int) -> CryptoBackend:
         """Return an activated backend for the provider, creating it if needed.
@@ -331,6 +374,203 @@ class KeyManagementService:
             "label": effective_label,
         }
 
+    def probe_key_on_token(self, provider_id: int, hsm_token_id: str) -> dict:
+        """
+        Cheap on-demand drift check for a single ``KeyStorage`` row whose
+        material lives on a PKCS#11 token. Returns::
+
+            {"available": True,  "present": True,  "reason": None}
+            {"available": True,  "present": False, "reason": None}
+            {"available": False, "present": False, "reason": "<diagnosis>"}
+
+        - ``available=True, present=True`` — the on-token object exists.
+        - ``available=True, present=False`` — drift: the row's
+          ``hsm_token_id`` is not on the token. Callers (the details
+          endpoint, signing pre-flight, etc.) should flip the row's
+          ``state`` to ``registered_only``.
+        - ``available=False`` — probe could not run; the row's state
+          stays unverified. ``reason`` distinguishes the cases the UI
+          renders (``"provider-inactive"`` when the backend cannot be
+          opened; ``"not_applicable"`` when the provider is software
+          or the row carries no ``hsm_token_id``; ``"unknown_provider"``
+          when ``provider_id`` does not resolve; ``"backend-error"``
+          when the probe itself raised something unexpected).
+
+        Used by ``api_adapters.get_kms_key`` so the key details page
+        surfaces drift the moment an operator opens it, not only when
+        they walk the keys list. The signing path raises
+        :class:`KeyMissingOnToken` directly — see kms-specs.md §18.1
+        decision 2 (drift detection scope expanded beyond the list).
+        """
+        if not hsm_token_id:
+            return {"available": False, "present": False, "reason": "not_applicable"}
+        with self.__db.connection():
+            provider = self.__db.get_provider_by_id(provider_id)
+        if not provider:
+            return {"available": False, "present": False, "reason": "unknown_provider"}
+        if provider.get("kind") != "pkcs11":
+            return {"available": False, "present": False, "reason": "not_applicable"}
+
+        from .backends.base import (
+            AuthenticationFailed, BackendNotActive,
+            ModuleLoadFailed, SlotNotFound,
+        )
+        try:
+            backend = self._get_backend(provider_id)
+        except SlotNotFound:
+            return {"available": False, "present": False, "reason": "slot-missing"}
+        except AuthenticationFailed:
+            return {"available": False, "present": False, "reason": "auth-failed"}
+        except ModuleLoadFailed:
+            return {"available": False, "present": False, "reason": "module-error"}
+        except BackendNotActive:
+            return {"available": False, "present": False, "reason": "provider-inactive"}
+        except Exception:
+            logger.exception(
+                f"KMS.probe_key_on_token: unexpected error activating provider "
+                f"id={provider_id}"
+            )
+            return {"available": False, "present": False, "reason": "backend-error"}
+
+        if not isinstance(backend, PKCS11Backend):
+            return {"available": False, "present": False, "reason": "not_applicable"}
+
+        # Mid-session classification (CR-0004 decision 2). If the
+        # cached backend's session has gone bad between activation and
+        # now (token deleted, slot reinitialised), ``find_key_by_id``
+        # raises a typed BackendNotActive subclass; map it to the
+        # same reason set as the activation-time path and evict the
+        # broken cached backend so the next call re-runs activation.
+        try:
+            found = backend.find_key_by_id(hsm_token_id)
+        except SlotNotFound:
+            self._evict_provider(provider_id, reason="SlotNotFound (mid-session)")
+            return {"available": False, "present": False, "reason": "slot-missing"}
+        except AuthenticationFailed:
+            self._evict_provider(provider_id, reason="AuthenticationFailed (mid-session)")
+            return {"available": False, "present": False, "reason": "auth-failed"}
+        except ModuleLoadFailed:
+            self._evict_provider(provider_id, reason="ModuleLoadFailed (mid-session)")
+            return {"available": False, "present": False, "reason": "module-error"}
+        except Exception:
+            logger.exception(
+                f"KMS.probe_key_on_token: find_key_by_id raised for "
+                f"provider id={provider_id}, hsm_token_id={hsm_token_id}"
+            )
+            return {"available": False, "present": False, "reason": "backend-error"}
+        return {"available": True, "present": found is not None, "reason": None}
+
+    def list_provider_token_keys(self, provider_id: int) -> list[dict]:
+        """
+        Enumerate the on-token keys for a ``pkcs11`` provider via
+        ``PKCS11Backend.list_keys()``. Activates the provider on demand.
+
+        Used by the token-aware merged listing
+        (``api_adapters.list_kms_keys``) per kms-specs.md §18.1. Raises
+        :class:`KeyError` for unknown provider, :class:`ValueError` when
+        the provider is not ``pkcs11``, and :class:`BackendNotActive` /
+        :class:`RuntimeError` on backend activation or enumeration
+        failure — callers translate those into the response envelope's
+        ``token_enumeration`` flag.
+        """
+        with self.__db.connection():
+            provider = self.__db.get_provider_by_id(provider_id)
+        if not provider:
+            raise KeyError(f"KMS: provider_id={provider_id} not found")
+        if provider.get("kind") != "pkcs11":
+            raise ValueError(
+                f"KMS: provider id={provider_id} is kind={provider.get('kind')!r}; "
+                f"on-token enumeration is only valid for pkcs11 providers"
+            )
+        # CR-0004 decision 3: evict the cached backend on hard failure so
+        # the next call re-runs activation cleanly once the slot / PIN
+        # is restored. The backend's ``list_keys`` itself can raise the
+        # same typed exceptions mid-session (CR-0004 step 3), so the
+        # wrapper covers both activation and enumeration.
+        with self._evict_on_hard_failure(provider_id):
+            backend = self._get_backend(provider_id)
+            return backend.list_keys()
+
+    def export_software_key(self, key_id: int, passphrase: bytes) -> bytes:
+        """
+        Export an owned software key as a passphrase-encrypted PKCS#8
+        PEM (kms-specs.md §18.1 CR-0002).
+
+        Refuses anything other than ``storage_type='Encrypted'`` with
+        ``key_owned=TRUE``: HSM-backed keys are non-extractable by §8.2
+        policy; imported software keys were brought in by the operator
+        and pyPKI is not a re-export channel for material it does not
+        own. Both refusals raise :class:`PermissionError` with a
+        descriptive message — callers (the management route) map them
+        to HTTP 409.
+
+        Returns the PEM bytes. The KEK-protected blob on the row is
+        decrypted via the bound :class:`SoftwareBackend`, then the
+        plaintext private-key object is re-serialised under
+        ``serialization.BestAvailableEncryption(passphrase)`` — the
+        Python ``cryptography`` library's PBES2 wrapper (PBKDF2-
+        HMAC-SHA256 + AES-256-CBC). The plaintext is never written to
+        disk, returned to the caller, or held beyond the function
+        scope.
+        """
+        if not passphrase:
+            raise ValueError("KMS.export_software_key: passphrase is required")
+        if isinstance(passphrase, str):
+            passphrase = passphrase.encode("utf-8")
+        if not isinstance(passphrase, (bytes, bytearray)) or len(passphrase) < 12:
+            raise ValueError(
+                "KMS.export_software_key: passphrase must be at least 12 bytes"
+            )
+
+        with self.__db.connection():
+            record = self.__db.get_key_record(key_id)
+        if not record:
+            raise KeyError(f"KMS.export_software_key: key_id={key_id} not found")
+
+        storage_type = record.get("storage_type")
+        key_owned = record.get("key_owned")
+        if storage_type == "HSM":
+            raise PermissionError(
+                f"KMS.export_software_key: key_id={key_id} is HSM-backed; "
+                f"PKCS#11 private keys are non-extractable by §8.2 policy"
+            )
+        if storage_type != "Encrypted":
+            raise PermissionError(
+                f"KMS.export_software_key: key_id={key_id} has "
+                f"storage_type={storage_type!r}; only 'Encrypted' software "
+                f"keys can be exported"
+            )
+        if key_owned is False or key_owned == 0:
+            raise PermissionError(
+                f"KMS.export_software_key: key_id={key_id} was imported "
+                f"(key_owned=FALSE); pyPKI does not re-export material it "
+                f"does not own"
+            )
+
+        # Decrypt under the provider KEK by routing through the bound
+        # backend, then re-wrap under the operator passphrase. Going
+        # through ``load_key`` keeps the KEK-decryption path consolidated
+        # in SoftwareBackend (legacy-PEM detection, error handling) and
+        # avoids re-implementing it here.
+        provider_id = record.get("provider_id")
+        if provider_id is None:
+            raise RuntimeError(
+                f"KMS.export_software_key: key_id={key_id} has no provider_id"
+            )
+        backend = self._get_backend(provider_id)
+        handle = backend.load_key(record)
+        try:
+            key_tools = handle._state  # KeyTools instance, see software.py
+            pem = key_tools.get_private_key_pem(password=passphrase)
+            if not pem:
+                raise RuntimeError(
+                    f"KMS.export_software_key: key_id={key_id} did not "
+                    f"produce a PEM (empty private-key tools state)"
+                )
+            return pem
+        finally:
+            backend.unload_key(handle)
+
     def delete_key(self, key_id: int) -> dict:
         """
         Delete a key. Refuses if any CA / OCSP responder / certificate
@@ -418,8 +658,15 @@ class KeyManagementService:
         storage_type = record.get("storage_type")
 
         if provider_id is not None:
-            backend = self._get_backend(provider_id)
-            handle = backend.load_key(record)
+            # CR-0004 decision 3: hard activation / mid-session failures
+            # evict the cached backend so the next call re-runs
+            # activation. ``backend.load_key`` may raise
+            # ``KeyMissingOnToken`` (drift) — those propagate without
+            # eviction since the slot is fine, just the key object is
+            # gone.
+            with self._evict_on_hard_failure(provider_id):
+                backend = self._get_backend(provider_id)
+                handle = backend.load_key(record)
             with self.__lock:
                 self.__handle_cache[key_id] = handle
             logger.info(
@@ -479,8 +726,14 @@ class KeyManagementService:
                     handle = self.__handle_cache[key_id]
 
         logger.debug(f"KMS: sign_digest key_id={key_id}")
-        backend = self._get_backend(handle.provider_id)
-        return backend.sign_digest(handle, tbs_digest)
+        # CR-0004 decision 3: a hard failure during sign — typically
+        # surfaced when ``PKCS11Backend.sign_digest``'s single
+        # reconnect attempt itself fails because the slot is gone or
+        # the PIN has changed — evicts the cached backend so the next
+        # signing attempt re-runs activation.
+        with self._evict_on_hard_failure(handle.provider_id):
+            backend = self._get_backend(handle.provider_id)
+            return backend.sign_digest(handle, tbs_digest)
 
     def sign_data(self, key_id: int, data: bytes) -> bytes:
         """Hash data with SHA-256 then sign the digest."""

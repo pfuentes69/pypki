@@ -102,6 +102,14 @@ class FakeDB:
             return override
         return {"cas": 0, "ocsp_responders": 0, "certificates": 0, "total": 0}
 
+    def get_key_usage_items(self, key_id: int):
+        """In-memory mirror of ``PKIDataBase.get_key_usage_items`` used by
+        ``api_adapters.get_kms_key``. Tests inject named dependents by
+        setting ``_usage_items[key_id] = [{...}, ...]``."""
+        override = getattr(self, "_usage_items", {}).get(key_id)
+        items = list(override) if override else []
+        return {"count": len(items), "items": items}
+
     def delete_key(self, key_id: int):
         usage = self.count_key_usage(key_id)
         if usage.get("total", 0) > 0:

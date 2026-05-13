@@ -1,0 +1,585 @@
+{% extends "base.html" %}
+
+{# Key details page — kms-specs.md §18.1 CR-0001.
+   Hosts the public-key view, the named usage list, the audit-log trail,
+   and the destructive / export actions for one KMS key. List views in
+   kms_keys.html and crypto_provider_details.html link here for any
+   non-trivial inspection or destructive action. #}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="/kms_keys.html">Keys</a></li>
+    <li class="breadcrumb-item active" id="crumbLabel">…</li>
+  </ol>
+</nav>
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <div>
+    <h4 class="mb-1" id="keyLabelHeader">…</h4>
+    <div>
+      <span id="keyTypeBadge"></span>
+      <span id="keyStateBadge" class="ms-1"></span>
+      <span id="keyOwnedBadge" class="ms-1"></span>
+    </div>
+  </div>
+  <div class="d-flex gap-2" id="headerActions"></div>
+</div>
+
+<div class="alert alert-danger d-none" id="driftBanner"></div>
+<div class="alert alert-warning d-none" id="unverifiedBanner"></div>
+
+<div class="card shadow-sm mb-4">
+  <div class="card-body">
+    <dl class="row mb-0 small">
+      <dt class="col-sm-3 text-muted">Provider</dt>
+      <dd class="col-sm-9" id="keyProvider">—</dd>
+      <dt class="col-sm-3 text-muted">Storage</dt>
+      <dd class="col-sm-9" id="keyStorage">—</dd>
+      <dt class="col-sm-3 text-muted">HSM CKA_ID</dt>
+      <dd class="col-sm-9"><code id="keyCkaId">—</code></dd>
+      <dt class="col-sm-3 text-muted">Created</dt>
+      <dd class="col-sm-9 small text-muted" id="keyCreatedAt">—</dd>
+    </dl>
+  </div>
+</div>
+
+<div class="d-flex justify-content-between align-items-center mb-2">
+  <h5 class="mb-0">Public key</h5>
+  <div class="d-flex gap-2">
+    <button class="btn btn-outline-secondary btn-sm" id="copyPubBtn" type="button">
+      <i class="bi bi-clipboard me-1"></i>Copy
+    </button>
+    <button class="btn btn-outline-secondary btn-sm" id="downloadPubBtn" type="button">
+      <i class="bi bi-download me-1"></i>Download PEM
+    </button>
+  </div>
+</div>
+<div class="card shadow-sm mb-4">
+  <div class="card-body p-0">
+    <textarea class="form-control font-monospace small border-0" id="keyPublicPem"
+              rows="10" readonly style="resize:vertical"></textarea>
+  </div>
+</div>
+
+<h5 class="mb-2">Usage</h5>
+<p class="text-muted small mb-2" id="usageHint">
+  Objects that hold this key. Deletion is refused while this list is non-empty.
+</p>
+<div class="card shadow-sm mb-4">
+  <div class="card-body p-0">
+    <table class="table mb-0" id="usageTable">
+      <thead class="table-light">
+        <tr>
+          <th>Type</th>
+          <th>Name</th>
+          <th class="text-end">Link</th>
+        </tr>
+      </thead>
+      <tbody id="usageBody">
+        <tr><td colspan="3" class="text-muted small p-3">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<h5 class="mb-2">Audit trail</h5>
+<p class="text-muted small mb-2">
+  Lifecycle events for this key (newest first). Sourced from the audit log
+  filtered to <code>resource_type = kms_keys</code> and this key's id.
+</p>
+<div class="card shadow-sm mb-4">
+  <div class="card-body p-0">
+    <table class="table mb-0" id="auditTable">
+      <thead class="table-light">
+        <tr>
+          <th>When</th>
+          <th>Action</th>
+          <th>User</th>
+        </tr>
+      </thead>
+      <tbody id="auditBody">
+        <tr><td colspan="3" class="text-muted small p-3">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="d-flex justify-content-end gap-2 mb-4" id="footerActions"></div>
+{% endblock %}
+
+{% block modals %}
+<!-- Export passphrase modal (CR-0002) -->
+<div class="modal fade" id="exportModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Export private key</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small mb-2">
+          Export <strong id="exportKeyLabel"></strong> as a
+          passphrase-encrypted PKCS#8 PEM. The passphrase is required to
+          reload the key with <code>openssl pkey</code> or any standard
+          tool — store it separately, pyPKI does not.
+        </p>
+        <div class="mb-2">
+          <label class="form-label">Passphrase (min 12 chars)</label>
+          <input class="form-control" type="password" id="exportPassphrase" autocomplete="new-password">
+        </div>
+        <div class="mb-2">
+          <label class="form-label">Confirm passphrase</label>
+          <input class="form-control" type="password" id="exportConfirm" autocomplete="new-password">
+        </div>
+        <div class="alert alert-warning small mb-2 mb-0">
+          <i class="bi bi-exclamation-triangle me-1"></i>
+          Once the PEM leaves this server its security depends entirely on
+          this passphrase. Use a strong, unique value and a trusted
+          channel.
+        </div>
+        <div class="alert alert-danger d-none mb-0 mt-2" id="exportError"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="exportSubmit">
+          <i class="bi bi-box-arrow-up me-1"></i>Export
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Delete confirmation modal -->
+<div class="modal fade" id="deleteModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Delete key</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="deleteBody"></div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-danger btn-sm" id="deleteBtn">Delete</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:9999">
+  <div id="toast" class="toast align-items-center text-bg-success border-0" role="alert">
+    <div class="d-flex">
+      <div class="toast-body" id="toastMsg"></div>
+      <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const _qs = new URLSearchParams(window.location.search);
+  const _keyId = parseInt(_qs.get('id'), 10);
+
+  function showToast(msg, type = 'success') {
+    const el = document.getElementById('toast');
+    document.getElementById('toastMsg').innerHTML = msg;
+    el.className = `toast align-items-center text-bg-${type} border-0`;
+    bootstrap.Toast.getOrCreateInstance(el, { delay: 3500 }).show();
+  }
+
+  async function fetchJson(url, init) {
+    const res = await fetch(url, init);
+    let data = {}; try { data = await res.json(); } catch (_) {}
+    if (!res.ok) {
+      const desc = (data && (data.description || data.error)) || `HTTP ${res.status}`;
+      throw new Error(typeof desc === 'string' ? desc : JSON.stringify(desc));
+    }
+    return data;
+  }
+
+  function _stateBadge(state) {
+    if (state === 'registered_only') {
+      return `<span class="badge bg-danger-subtle text-danger border border-danger-subtle">Missing on token</span>`;
+    }
+    return `<span class="badge bg-success-subtle text-success border border-success-subtle">Registered</span>`;
+  }
+
+  function _ownedBadge(owned, storage) {
+    if (storage !== 'HSM') return '';
+    return owned
+      ? `<span class="badge bg-light text-dark border" title="Generated by pyPKI; cascade-deletes on-token objects">pyPKI-owned</span>`
+      : `<span class="badge bg-light text-dark border" title="Imported existing key; on-token objects preserved on delete">Imported</span>`;
+  }
+
+  function _typeLabel(t) {
+    switch (t) {
+      case 'ca':              return 'CA';
+      case 'certificate':     return 'Certificate';
+      case 'ocsp_responder':  return 'OCSP responder';
+      case 'signing_service': return 'Signing service';
+      default:                return t || '—';
+    }
+  }
+  function _typeLink(it) {
+    switch (it.type) {
+      case 'ca':              return `/ca_details.html?id=${it.id}`;
+      case 'certificate':     return `/certificate_details.html?id=${it.id}`;
+      case 'ocsp_responder':  return `/ocsp_details.html?id=${it.id}`;
+      default:                return null;
+    }
+  }
+
+  async function loadKey() {
+    if (!Number.isInteger(_keyId)) {
+      document.getElementById('crumbLabel').textContent = 'Invalid id';
+      document.getElementById('keyLabelHeader').textContent = 'Invalid key id';
+      return;
+    }
+    let key;
+    try {
+      key = await fetchJson(`${apiBase}/kms/keys/${_keyId}`);
+    } catch (e) {
+      document.getElementById('crumbLabel').textContent = 'Error';
+      document.getElementById('keyLabelHeader').textContent = `Key not found (#${_keyId})`;
+      showToast(`Load failed: ${e.message}`, 'danger');
+      return;
+    }
+    renderKey(key);
+    renderTokenCheck(key);
+    renderUsage(key);
+    renderHeaderActions(key);
+    renderFooterActions(key);
+    loadAuditTrail(_keyId);
+  }
+
+  // ── Drift / verification banner (kms-specs.md §10.5) ─────────────────────
+  // ``token_check`` carries the result of the on-demand probe in
+  // ``api_adapters.get_kms_key`` (kms-specs.md §10.5):
+  //   {available: true,  present: false} → drift — the on-token object is gone
+  //   {available: false, reason: …}       → probe could not run
+  function renderTokenCheck(key) {
+    const drift = document.getElementById('driftBanner');
+    const unverified = document.getElementById('unverifiedBanner');
+    drift.classList.add('d-none'); drift.innerHTML = '';
+    unverified.classList.add('d-none'); unverified.innerHTML = '';
+
+    if (key.storage_type !== 'HSM') return;
+    const tc = key.token_check || {};
+    if (tc.available === true && tc.present === false) {
+      drift.innerHTML = `
+        <h6 class="alert-heading mb-1">
+          <i class="bi bi-exclamation-octagon-fill me-1"></i>Key is missing on the HSM
+        </h6>
+        <p class="mb-1 small">
+          The <code>CKO_PRIVATE_KEY</code> object with
+          <code>CKA_ID=${key.hsm_token_id}</code> was not found on provider
+          <strong>${key.provider_label || `#${key.provider_id}`}</strong>.
+          This pyPKI record is drifted — sign / issuance operations using
+          this key will fail with a <em>KeyMissingOnToken</em> error.
+        </p>
+        <p class="mb-0 small">
+          To recover, either restore the on-token material (and refresh
+          this page) or delete this row to clean up the registration.
+          Export is disabled while the key is missing.
+        </p>`;
+      drift.classList.remove('d-none');
+      return;
+    }
+    if (tc.available === false && tc.reason && tc.reason !== 'not_applicable') {
+      // For genuine "the slot/PIN is broken" cases, escalate to the red
+      // drift banner — the row may still be in the DB, but the key is
+      // effectively unusable until the operator fixes the provider.
+      const isHardFailure = (
+        tc.reason === 'slot-missing'
+        || tc.reason === 'auth-failed'
+        || tc.reason === 'module-error'
+      );
+      let title, msg;
+      switch (tc.reason) {
+        case 'slot-missing':
+          title = 'Slot is missing on the PKCS#11 module';
+          msg = `The configured slot is no longer present on provider
+                 <strong>${key.provider_label || `#${key.provider_id}`}</strong>.
+                 The token may have been deleted or the hardware removed. Sign /
+                 issuance operations using this key will fail until the provider
+                 is reconfigured against an existing slot.`;
+          break;
+        case 'auth-failed':
+          title = 'Provider authentication failed';
+          msg = `The provider's PIN was rejected by the token. The token may
+                 have been reinitialised with a new PIN, or the PIN is locked.
+                 Sign / issuance operations using this key will fail until the
+                 provider's credentials are updated.`;
+          break;
+        case 'module-error':
+          title = 'PKCS#11 module could not be loaded';
+          msg = `The shared library at the provider's <code>module_path</code>
+                 could not be loaded. Check the deployment environment and
+                 the provider configuration.`;
+          break;
+        case 'provider-inactive':
+          msg = 'Provider is inactive — could not verify the on-token object exists. Activate the provider to revalidate this key.';
+          break;
+        case 'unknown_provider':
+          msg = 'The bound provider record was not found; the key cannot be addressed.';
+          break;
+        default:
+          msg = `Token probe failed (${tc.reason}); cannot confirm the on-token object exists.`;
+      }
+      if (isHardFailure) {
+        drift.innerHTML = `
+          <h6 class="alert-heading mb-1">
+            <i class="bi bi-exclamation-octagon-fill me-1"></i>${title}
+          </h6>
+          <p class="mb-0 small">${msg}</p>`;
+        drift.classList.remove('d-none');
+      } else {
+        unverified.innerHTML = `<i class="bi bi-exclamation-triangle me-1"></i>${msg}`;
+        unverified.classList.remove('d-none');
+      }
+    }
+  }
+
+  function renderKey(key) {
+    const label = key.label || `key #${key.id}`;
+    document.getElementById('crumbLabel').textContent = label;
+    document.getElementById('keyLabelHeader').textContent = label;
+    document.getElementById('keyTypeBadge').innerHTML =
+      `<span class="badge bg-info-subtle text-info-emphasis border border-info-subtle">${key.key_type || '—'}</span>`;
+    document.getElementById('keyStateBadge').innerHTML = _stateBadge(key.state);
+    document.getElementById('keyOwnedBadge').innerHTML =
+      _ownedBadge(key.key_owned === false || key.key_owned === 0 ? false : true, key.storage_type);
+
+    const provName = key.provider_label || `#${key.provider_id}`;
+    document.getElementById('keyProvider').innerHTML =
+      `<a href="/crypto_provider_details.html?id=${key.provider_id}">${provName}</a>`;
+    document.getElementById('keyStorage').innerHTML =
+      `<span class="badge bg-light text-dark border">${key.storage_type || '—'}</span>`;
+    document.getElementById('keyCkaId').textContent = key.hsm_token_id || '—';
+    document.getElementById('keyCreatedAt').textContent =
+      (key.created_at || '').slice(0, 19).replace('T', ' ');
+    document.getElementById('keyPublicPem').value = key.public_key || '';
+  }
+
+  function renderUsage(key) {
+    const tbody = document.getElementById('usageBody');
+    const items = (key.usage && key.usage.items) || [];
+    if (!items.length) {
+      tbody.innerHTML = '<tr><td colspan="3" class="text-muted small p-3">No dependents — this key is safe to delete.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = items.map(it => {
+      const linkHref = _typeLink(it);
+      const link = linkHref
+        ? `<a class="btn btn-link btn-sm p-0" href="${linkHref}">Open</a>`
+        : '<span class="text-muted small">—</span>';
+      return `<tr>
+        <td><span class="badge bg-secondary-subtle text-secondary-emphasis border">${_typeLabel(it.type)}</span></td>
+        <td>${it.name || `#${it.id}`}</td>
+        <td class="text-end">${link}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  function renderHeaderActions(key) {
+    document.getElementById('headerActions').innerHTML =
+      `<a class="btn btn-outline-secondary btn-sm" href="/kms_keys.html?provider_id=${key.provider_id}">
+         <i class="bi bi-arrow-left me-1"></i>Back to keys
+       </a>`;
+  }
+
+  function renderFooterActions(key) {
+    const isAdmin = window._isAdmin === true;
+    const isSuperAdmin = window._isSuperAdmin === true;
+    if (!isAdmin) {
+      document.getElementById('footerActions').innerHTML = '';
+      return;
+    }
+    // Export rules (CR-0002, kms-specs.md §10.5):
+    //   - Superadmin-only — extracting plaintext private material is
+    //     stricter than the destructive-action role gate.
+    //   - HSM keys are non-extractable by §8.2 policy.
+    //   - Imported software keys (key_owned=false) were brought in by
+    //     the operator; pyPKI is not a re-export channel.
+    //   - Drift rows have no on-token / in-process material to export.
+    const owned = !(key.key_owned === false || key.key_owned === 0);
+    const showExport = (
+      isSuperAdmin
+      && key.state !== 'registered_only'
+      && key.storage_type === 'Encrypted'
+      && owned
+    );
+    const exportBtn = showExport
+      ? `<button class="btn btn-outline-primary btn-sm" id="exportBtn">
+           <i class="bi bi-box-arrow-up me-1"></i>Export
+         </button>`
+      : '';
+    document.getElementById('footerActions').innerHTML = `
+      ${exportBtn}
+      <button class="btn btn-outline-danger btn-sm" id="deleteHandle">
+        <i class="bi bi-trash me-1"></i>Delete
+      </button>`;
+    if (showExport) {
+      document.getElementById('exportBtn').onclick = () => openExportModal(key);
+    }
+    document.getElementById('deleteHandle').onclick = () => openDeleteModal(key);
+  }
+
+  // ── Export (CR-0002) ─────────────────────────────────────────────────────
+  //
+  // Passphrase prompt → POST /api/kms/keys/{id}/export → save the returned
+  // PEM via a Blob download. The response is the raw PEM body with the
+  // matching Content-Disposition; we use a Blob rather than navigating to
+  // the URL so the operator's session cookies / JSON-style 4xx errors
+  // surface cleanly in the modal rather than as a page navigation.
+
+  function openExportModal(key) {
+    document.getElementById('exportKeyLabel').textContent =
+      `${key.label || key.key_type} (#${key.id})`;
+    document.getElementById('exportPassphrase').value = '';
+    document.getElementById('exportConfirm').value = '';
+    document.getElementById('exportError').classList.add('d-none');
+    const btn = document.getElementById('exportSubmit');
+    btn.onclick = () => doExport(key);
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('exportModal')).show();
+  }
+
+  async function doExport(key) {
+    const passphrase = document.getElementById('exportPassphrase').value;
+    const confirm    = document.getElementById('exportConfirm').value;
+    const errBox = document.getElementById('exportError');
+    errBox.classList.add('d-none');
+    if (!passphrase || passphrase.length < 12) {
+      errBox.textContent = 'Passphrase must be at least 12 characters.';
+      errBox.classList.remove('d-none');
+      return;
+    }
+    if (passphrase !== confirm) {
+      errBox.textContent = 'Passphrases do not match.';
+      errBox.classList.remove('d-none');
+      return;
+    }
+    try {
+      const res = await fetch(`${apiBase}/kms/keys/${key.id}/export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ passphrase }),
+      });
+      if (!res.ok) {
+        let desc;
+        try { desc = (await res.json()).description; } catch (_) { desc = `HTTP ${res.status}`; }
+        throw new Error(typeof desc === 'string' ? desc : JSON.stringify(desc));
+      }
+      const pemBlob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(pemBlob);
+      a.download = `key-${key.id}.pem`;
+      document.body.appendChild(a); a.click(); a.remove();
+      bootstrap.Modal.getInstance(document.getElementById('exportModal')).hide();
+      showToast(`Encrypted PEM for key <code>#${key.id}</code> downloaded.`);
+      // Refresh the audit panel so the new key_export event is visible.
+      loadAuditTrail(key.id);
+    } catch (e) {
+      errBox.textContent = e.message;
+      errBox.classList.remove('d-none');
+    }
+  }
+
+  function openDeleteModal(key) {
+    const items = (key.usage && key.usage.items) || [];
+    let body = `Delete key <code>#${key.id}</code> — ${key.label || key.key_type}?`;
+    if (key.storage_type === 'HSM') {
+      const owned = key.key_owned === false || key.key_owned === 0 ? false : true;
+      body += owned
+        ? `<div class="alert alert-warning small mt-2 mb-0">
+             <i class="bi bi-exclamation-triangle me-1"></i>
+             pyPKI generated this key; both on-token objects (CKA_ID
+             <code>${key.hsm_token_id}</code>) will be destroyed.
+           </div>`
+        : `<div class="alert alert-info small mt-2 mb-0">
+             <i class="bi bi-info-circle me-1"></i>
+             This key was imported. The on-token objects are preserved on
+             the HSM; only the pyPKI registration is removed.
+           </div>`;
+    }
+    if (items.length > 0) {
+      const lines = items.map(it => `<li>${_typeLabel(it.type)}: ${it.name || `#${it.id}`}</li>`).join('');
+      body += `<div class="alert alert-danger small mt-2 mb-0">
+        <div class="mb-1">Key is in use by ${items.length} object(s); the server will refuse the delete:</div>
+        <ul class="mb-0">${lines}</ul>
+      </div>`;
+    }
+    document.getElementById('deleteBody').innerHTML = body;
+    document.getElementById('deleteBtn').onclick = () => doDelete(key);
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('deleteModal')).show();
+  }
+
+  async function doDelete(key) {
+    try {
+      await fetchJson(`${apiBase}/kms/keys/${key.id}`, { method: 'DELETE' });
+      bootstrap.Modal.getInstance(document.getElementById('deleteModal')).hide();
+      showToast(`Key <code>#${key.id}</code> deleted.`);
+      // Send the operator back to the keys list; the key no longer exists.
+      setTimeout(() => { window.location.href = `/kms_keys.html?provider_id=${key.provider_id}`; }, 400);
+    } catch (e) {
+      bootstrap.Modal.getInstance(document.getElementById('deleteModal')).hide();
+      showToast(`Delete failed: ${e.message}`, 'danger');
+    }
+  }
+
+  async function loadAuditTrail(keyId) {
+    const tbody = document.getElementById('auditBody');
+    try {
+      const body = await fetchJson(
+        `${apiBase}/audit-logs?resource_type=kms_keys&resource_id=${keyId}&per_page=50`
+      );
+      const items = body.items || [];
+      if (!items.length) {
+        tbody.innerHTML = '<tr><td colspan="3" class="text-muted small p-3">No audit events for this key yet.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = items.map(ev => {
+        const when = (ev.created_at || '').slice(0, 19).replace('T', ' ');
+        const who  = ev.username ? ev.username : (ev.user_id ? `#${ev.user_id}` : '—');
+        return `<tr>
+          <td class="small text-muted">${when}</td>
+          <td><span class="badge bg-light text-dark border">${ev.action}</span></td>
+          <td class="small">${who}</td>
+        </tr>`;
+      }).join('');
+    } catch (e) {
+      // Audit log requires elevated role — for non-auditor users, fall back
+      // to a graceful message rather than failing the page.
+      tbody.innerHTML = `<tr><td colspan="3" class="text-muted small p-3">Audit trail unavailable: ${e.message}</td></tr>`;
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('copyPubBtn').onclick = async () => {
+      const pem = document.getElementById('keyPublicPem').value;
+      if (!pem) return;
+      try {
+        await navigator.clipboard.writeText(pem);
+        showToast('Public key copied.');
+      } catch (_) {
+        showToast('Copy failed — select the text manually.', 'warning');
+      }
+    };
+    document.getElementById('downloadPubBtn').onclick = () => {
+      const pem = document.getElementById('keyPublicPem').value;
+      if (!pem) return;
+      const blob = new Blob([pem], { type: 'application/x-pem-file' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `key-${_keyId}-public.pem`;
+      document.body.appendChild(a); a.click(); a.remove();
+    };
+  });
+
+  window.onload = loadKey;
+</script>
+{% endblock %}

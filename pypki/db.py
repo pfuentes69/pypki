@@ -490,6 +490,78 @@ class PKIDataBase:
         out["total"] = out["cas"] + out["ocsp_responders"] + out["certificates"]
         return out
 
+    def get_key_usage_items(self, key_id: int) -> dict:
+        """
+        Named dependents of a KMS key — every CA, certificate, and OCSP
+        responder that holds ``private_key_reference = key_id``. Used by
+        the key details endpoint (kms-specs.md §18.1) to render a usage
+        panel that lists *which* objects prevent deletion, not just how
+        many.
+
+        Returns::
+
+            {
+                "count": <int>,
+                "items": [
+                    {"type": "ca",             "id": <int>, "name": <str>},
+                    {"type": "certificate",    "id": <int>, "name": <str>, "ca_id": <int|None>},
+                    {"type": "ocsp_responder", "id": <int>, "name": <str>},
+                    ...
+                ],
+            }
+
+        The 409-rejection path in ``delete_key`` covers exactly the same
+        set of relations — this method is the authoritative source for
+        what blocks deletion.
+        """
+        items: list[dict] = []
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(dictionary=True, buffered=True)
+            cursor.execute(f"USE {db_name}")
+
+            cursor.execute(
+                "SELECT id, name FROM CertificationAuthorities "
+                "WHERE private_key_reference = %s ORDER BY id",
+                (key_id,),
+            )
+            for row in cursor.fetchall() or []:
+                items.append({
+                    "type": "ca",
+                    "id": int(row["id"]),
+                    "name": row.get("name"),
+                })
+
+            cursor.execute(
+                "SELECT id, subject_name, ca_id FROM Certificates "
+                "WHERE private_key_reference = %s ORDER BY id",
+                (key_id,),
+            )
+            for row in cursor.fetchall() or []:
+                items.append({
+                    "type": "certificate",
+                    "id": int(row["id"]),
+                    "name": row.get("subject_name"),
+                    "ca_id": row.get("ca_id"),
+                })
+
+            cursor.execute(
+                "SELECT id, name FROM OCSPResponders "
+                "WHERE private_key_reference = %s ORDER BY id",
+                (key_id,),
+            )
+            for row in cursor.fetchall() or []:
+                items.append({
+                    "type": "ocsp_responder",
+                    "id": int(row["id"]),
+                    "name": row.get("name"),
+                })
+
+            cursor.close()
+        except mysql.connector.Error as err:
+            logger.error(f"Error listing key usage items: {err}")
+        return {"count": len(items), "items": items}
+
     def delete_key(self, key_id: int):
         """
         Delete a KeyStorage row. Returns:
@@ -2269,22 +2341,43 @@ class PKIDataBase:
                 cursor.close()
         return []
 
-    def get_audit_logs(self, page: int = 1, per_page: int = 25):
-        """Return (total, list_of_rows) for the audit log, newest first."""
+    def get_audit_logs(self, page: int = 1, per_page: int = 25,
+                       resource_type: str = None, resource_id=None):
+        """Return ``(total, list_of_rows)`` for the audit log, newest first.
+
+        Optional ``resource_type`` and ``resource_id`` narrow the result to
+        a single resource's lifecycle trail — used by the key details page
+        (kms-specs.md §18.1) to fetch the key's audit history without
+        pulling the entire log.
+        """
         offset = (page - 1) * per_page
         if self._local.connection:
             cursor = self._local.connection.cursor(dictionary=True)
             try:
-                cursor.execute("SELECT COUNT(*) AS cnt FROM AuditLogs")
+                where_parts: list[str] = []
+                params: list = []
+                if resource_type:
+                    where_parts.append("al.resource_type = %s")
+                    params.append(resource_type)
+                if resource_id is not None:
+                    where_parts.append("al.resource_id = %s")
+                    params.append(resource_id)
+                where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
+                cursor.execute(
+                    f"SELECT COUNT(*) AS cnt FROM AuditLogs al{where_sql}",
+                    params,
+                )
                 total = cursor.fetchone()["cnt"]
                 cursor.execute(
                     "SELECT al.id, al.resource_type, al.resource_id, al.action, "
                     "al.user_id, u.username, al.created_at "
                     "FROM AuditLogs al "
                     "LEFT JOIN Users u ON u.id = al.user_id "
+                    f"{where_sql} "
                     "ORDER BY al.id DESC "
                     "LIMIT %s OFFSET %s",
-                    (per_page, offset)
+                    params + [per_page, offset],
                 )
                 rows = cursor.fetchall()
                 return total, rows

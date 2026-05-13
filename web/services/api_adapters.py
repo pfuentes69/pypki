@@ -35,10 +35,14 @@ def write_audit_log(resource_type: str, resource_id, action: str, user_id: int =
         db.write_audit_log(resource_type, resource_id, action, user_id)
 
 
-def get_audit_logs(page: int = 1, per_page: int = 25):
+def get_audit_logs(page: int = 1, per_page: int = 25,
+                   resource_type: str = None, resource_id=None):
     db = pki.get_db()
     with db.connection():
-        return db.get_audit_logs(page, per_page)
+        return db.get_audit_logs(
+            page, per_page,
+            resource_type=resource_type, resource_id=resource_id,
+        )
 
 
 def process_input(data):
@@ -732,26 +736,197 @@ def delete_crypto_provider(provider_id: int, user_id: int = 0) -> dict | None:
 
 # ── Key management (Phase 5a) ────────────────────────────────────────────────
 
-def list_kms_keys(provider_id: int = None, key_type: str = None):
+def list_kms_keys(provider_id: int = None, key_type: str = None) -> dict:
+    """
+    Token-aware merged key listing (kms-specs.md §18.1).
+
+    Returns an envelope::
+
+        {
+            "keys": [ … per-key dicts with a ``state`` field … ],
+            "token_enumeration": {
+                "available": bool,
+                "reason":    None | "no_provider_scope" | "not_applicable"
+                           | "provider-inactive" | "backend-error",
+            },
+        }
+
+    Scopes:
+
+    - **No ``provider_id``** — DB rows across every provider; every row is
+      ``state="registered_and_present"``. No backend probe runs.
+    - **``provider_id`` = software provider** — DB rows for the provider;
+      every row is ``state="registered_and_present"``.
+    - **``provider_id`` = pkcs11, active** — merged set. DB rows whose
+      ``hsm_token_id`` is missing from the token become
+      ``state="registered_only"`` (drift). On-token keys without a DB row
+      append as ``state="present_only"`` with an ``unimportable_reason``
+      from the backend (``null`` ⇒ importable;
+      ``"unsupported_key_type"`` or ``"public_key_unavailable"`` ⇒
+      read-only).
+    - **``provider_id`` = pkcs11, inactive / failing** — DB rows only;
+      ``token_enumeration.available=False`` with a reason for the UI.
+    """
     db: PKIDataBase = pki.get_db()
     with db.connection():
         rows = db.list_keys(provider_id=provider_id, key_type=key_type)
-        # Annotate each row with a usage summary so the UI can show "in use".
         for r in rows:
             r["usage"] = db.count_key_usage(r["id"])
-    return rows
+            r["state"] = "registered_and_present"
+            r["unimportable_reason"] = None
+
+    envelope: dict = {
+        "keys": rows,
+        "token_enumeration": {"available": False, "reason": None},
+    }
+
+    if provider_id is None:
+        envelope["token_enumeration"]["reason"] = "no_provider_scope"
+        return envelope
+
+    with db.connection():
+        provider = db.get_provider_by_id(int(provider_id))
+    if not provider:
+        envelope["token_enumeration"]["reason"] = "no_provider_scope"
+        return envelope
+    if provider.get("kind") != "pkcs11":
+        envelope["token_enumeration"]["reason"] = "not_applicable"
+        return envelope
+
+    # pkcs11 provider — try to enumerate the token and merge.
+    try:
+        token_keys = pki.get_kms().list_provider_token_keys(int(provider_id))
+        envelope["token_enumeration"]["available"] = True
+    except Exception as e:
+        from pypki.backends.base import (
+            AuthenticationFailed, BackendNotActive,
+            ModuleLoadFailed, SlotNotFound,
+        )
+        # Order matters: SlotNotFound / AuthenticationFailed / ModuleLoadFailed
+        # are subclasses of BackendNotActive (kms-specs.md §2.1 — they
+        # diagnose *why* activation failed) so they must be checked first.
+        if isinstance(e, SlotNotFound):
+            reason = "slot-missing"
+        elif isinstance(e, AuthenticationFailed):
+            reason = "auth-failed"
+        elif isinstance(e, ModuleLoadFailed):
+            reason = "module-error"
+        elif isinstance(e, BackendNotActive):
+            reason = "provider-inactive"
+        else:
+            reason = "backend-error"
+            logger.warning(
+                f"list_kms_keys: token enumeration failed for provider "
+                f"id={provider_id}: {e}"
+            )
+        envelope["token_enumeration"]["reason"] = reason
+        return envelope
+
+    # Drift detection: KeyStorage rows whose hsm_token_id is not found
+    # on the token transition to ``state="registered_only"``.
+    db_by_token = {r["hsm_token_id"]: r for r in rows if r.get("hsm_token_id")}
+    token_ids_present = {k["hsm_token_id"] for k in token_keys}
+    for tok_id, row in db_by_token.items():
+        if tok_id not in token_ids_present:
+            row["state"] = "registered_only"
+
+    # Token-key surfacing. Iterate the list in enumeration order so every
+    # on-token CKO_PRIVATE_KEY object surfaces as its own row, including
+    # duplicates of a CKA_ID that another on-token key (or a DB row)
+    # already claims. PKCS#11 does not require CKA_ID uniqueness; SoftHSM2
+    # in particular allows multiple objects to share one, and the prior
+    # ``dict {token_id: row}`` merge silently dropped all but the
+    # last-iterated entry per CKA_ID. Duplicates carry
+    # ``unimportable_reason="duplicate_cka_id"`` so the operator sees them
+    # as visible-but-read-only (pyPKI addresses by CKA_ID, so duplicates
+    # cannot be unambiguously imported until the slot is cleaned up).
+    type_filter = (key_type or "").strip() or None
+    seen_token_ids: set = set()
+    for tok in token_keys:
+        tok_id = tok["hsm_token_id"]
+        is_duplicate = tok_id in seen_token_ids
+        seen_token_ids.add(tok_id)
+
+        if not is_duplicate and tok_id in db_by_token:
+            # First on-token instance of a CKA_ID that pairs with a DB
+            # row — represented by the registered_and_present DB row that
+            # is already in ``envelope["keys"]``.
+            continue
+        if type_filter and tok.get("key_type") != type_filter:
+            continue
+
+        reason = "duplicate_cka_id" if is_duplicate else tok.get("unimportable_reason")
+        envelope["keys"].append({
+            "id": None,
+            "provider_id": int(provider_id),
+            "key_type": tok.get("key_type"),
+            "public_key": tok.get("public_key"),
+            "label": tok.get("cka_label"),
+            "storage_type": "HSM",
+            "hsm_token_id": tok_id,
+            "key_owned": False,
+            "created_at": None,
+            "usage": None,
+            "state": "present_only",
+            "unimportable_reason": reason,
+        })
+
+    return envelope
 
 
 def get_kms_key(key_id: int):
+    """
+    Detail record for the key details page (kms-specs.md §18.1).
+
+    On top of the columns in ``KeyStorage`` this returns:
+
+    - ``provider_label`` — the human-facing label of the bound provider,
+      so the details page can render a clickable provider chip without a
+      second round-trip.
+    - ``usage`` — ``{"count": N, "items": [{type, id, name, …}, …]}``;
+      the named dependents that block deletion, sourced from
+      ``get_key_usage_items``. Replaces the previous integer-only count
+      so the UI can render the usage panel without a second call.
+    - ``state`` — ``"registered_and_present"`` by default. Drift
+      detection against the token only runs for the merged list view
+      (``list_kms_keys``); a per-key probe is a follow-up
+      (kms-specs §18.1 open question 2 / decision 2).
+
+    The encrypted ``private_key`` blob and any legacy ``token_password``
+    are stripped before returning.
+    """
     db: PKIDataBase = pki.get_db()
     with db.connection():
         row = db.get_key_record(key_id)
         if not row:
             return None
-        # Strip the encrypted/plain private material.
+        # Strip private material — the management API never returns it.
         row.pop("private_key", None)
         row.pop("token_password", None)
-        row["usage"] = db.count_key_usage(key_id)
+        row["usage"] = db.get_key_usage_items(key_id)
+        row["state"] = "registered_and_present"
+        provider_id = row.get("provider_id")
+        if provider_id is not None:
+            provider = db.get_provider_by_id(int(provider_id))
+            row["provider_label"] = provider.get("label") if provider else None
+        else:
+            row["provider_label"] = None
+
+    # Drift probe (kms-specs.md §10.5). Only meaningful for HSM-storage
+    # rows whose provider can be activated — software keys live in
+    # ``KeyStorage`` exclusively, and an inactive ``pkcs11`` provider
+    # leaves the result unverified rather than asserting a state we
+    # cannot confirm.
+    row["token_check"] = {"available": False, "present": False, "reason": "not_applicable"}
+    if (
+        row.get("storage_type") == "HSM"
+        and provider_id is not None
+        and row.get("hsm_token_id")
+    ):
+        probe = pki.get_kms().probe_key_on_token(int(provider_id), row["hsm_token_id"])
+        row["token_check"] = probe
+        if probe["available"] and not probe["present"]:
+            row["state"] = "registered_only"
     return row
 
 
@@ -771,6 +946,47 @@ def import_pkcs11_kms_key(provider_id: int, hsm_token_id: str,
     )
     write_audit_log("kms_keys", result["key_id"], "IMPORT", user_id)
     return result
+
+
+def export_kms_key(key_id: int, passphrase: str, user_id: int = 0) -> bytes:
+    """
+    Export an owned software key as a passphrase-encrypted PKCS#8 PEM
+    (kms-specs.md §18.1 CR-0002). The route layer enforces the
+    `superadmin` role gate and maps the typed exceptions:
+
+    - ``KeyError`` → 404 (no such key id).
+    - ``PermissionError`` → 409 (storage_type mismatch, imported
+      software, HSM).
+    - ``ValueError`` → 400 (missing / too-short passphrase).
+    - ``RuntimeError`` / other → 503 (backend / KEK trouble).
+
+    Writes a ``key_export`` audit event on every outcome so the
+    details page audit panel records both successful and refused
+    extraction attempts; the failure-mode reason is captured in the
+    audit row's ``action`` (e.g. ``EXPORT``, ``EXPORT_REFUSED_HSM``,
+    ``EXPORT_REFUSED_IMPORTED``).
+    """
+    try:
+        pem = pki.get_kms().export_software_key(int(key_id), passphrase)
+    except (KeyError, PermissionError, ValueError):
+        # Audit the refusal with a discriminating action so the audit
+        # trail records *why* the export was blocked. The route layer
+        # turns the exception into the matching HTTP status.
+        action = "EXPORT_FAILED"
+        try:
+            with pki.get_db().connection():
+                rec = pki.get_db().get_key_record(int(key_id))
+        except Exception:
+            rec = None
+        if rec:
+            if rec.get("storage_type") == "HSM":
+                action = "EXPORT_REFUSED_HSM"
+            elif rec.get("key_owned") is False or rec.get("key_owned") == 0:
+                action = "EXPORT_REFUSED_IMPORTED"
+        write_audit_log("kms_keys", int(key_id), action, user_id)
+        raise
+    write_audit_log("kms_keys", int(key_id), "EXPORT", user_id)
+    return pem
 
 
 def delete_kms_key(key_id: int, user_id: int = 0) -> dict | None:

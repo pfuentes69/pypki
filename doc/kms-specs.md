@@ -75,30 +75,138 @@ start implementation.
   full API surface, multi-threaded sign safety, lifecycle invariants,
   and Phase 6 hardening (hex validation, symmetric-type rejection,
   dead-code regressions).
+- **Token-aware key listing.** `PKCS11Backend.list_keys()` enumerates
+  every `CKO_PRIVATE_KEY` on the open session, returning per-row
+  algorithm metadata, the paired public key PEM (when present), and
+  an ``unimportable_reason`` discriminator. `GET /api/kms/keys` scoped
+  to a `pkcs11` provider returns a merged envelope
+  `{keys, token_enumeration}`; each row carries a `state` field
+  (`registered_and_present` / `present_only` / `registered_only`)
+  that drives the UI's state-badge column and the per-row Import
+  affordance for unregistered on-token keys.
+- **Drift detection beyond the list.** `KMS.probe_key_on_token`
+  performs an on-demand `find_key_by_id` against the token for a
+  single `KeyStorage` row, returning a structured
+  `{available, present, reason}` envelope. The key details endpoint
+  uses it so opening `/key_details.html?id=…` for an HSM-backed key
+  flips the row to `state="registered_only"` and renders a
+  prominent "Key is missing on the HSM" banner when the on-token
+  object has been deleted out-of-band.
+- **Classified activation failures + mid-session reclassification.**
+  `PKCS11Backend.open` and the broader reconnect path in
+  `sign_digest` share a single `_open_session_classified` helper so
+  the same typed subclasses surface whether the failure shows up at
+  activation or in the middle of a session:
+  - `SlotNotFound` — the configured `slot_label` is not on the
+    module (token deleted, hardware removed, misconfigured label,
+    or token went missing mid-session via
+    `softhsm2-util --delete-token` etc.).
+  - `AuthenticationFailed` — login rejected (wrong PIN, PIN locked,
+    token reinitialised with a new PIN, role mismatch).
+  - `ModuleLoadFailed` — the PKCS#11 shared library could not be
+    loaded (path wrong, ABI mismatch).
+  All three remain subclasses of `BackendNotActive` so existing
+  catches stay backwards-compatible. `sign_digest`'s single-retry
+  reconnect path covers `CKR_SESSION_HANDLE_INVALID`,
+  `CKR_SESSION_CLOSED`, `CKR_DEVICE_REMOVED`, `CKR_DEVICE_ERROR`,
+  `CKR_TOKEN_NOT_PRESENT`, `CKR_TOKEN_NOT_RECOGNIZED`; if the
+  reconnect itself fails, its typed exception propagates.
+  `list_keys` and `find_key_by_id` do *not* retry — diagnostic
+  callers want the typed reason immediately. The KMS evicts the
+  cached backend on any hard failure (CR-0004 decision 3) so the
+  next call re-runs activation cleanly once the slot / PIN is
+  fixed. The token-aware envelope on `GET /api/kms/keys` and the
+  `token_check` envelope on `GET /api/kms/keys/{id}` carry the
+  matching reasons (`slot-missing`, `auth-failed`, `module-error`)
+  for both activation-time and mid-session failures.
+- **Typed signing-time failure + structured route surface.**
+  `PKCS11Backend._find_private_by_id` raises `KeyMissingOnToken`
+  (subclass of `BackendError` / `RuntimeError`) when the on-token
+  object is gone; `KMS.sign_digest` / `KMS.load_key` propagate it
+  unchanged. All `BackendError` subclasses now carry optional
+  `key_id` and `provider_id` attributes attached at the throw site
+  (`PKCS11Backend.load_key` enriches `KeyMissingOnToken` with the
+  `KeyStorage.id` at the layer that knows it). An app-level Flask
+  error handler registered in `web.create_app` turns any
+  `BackendError` raised from any blueprint (main, ocsp, est) into
+  a structured 503 with the shape
+  `{description, code, key_id, provider_id, recovery}` —
+  `code ∈ {key_missing_on_token, slot-missing, auth-failed,
+  module-error, provider-inactive, backend-error}`, `recovery`
+  points at `/key_details.html?id=…` when `key_id` is known.
+  Consumer routes (cert issuance, PKCS#12 issuance, OCSP, EST,
+  CRL regeneration) re-raise `BackendError` from their broad
+  `except` blocks so the typed exception reaches the handler
+  instead of getting flattened to a generic 500. The background
+  CRL scheduler logs the typed failure class + key_id + provider_id
+  at WARN and continues with the next CA instead of aborting the
+  pass. Existing `except RuntimeError:` catches remain
+  backwards-compatible.
+- **Key export (software, owned).** `POST /api/kms/keys/{id}/export`
+  returns a passphrase-encrypted PKCS#8 PEM under PBES2 (PBKDF2-
+  HMAC-SHA256 + AES-256-CBC via the `cryptography` library's
+  `BestAvailableEncryption`). Body: `{"passphrase": "≥12 chars"}`.
+  Response: raw PEM with `Content-Type: application/x-pem-file`
+  and a `Content-Disposition: attachment` header so the browser
+  downloads it without client-side parsing.
+  Refused with 409 for HSM-backed rows (CKA_EXTRACTABLE=FALSE per
+  §8.2) and for imported software (`key_owned=FALSE`). Role gate
+  is `superadmin`-only — stricter than the destructive-action
+  gate. Every outcome writes a `kms_keys` audit event:
+  `EXPORT` on success, `EXPORT_REFUSED_HSM` /
+  `EXPORT_REFUSED_IMPORTED` / `EXPORT_FAILED` on refusal — visible
+  in the key details page audit panel. The Export button on
+  `/key_details.html` is gated client-side to the same eligible
+  set (superadmin + software + owned + not registered_only); the
+  server enforces independently.
+- **Public-key recovery for orphaned on-token private keys.**
+  `_read_public_key_pem_attributes(session, handle, normalised)`
+  works on either a public-key or a private-key handle and tries
+  three reconstruction paths in order: PKCS#11 v3
+  `CKA_PUBLIC_KEY_INFO`, RSA `CKA_MODULUS` + `CKA_PUBLIC_EXPONENT`,
+  EC `CKA_EC_POINT`. `PKCS11Backend.list_keys()` and
+  `find_key_by_id()` fall back to reading the private-key handle
+  when the paired `CKO_PUBLIC_KEY` is missing — covers the
+  out-of-band `pkcs11-tool --delete-object --type pubkey` case so
+  the row becomes importable rather than read-only. Rows whose
+  vendor blocks both paths (Luna crypto-user with restricted
+  public attributes, etc.) keep surfacing as
+  `unimportable_reason="public_key_unavailable"`; the diagnosis
+  lives in a `logger.warning`.
+- **Key details page.** `GET /api/kms/keys/{id}` returns the full
+  record enriched with `provider_label`, `state`, and
+  `usage = {count, items: [{type, id, name, …}]}` — the named
+  dependents (CAs / certificates / OCSP responders) that block
+  deletion. The new `/key_details.html` page hosts the public-key
+  panel, the usage table, the audit-log trail (sourced from
+  `/api/audit-logs?resource_type=kms_keys&resource_id=…`), and the
+  destructive / export actions. The keys list (`/kms_keys.html`) and
+  the per-provider keys table on `/crypto_provider_details.html` no
+  longer surface destructive actions inline.
+- **`POST /api/kms/keys/{id}/export` reserved.** Returns 501 with a
+  documented description; the UI's Export button wires to it so the
+  affordance is discoverable.
 
 ### What is pending
 
 - **Phase 7 — fidelity pass against real-vendor PKCS#11 implementations**
-  (YubiHSM 2 simulator, Thales DPoD, AWS CloudHSM). Held back until
-  the hardware / SDK becomes available to the project. SoftHSM2 is
-  the canonical regression target until then. See §13 Phase 7.
-- **Token-aware key listing.** `GET /api/kms/keys` and the
-  per-provider keys table on the Crypto Provider Details page
-  enumerate only rows in `KeyStorage`. For `pkcs11` providers there
-  is no way to *see* keys that exist on the token but have not been
-  registered in pyPKI yet — an operator cannot tell from the UI
-  which on-token objects are importable. The generic "Import HSM
-  key" button asks the operator to type the `CKA_ID` from memory.
-  Designed in [§18.1 CR-0001](#181-cr-0001--token-aware-key-listing--key-details-page).
-- **Key details page.** Today the keys list surfaces a `Delete`
-  button inline and a single `usage` count; there is no view that
-  shows the public key, the bound CAs / certificates / OCSP
-  responders by name, or that scopes destructive and (future)
-  export actions away from the bulk list. Designed in
-  [§18.1 CR-0001](#181-cr-0001--token-aware-key-listing--key-details-page).
+  (YubiHSM 2, Thales DPoD, AWS CloudHSM). **Indefinitely deferred** —
+  no real-HSM access is planned by the project. SoftHSM2 stays the
+  canonical regression target. See §13 Phase 7 for what the work
+  would entail if access ever materialises.
 - `vault:` resolver — placeholder in the data model; raises
   `NotImplementedError`. Concrete implementation is a separate
   initiative.
+- **EST-specific error mapping for backend failures.** Hook for a
+  future EST service spec. The current EST surface is not
+  production-grade (no enforced TLS client authentication, no
+  RFC-8951 error encoding, RA semantics not formalised). When an
+  EST spec is drafted, it should pick up the EST-specific mapping
+  of `KeyMissingOnToken` / `SlotNotFound` / `AuthenticationFailed`
+  to RFC-7030 / RFC-8951 error shapes; CR-0005 deferred this so
+  the KMS spec does not pre-commit a wire format the EST spec
+  will own. Tracked here only — no CR number allocated until the
+  EST spec lands.
 
 The HSM-specific contracts (mechanisms, slot addressing, session
 lifecycle, storage types) are specified in
@@ -468,11 +576,12 @@ to the default provider for one release, then is removed.
 
 | Method | Path | Role | Description |
 |---|---|---|---|
-| GET | `/api/kms/keys` | any authenticated | List keys. Optional query: `provider_id`, `key_type`. Response: id, provider_id, key_type, label, created_at, public_key (PEM), `usage` (CA / OCSP responder bindings, if any). Private material never returned. |
-| GET | `/api/kms/keys/{key_id}` | any authenticated | Key details. |
+| GET | `/api/kms/keys` | any authenticated | List keys. Optional query: `provider_id`, `key_type`. Response is the *token-aware merged* envelope `{keys: [...], token_enumeration: {available, reason}}`. Each row carries a `state` ∈ {`registered_and_present`, `present_only`, `registered_only`} plus `unimportable_reason` for `present_only` rows that the UI must surface but cannot import (`null` ⇒ importable; `"unsupported_key_type"`, `"public_key_unavailable"`, or `"duplicate_cka_id"` ⇒ read-only). Every on-token `CKO_PRIVATE_KEY` surfaces as its own row — when two or more share a `CKA_ID`, the first-iterated entry is the canonical one (paired with a DB row if present, otherwise importable) and the rest carry `duplicate_cka_id`. `present_only` rows only appear when the query is scoped to an active `pkcs11` provider; the global view (no `provider_id`) is DB-only. `token_enumeration.reason ∈ {null, "no_provider_scope", "not_applicable", "provider-inactive", "slot-missing", "auth-failed", "module-error", "backend-error"}` so the UI can render specific guidance when activation fails. Private material is never returned. |
+| GET | `/api/kms/keys/{key_id}` | any authenticated | Key details. On top of the `KeyStorage` columns the response carries `provider_label`, `state`, `usage = {count, items: [{type, id, name, …}]}` — the named CAs / certificates / OCSP responders that block deletion — and `token_check = {available, present, reason}` from a per-key on-demand probe of the token. For HSM-backed rows whose `pkcs11` provider is active, a missing on-token object flips `state` to `"registered_only"` so the details page renders the drift banner (§10.5). Software keys and rows on inactive providers carry `available=false` with a diagnostic `reason`. The 409 path of `DELETE /api/kms/keys/{id}` checks the same set of relations as `usage.items`. |
 | POST | `/api/kms/keys` | admin | Generate a new key. Body: `provider_id`, `key_type` (`RSA-3072`, `ECDSA-P-256`, …), `label`. Provider must be `active`. |
-| POST | `/api/kms/keys/import` | superadmin | Register an existing on-token key into `KeyStorage` (no key material generated). Body: `provider_id` (must be `kind=pkcs11`), `hsm_token_id`, `label?`. Public key is read from the token. |
-| DELETE | `/api/kms/keys/{key_id}` | admin | Delete a key. For `kind=pkcs11`, deletes the on-token object too. Rejected with 409 if any CA or OCSP responder still references the key. |
+| POST | `/api/kms/keys/import` | superadmin | Register an existing on-token key into `KeyStorage` (no key material generated). Body: `provider_id` (must be `kind=pkcs11`), `hsm_token_id`, `label?`. Public key is read from the token. Also called by the keys list's per-row Import affordance for `present_only` rows. |
+| POST | `/api/kms/keys/{key_id}/export` | superadmin | Export an owned software key as a passphrase-encrypted PKCS#8 PEM. Body: `{"passphrase": "<UTF-8, ≥12 chars>"}`. Response: raw PEM body with `Content-Type: application/x-pem-file` and `Content-Disposition: attachment; filename="key-{id}.pem"`. Refused with 409 for HSM-backed rows (non-extractable by §8.2) and for `key_owned=FALSE` rows. 400 for missing / too-short passphrase. Every outcome audits as `kms_keys / EXPORT[_REFUSED_HSM|_REFUSED_IMPORTED|_FAILED]`. |
+| DELETE | `/api/kms/keys/{key_id}` | admin | Delete a key. For `kind=pkcs11`, deletes the on-token object too unless `key_owned=FALSE` (imported keys preserve the on-token material). Rejected with 409 if any CA / certificate / OCSP responder still references the key. |
 
 ### 9.3 Errors
 
@@ -480,6 +589,38 @@ Errors follow the existing pyPKI error shape (`{"description": "…"}` with
 appropriate HTTP status). Provider-specific errors use 503 (provider
 inactive / backend failure), 409 (in-use key or provider), 400
 (validation), 404 (unknown id).
+
+**Backend errors (CR-0005).** When any view function raises a
+`BackendError` subclass (`KeyMissingOnToken`, `SlotNotFound`,
+`AuthenticationFailed`, `ModuleLoadFailed`, or the base
+`BackendNotActive`), the app-level handler registered in
+`web.create_app` returns 503 with the structured body:
+
+```json
+{
+  "description": "<operator-facing message>",
+  "code":        "<see table>",
+  "key_id":      <int|null>,
+  "provider_id": <int|null>,
+  "recovery":    "/key_details.html?id=<key_id>"   // only when key_id is set
+}
+```
+
+The `code` vocabulary matches the values that `token_check.reason`
+on `GET /api/kms/keys/{id}` produces:
+
+| `code` | Exception class | Operator-facing description |
+|---|---|---|
+| `key_missing_on_token` | `KeyMissingOnToken` | The bound on-token object is gone; restore it or delete the row. |
+| `slot-missing` | `SlotNotFound` | The configured slot is no longer on the module. |
+| `auth-failed` | `AuthenticationFailed` | The PIN was rejected by the token. |
+| `module-error` | `ModuleLoadFailed` | The PKCS#11 module could not be loaded. |
+| `provider-inactive` | `BackendNotActive` | The bound provider is not active. |
+| `backend-error` | other `BackendError` | Generic backend failure. |
+
+The same shape covers every blueprint (main / ocsp / est) — EST
+clients receive the JSON 503 until a future EST service spec defines
+its own RFC-7030 / RFC-8951 error mapping (see §2.2 EST hook).
 
 ---
 
@@ -518,17 +659,51 @@ Generation" entry with two pages plus a settings shortcut.
 
 Replaces the existing `kms_keygen.html`.
 
-- **List view** — table: id, provider, key type, label, created, usage
-  (CA/OCSP binding count). Filter by provider, key type. Buttons: "Generate
-  key," "Import HSM key," "Delete."
+- **List view** — token-aware table with columns: id, **state**,
+  provider, type, label, storage, HSM CKA_ID, usage, created,
+  actions. Filter by provider and key type. Header buttons:
+  "Generate key" and "Import HSM key" (the latter kept as a fallback
+  for tokens whose enumeration fails). For `pkcs11`-scoped lookups,
+  the table merges `KeyStorage` rows with on-token objects so
+  unregistered keys are visible.
+  - `state` rendering:
+    - `registered_and_present` — no badge.
+    - `present_only` + `unimportable_reason = null` — "Not
+      registered" badge + per-row **Import** button. Clicking opens
+      a one-field prompt pre-filled from the row's `CKA_LABEL`
+      (decision 5); confirming POSTs `/api/kms/keys/import` without
+      leaving the page.
+    - `present_only` + `unimportable_reason ∈
+      {"unsupported_key_type", "public_key_unavailable",
+      "duplicate_cka_id"}` — muted badge with the matching label;
+      **no action**. `unsupported_key_type` is the CKA_KEY_TYPE
+      conservative-subset rule. `public_key_unavailable` is the
+      residual case after CR-0003: the paired `CKO_PUBLIC_KEY` is
+      missing *and* the private-handle reconstruction fallback
+      (CKA_PUBLIC_KEY_INFO → CKA_MODULUS/CKA_EC_POINT) also failed,
+      typically because vendor policy blocks reading public
+      components under the active role. `duplicate_cka_id` covers
+      the pathological case where multiple on-token objects share
+      a `CKA_ID` and pyPKI cannot address them individually until
+      the operator cleans up the slot.
+    - `registered_only` — "Missing on token" muted-red badge; the
+      operator opens the details page to investigate.
+  - `Details` button per registered row → `/key_details.html?id=…`.
+    No destructive action is offered inline.
+  - When `token_enumeration.available=false`, the page renders a
+    banner whose severity and copy depend on the reason —
+    `slot-missing` / `auth-failed` / `module-error` are red and
+    name the diagnosis (token deleted; PIN rejected; module won't
+    load); `provider-inactive` is yellow and prompts the operator
+    to activate the provider. The registered keys are still shown
+    in every case so the operator can navigate to the details
+    page.
 - **Generate modal** — provider dropdown (pre-filtered to active
   providers), key type dropdown (RSA-2048/3072/4096, ECDSA-P-256/P-384,
   Ed25519, AES-256), label.
 - **Import modal** (PKCS#11 providers only) — provider dropdown,
   hsm_token_id (hex), optional label. The system reads the public key from
   the token to populate `KeyStorage.public_key`.
-- **Delete confirmation** — refuses if usage count > 0; shows which CAs /
-  OCSP responders reference the key.
 
 ### 10.3 Hooks into existing pages
 
@@ -547,6 +722,70 @@ whether the KEK is present (boolean only — the value is never displayed)
 and the active resolver backends, so an operator can confirm the deployment
 is wired up correctly.
 
+### 10.5 Key details page (`/key_details.html?id=…`)
+
+Owns key-level inspection and the destructive / export actions; the
+list views in §10.2 and the per-provider keys table on the Crypto
+Provider Details page link here for anything non-trivial.
+
+- **Header** — label, key-type badge, `state` badge (with the same
+  semantics as in §10.2), `key_owned` indicator
+  (`pyPKI-owned` / `Imported`) for HSM keys.
+- **Drift / verification banner** — driven by the `token_check`
+  envelope on `GET /api/kms/keys/{id}` (see §9.2). For HSM-backed
+  rows the endpoint runs `KMS.probe_key_on_token` and surfaces:
+  - `{available: true, present: false}` — drift. A red banner
+    explains the on-token object is missing, that sign / issuance
+    operations will fail with `KeyMissingOnToken`, and recommends
+    either restoring the material or deleting the row. The Export
+    button is suppressed in the action bar.
+  - `{available: false, reason: "slot-missing"}` — red banner
+    "Slot is missing on the PKCS#11 module" with the same
+    recovery framing (sign / issuance will fail; reconfigure the
+    provider against an existing slot).
+  - `{available: false, reason: "auth-failed"}` — red banner
+    "Provider authentication failed" — token may have been
+    reinitialised with a new PIN.
+  - `{available: false, reason: "module-error"}` — red banner
+    pointing the operator at the provider's `module_path`.
+  - `{available: false, reason: "provider-inactive"}` — yellow
+    banner noting the operator must activate the provider to
+    revalidate the key.
+  - `{available: false, reason: "unknown_provider" | "backend-error"}`
+    — yellow "could not verify" banner.
+  - Software keys and rows without `hsm_token_id` get
+    `reason="not_applicable"`; no banner.
+- **Info card** — provider link, storage type, HSM CKA_ID, created
+  timestamp.
+- **Public key panel** — read-only textarea + copy and
+  "Download PEM" buttons.
+- **Usage panel** — table of dependents from
+  `GET /api/kms/keys/{id}.usage.items`. Each row links to the
+  dependent's detail page (CA, certificate, OCSP responder). The
+  set is identical to the relations that drive the 409-rejection
+  path of `DELETE /api/kms/keys/{id}`.
+- **Audit trail panel** — events for this key, newest first, from
+  `GET /api/audit-logs?resource_type=kms_keys&resource_id=…`.
+  Reuses the existing audit-log surface (decision 6); no new event
+  types are introduced. Non-auditor users see a graceful "audit
+  trail unavailable" notice rather than a hard failure.
+- **Action bar** —
+  - **Export** (CR-0002, superadmin-only) — opens a passphrase
+    prompt modal (confirm-passphrase + ≥12 char client-side
+    validation), then POSTs `/api/kms/keys/{id}/export` and saves
+    the returned PEM via a `Blob`-backed download so server-side
+    4xx errors render in the modal rather than as a page
+    navigation. Hidden for any of: non-superadmin caller, HSM
+    storage, imported software (`key_owned=FALSE`), or
+    `registered_only` drift rows; the server enforces the same
+    rules with 409 so direct API callers cannot side-step them.
+    Success refreshes the audit panel so the new `EXPORT` event
+    is visible immediately.
+  - **Delete** — opens a confirmation modal that lists the named
+    dependents (if any) and the HSM-cascade implication for owned
+    vs imported HSM keys, then calls `DELETE /api/kms/keys/{id}`.
+    Honours the existing 409 rejection.
+
 ---
 
 ## 11. Audit logging
@@ -564,6 +803,7 @@ The following events write to `AuditLogs`:
 | `key_generate` | key_id, provider_id, key_type, label |
 | `key_import` | key_id, provider_id, hsm_token_id |
 | `key_delete` | key_id, provider_id |
+| `key_export` | key_id, action ∈ {`EXPORT`, `EXPORT_REFUSED_HSM`, `EXPORT_REFUSED_IMPORTED`, `EXPORT_FAILED`} (CR-0002). Distinct row per refusal class so audit consumers can distinguish policy denial from runtime failure. |
 
 `sign_digest` calls are *not* audit-logged by default — they happen on every
 issuance, every CRL, every OCSP response, and would dominate the log. CA-
@@ -678,35 +918,88 @@ is fixed against the wrong shape.
 - Gap 12 (stale `migrate_keys_to_kms.py` reference in OCSP error path).
 - Expand SoftHSM-based test coverage.
 
-**Phase 7 — fidelity pass.** *Pending hardware/SDK availability.*
+**Phase 8 — token-aware key listing + key details page** (CR-0001,
+accepted 2026-05-12, shipped). Closes the §2.2 bullets about visible
+on-token keys and a dedicated key details surface.
 
-The pyPKI KMS layer (Phases 0–6) is feature-complete and exercised
-end-to-end against SoftHSM2 in CI. Phase 7 — running the same suite
-against real-vendor implementations to confirm portability — is held
-back until at least one of the following becomes available to the
-project:
+- `PKCS11Backend.list_keys()` enumerates every `CKO_PRIVATE_KEY` on
+  the open session; `SoftwareBackend.list_keys()` returns `[]`.
+- `GET /api/kms/keys` returns the merged envelope `{keys,
+  token_enumeration}` with per-row `state` and `unimportable_reason`.
+- `GET /api/kms/keys/{id}` returns `provider_label`, `state`, and
+  the named `usage.items` list.
+- `POST /api/kms/keys/{id}/export` reserved (501).
+- New `/key_details.html` page hosts the public-key panel, the
+  usage table, the audit-log trail, and the destructive / export
+  actions; both list views drop the inline `Delete` button.
+- `GET /api/audit-logs` gains optional `resource_type` and
+  `resource_id` filters so the details page can fetch a single
+  key's trail.
+- Public-key recovery fallback (CR-0003, accepted 2026-05-12):
+  `_read_public_key_pem_attributes` works on either a public or a
+  private handle (CKA_PUBLIC_KEY_INFO → algorithm-specific
+  attributes); `list_keys` and `find_key_by_id` invoke it as a
+  fallback when the paired `CKO_PUBLIC_KEY` is missing. Rows
+  surface as importable when reconstruction succeeds and keep
+  `unimportable_reason="public_key_unavailable"` for the residual
+  vendor-restricted case.
+- Key export (CR-0002, accepted 2026-05-12):
+  `KMS.export_software_key(key_id, passphrase)` decrypts the
+  KEK-protected blob via the bound `SoftwareBackend` and re-wraps
+  the plaintext under `BestAvailableEncryption(passphrase)` (PBES2
+  / AES-256-CBC). The `POST /api/kms/keys/{id}/export` route
+  enforces a 12-char minimum passphrase, gates on `superadmin`,
+  refuses HSM rows and `key_owned=FALSE` rows with 409, and writes
+  one of `EXPORT` / `EXPORT_REFUSED_HSM` /
+  `EXPORT_REFUSED_IMPORTED` / `EXPORT_FAILED` to `AuditLogs` on
+  every outcome. UI on `/key_details.html` adds a passphrase modal
+  with confirm-passphrase + length check and downloads the PEM via
+  a `Blob` so server 4xx errors render in the modal rather than
+  as a page navigation.
+- Mid-session classification + cache eviction (CR-0004, accepted
+  2026-05-12): shared `_open_session_classified` helper covers
+  both activation and reconnect paths; `sign_digest` reconnect
+  widens to the full set of session-stale CKR codes;
+  `_classify_pkcs11_error_midsession` wraps `list_keys` /
+  `find_key_by_id` (no retry — diagnostic). The KMS evicts the
+  cached backend on `SlotNotFound` / `AuthenticationFailed` /
+  `ModuleLoadFailed` via the `_evict_on_hard_failure` context
+  manager so the next call re-runs activation cleanly.
+- Structured backend-error surface (CR-0005, accepted 2026-05-12):
+  `BackendError` subclasses carry `key_id` / `provider_id`
+  attached at the throw site. App-level Flask handler
+  (`web.create_app`) renders any `BackendError` as the structured
+  503 envelope documented in §9.3. Consumer routes (cert
+  issuance, PKCS#12, OCSP, EST) re-raise `BackendError` from their
+  broad catches so the handler sees it. Background CRL scheduler
+  logs typed failure class + key_id + provider_id at WARN and
+  continues with the next CA.
 
-- the **YubiHSM 2 simulator** (Yubico SDK, requires a developer
-  download), or
-- a **Thales DPoD trial** (real Luna firmware behind their API;
-  registration required), or
+**Phase 7 — fidelity pass.** *Indefinitely deferred — no real-HSM
+access planned by the project.*
+
+The pyPKI KMS layer (Phases 0–6 + Phase 8) is feature-complete and
+exercised end-to-end against SoftHSM2 in CI. Phase 7 — running the
+same suite against real-vendor implementations to confirm portability
+— requires hands-on access to one of:
+
+- a **YubiHSM 2** (hardware or simulator from the Yubico SDK), or
+- a **Thales DPoD trial** (real Luna firmware behind their API), or
 - an **AWS CloudHSM** instance (Luna under the hood; chargeable).
 
-When any of those is available, the work is:
+None of these are on the project's procurement path. The phase
+stays in §13 as a record of *what would be done* if access ever
+materialises (run the parametrised pytest matrix against a
+`kind='pkcs11'` provider pointing at the new module, gate any
+vendor-specific findings behind `extra_json` flags rather than code
+branches, refresh the §8.1 conservative-subset table if anything
+gets rejected), but no calendar commitment is implied.
 
-- Run the full HSM test suite (the parametrised pytest matrix from
-  Phase 0.4 plus the Phase 5 generate / import / delete tests) against
-  the new provider with `kind='pkcs11'` and the appropriate
-  `module_path`.
-- Document any vendor-specific findings; gate exceptions behind
-  provider `extra_json` flags rather than code branches.
-- Update the conservative-subset table in §8.1 if a target rejects any
-  of the listed mechanisms.
-
-Until then, treat the SoftHSM2 suite as the canonical regression target.
-Operators deploying against a real HSM today should expect the
-implementation to work given the §8 conformance constraints, but the
-formal "release-ready against vendor X" claim is pending.
+Until then, treat the SoftHSM2 suite as the canonical regression
+target. Operators deploying against a real HSM should expect the
+implementation to work given the §8 conformance constraints, but
+the formal "release-ready against vendor X" claim cannot be made
+from inside this project.
 
 ---
 
@@ -733,7 +1026,14 @@ For the consolidated plan to be considered "done":
    exist.
 7. Audit log entries are produced for every provider lifecycle and key
    lifecycle event.
-8. *(deferred)* The fidelity-pass test suite passes against YubiHSM 2
+8. **Token-aware key surface** (CR-0001): an operator can scope the keys
+   page to a `pkcs11` provider, see every on-token object — registered
+   or not — in one merged table, and import an unregistered row without
+   typing a CKA_ID anywhere. No destructive button lives on any list
+   view; deletion and (future) export are reached through
+   `/key_details.html`, which lists named dependents and the key's
+   audit trail.
+9. *(deferred)* The fidelity-pass test suite passes against YubiHSM 2
    simulator (Thales DPoD optional but documented). Held back until the
    simulator / trial is available — see Phase 7 in §13.
 
@@ -912,347 +1212,19 @@ order of creation; numbers are never reused. This is the same
 convention used in
 [ca-management-specs.md §17](ca-management-specs.md).
 
-### 18.1 CR-0001 — Token-aware key listing + key details page
+**Implemented (folded in).**
+- CR-0001 (token-aware key listing + key details page) — accepted
+  2026-05-12; folded into §2.1, §9.2, §10.2, §10.5, §13 (Phase 8),
+  and §14.
+- CR-0002 (key export semantics) — accepted 2026-05-12; folded into
+  §2.1, §9.2, §10.5, §11, and §13 (Phase 8).
+- CR-0003 (public-key recovery for orphaned on-token private keys)
+  — accepted 2026-05-12; folded into §2.1, §10.2, and §13 (Phase 8).
+- CR-0004 (mid-session token / slot-loss recovery) — accepted
+  2026-05-12; folded into §2.1 and §13 (Phase 8).
+- CR-0005 (structured `KeyMissingOnToken` surfacing at consumer
+  routes) — accepted 2026-05-12; folded into §2.1, §9.3, and §13
+  (Phase 8).
 
-**Status:** Accepted (2026-05-12). Implementation pending; entry stays
-here until the fold-in commit lands per the §18 preamble.
+**In flight.** *(none — all CRs shipped.)*
 
-**Motivation:** §2.2 — the keys surface today (the global
-`/kms_keys.html` page and the per-provider keys table on
-`/crypto_provider_details.html`) only shows rows that already exist
-in `KeyStorage`. For `pkcs11` providers this is half the picture:
-keys that live on the token but have never been registered in
-pyPKI are invisible. The only way to register one today is the
-"Import HSM key" modal, which requires the operator to remember
-and type the `CKA_ID` hex.
-
-At the same time, the list view exposes a per-row "Delete" button
-and reduces *usage* (which CAs / certificates / OCSP responders
-hold the key) to a single integer. There is no view that names
-the dependents, no place to land a future "Export" action (§15
-out-of-scope today, but the surface needs a home), and the
-destructive action is one mis-click away inline.
-
-This proposal closes both gaps with one design: a token-aware list
-view that merges KMS-registered keys with on-token objects, and a
-dedicated key details page that owns key-level actions.
-
-**Proposed behaviour:**
-
-#### Backend — on-token enumeration
-
-`CryptoBackend.list_keys()` already appears in the Protocol (§5)
-but `PKCS11Backend.list_keys()` is unimplemented. Implement it as
-a `C_FindObjectsInit` / `C_FindObjects` / `C_FindObjectsFinal`
-sweep over `CKO_PRIVATE_KEY` objects, returning per key:
-
-- raw `CKA_ID` bytes
-- `CKA_LABEL` (may be empty)
-- algorithm + parameter set (`RSA-3072`, `ECDSA-P-256`, …),
-  derived from `CKA_KEY_TYPE` + `CKA_MODULUS_BITS` /
-  `CKA_EC_PARAMS`. When the algorithm cannot be parametrised
-  against the conservative subset (§8.1), the field is set to
-  `null` and the row carries `unimportable_reason =
-  "unsupported_key_type"` (see API below).
-- public-key DER **only** when a paired `CKO_PUBLIC_KEY` object
-  exists on the token. The raw-attribute fallback
-  (`CKA_MODULUS` / `CKA_EC_POINT`) is intentionally deferred to
-  a follow-up — when the paired object is missing the row is
-  surfaced with `unimportable_reason = "public_key_unavailable"`
-  and no PEM.
-
-`SoftwareBackend.list_keys()` returns the empty set — software
-keys are 100% DB-backed, so `KeyStorage` is authoritative; there
-is no parallel store to enumerate.
-
-Enumeration runs only when the provider is `active` (§6). On an
-inactive `pkcs11` provider the API returns the DB rows alone plus
-an envelope flag (see API below).
-
-#### API — `GET /api/kms/keys` (merged listing)
-
-Behaviour depends on the query:
-
-- **`?provider_id=<software>`** — unchanged. Returns `KeyStorage`
-  rows for the provider; every row is `registered_and_present`.
-- **`?provider_id=<pkcs11>`, provider active** — returns the
-  *merged* set:
-  - every `KeyStorage` row for the provider, joined against the
-    backend's `list_keys()` by `hsm_token_id`;
-  - every on-token key with no matching `KeyStorage` row.
-- **`?provider_id=<pkcs11>`, provider inactive** — returns DB
-  rows only, with `token_enumeration.available = false`.
-- **No `provider_id`** — returns DB rows across all providers
-  (the existing behaviour). On-token-only entries are **never**
-  merged into the global view; the operator must scope to a
-  `pkcs11` provider to see unregistered on-token keys.
-
-Each row carries a `state` field:
-
-| `state` | Meaning |
-|---|---|
-| `registered_and_present` | In `KeyStorage`; for `pkcs11`, also found on the token. Normal case. |
-| `present_only` | On the token, no `KeyStorage` row. `id = null`, `usage = null`, `created_at = null`. Carries an additional `unimportable_reason ∈ {null, "unsupported_key_type", "public_key_unavailable"}`; when `null` the row is importable, otherwise it is visible but read-only. |
-| `registered_only` | `KeyStorage` row exists; for `pkcs11`, the matching `hsm_token_id` was *not* found on the token. Drift / error state — surfaced so the operator can investigate, detected on every list call (no separate "verify keys" probe in this proposal). |
-
-Response envelope additions:
-
-```json
-{
-  "keys": [ … ],
-  "token_enumeration": {
-    "available": true,
-    "reason":   null            // when available=false: "provider-inactive" | "backend-error"
-  }
-}
-```
-
-#### API — `GET /api/kms/keys/{key_id}` (details)
-
-Already listed in §9.2; expanded to return the dependent objects
-by name, not just a count:
-
-```json
-{
-  "id":            42,
-  "provider_id":   3,
-  "provider_label":"hsm-root",
-  "key_type":      "ECDSA-P-256",
-  "label":         "acme-root-2026",
-  "hsm_token_id":  "0a1b2c…",        // pkcs11 only
-  "public_key":    "-----BEGIN PUBLIC KEY-----\n…",
-  "state":         "registered_and_present",
-  "key_owned":     true,
-  "created_at":    "2026-04-12T08:30:00Z",
-  "usage": {
-    "count": 2,
-    "items": [
-      {"type": "ca",              "id": 5,  "name": "Acme Root CA"},
-      {"type": "certificate",     "id": 12, "name": "service.acme.ch", "ca_id": 5},
-      {"type": "ocsp_responder",  "id": 1,  "name": "Acme OCSP Responder"},
-      {"type": "signing_service", "id": 2,  "name": "Code-signing", "note": "reserved, §17"}
-    ]
-  }
-}
-```
-
-The `usage.items` array is the authoritative list of objects
-preventing deletion (the 409-rejection path checks the same
-relations).
-
-#### API — `POST /api/kms/keys/{key_id}/export`
-
-New endpoint, reserved. Returns **501 Not Implemented** with
-`{"description": "export action will be specified separately"}`.
-Scoped here only so the route exists and the UI can wire a
-"coming soon" button to a real endpoint id; the actual export
-semantics (formats, allowed key types, allowed providers,
-authorisation) are defined in a follow-up proposal.
-
-#### UI — keys list (`/kms_keys.html` and per-provider table)
-
-- Replace the per-row `Delete` button with a `Details` button
-  that navigates to `/key_details.html?id=<key_id>` (registered
-  rows) or opens the import flow pre-populated (unregistered
-  rows; see below).
-- Drop the global `Delete` bulk action. Deletion lives on the
-  details page.
-- New row state column rendering `state`:
-  - `registered_and_present` — no badge.
-  - `present_only`, `unimportable_reason = null` — "Not
-    registered" badge + an inline `Import` button. Clicking
-    opens a one-field prompt pre-filled with the row's
-    `CKA_LABEL`; the operator confirms (or renames) and the
-    handler POSTs `POST /api/kms/keys/import` with
-    `provider_id`, `hsm_token_id`, and the (possibly edited)
-    `label`. The prompt is inline — it does not leave the keys
-    list. On success the row rerenders as
-    `registered_and_present` with its new `id`.
-  - `present_only`, `unimportable_reason = "unsupported_key_type"`
-    — muted "Unsupported key type" badge. The row is visible so
-    the operator knows the slot has something there, but no
-    inline action is offered (no Import, no Details — the row
-    has no `id` to address).
-  - `present_only`, `unimportable_reason = "public_key_unavailable"`
-    — muted "Public key unavailable" badge. Same affordance as
-    above: visible, no action. The fallback that would recover
-    the public key from raw attributes is a follow-up; until it
-    lands, these rows stay read-only.
-  - `registered_only` — "Missing on token" badge in muted red.
-    No inline action (the operator opens the details page to
-    investigate or delete).
-- The existing "Import HSM key" button is kept as a fallback for
-  pasting a `CKA_ID` directly (e.g. for a token where
-  enumeration failed). The merged listing is the primary path.
-- When the scoped `pkcs11` provider is inactive, render a banner
-  "Token enumeration unavailable — activate the provider to see
-  unregistered keys" sourced from
-  `token_enumeration.reason = "provider-inactive"`.
-
-#### UI — new key details page (`/key_details.html?id=<key_id>`)
-
-- Header: label, key type, provider (with link), state badge,
-  `key_owned` indicator.
-- Public-key panel: PEM display + copy / download buttons.
-- For `pkcs11` rows: token attributes (`hsm_token_id` hex,
-  `CKA_LABEL` from the token if different from `label`).
-- Usage panel: a table of the dependents from `usage.items` with
-  per-row links to the dependent's detail page (CA, certificate,
-  OCSP responder, future signing service).
-- Audit-log panel: the key's lifecycle trail (`key_generate`,
-  `key_import`, `key_export` when implemented, `key_delete`)
-  filtered from `AuditLogs` by `resource_type='kms_key'` and
-  the key's id, newest first. Sourced from the existing audit
-  endpoint; no new event types are introduced by this proposal.
-- Action bar at the bottom:
-  - **Export** — calls `POST /api/kms/keys/{id}/export`; the
-    501 surfaces as a "Export is not yet implemented" toast.
-    Button stays visible so the affordance is discoverable.
-  - **Delete** — confirms with the dependents enumerated in the
-    usage panel; calls `DELETE /api/kms/keys/{id}`, which still
-    refuses with 409 when `usage.count > 0`. On success,
-    redirects to the keys list.
-- For `registered_only` rows (drift), the details page replaces
-  the usage panel with a "Key missing on token" notice and
-  surfaces only the Delete action — Export is hidden because
-  there is no private material to export.
-
-**Impact on existing sections:**
-
-- §2.2 — both pending bullets close.
-- §5 — `PKCS11Backend.list_keys()` becomes a required
-  implementation, not "future Phase 5 work" in the docstring at
-  [base.py:12](../pypki/backends/base.py#L12).
-- §9.2 — `GET /api/kms/keys` response gains `state` per row and a
-  `token_enumeration` envelope; `GET /api/kms/keys/{id}` response
-  shape grows to include the named `usage.items`;
-  `POST /api/kms/keys/{id}/export` (reserved, 501) is added to the
-  route table.
-- §10.2 — keys page loses the inline `Delete` button; gains the
-  `Details` button, the `state` badge column, the per-row
-  `Import` action for `present_only` rows.
-- §10 — add §10.5 *Key details page* describing the new page.
-- §11 — `key_export` event reserved (no rows written today;
-  endpoint returns 501 before any audit).
-- §14 — acceptance criteria gain "operator can see and import an
-  on-token key without typing the CKA_ID" and "no destructive key
-  action lives on a list view".
-
-**Action plan:**
-
-Each step ends with passing tests.
-
-1. **Backend — `PKCS11Backend.list_keys()`.** Implement the
-   `CKO_PRIVATE_KEY` sweep + public-key resolution.
-   Add a pytest fixture that generates two keys on the SoftHSM
-   token outside pyPKI's import path and asserts both come back
-   from `list_keys()` with usable algorithm metadata and PEM
-   public keys. `SoftwareBackend.list_keys()` returns `[]`
-   explicitly.
-2. **API — merged listing for pkcs11 providers.** Extend
-   `list_kms_keys` in
-   [api_adapters.py:735](../web/services/api_adapters.py#L735)
-   to call the backend's `list_keys()` when scoped to a `pkcs11`
-   provider, merge by `hsm_token_id`, attach the `state` per
-   row. Add the `token_enumeration` envelope. Inactive-provider
-   case returns DB rows only with `available=false`. Pytest
-   parametrised over backends; the SoftHSM fixture verifies all
-   three `state` values surface (generate one via pyPKI, one
-   directly on the token, then delete the on-token copy of a
-   third pre-registered key to produce `registered_only`).
-3. **API — details endpoint.** Implement
-   `GET /api/kms/keys/{key_id}` returning the expanded shape with
-   `usage.items`. The same query that today produces the `usage`
-   integer is widened to fetch the dependent rows' names. Pytest:
-   create a CA + a certificate + an OCSP responder bound to one
-   key, hit the details endpoint, assert all three appear.
-4. **API — export placeholder.** Wire
-   `POST /api/kms/keys/{key_id}/export` to a handler that
-   returns 501 with the documented description. One test
-   asserting the status and body.
-5. **UI — keys list.** Modify
-   [kms_keys.html](../web/templates/kms_keys.html) to:
-   render the `state` column with the three badges; replace the
-   per-row Delete with a Details link; for `present_only` rows,
-   render an inline Import button that POSTs the prefilled
-   `import` request. Inactive-provider banner. Visual regression
-   test (Playwright or similar) on the three states.
-6. **UI — key details page.** New
-   `web/templates/key_details.html` plus a route in
-   `web/routes/main_routes.py` (`GET /key_details.html`) that
-   renders the page. Implement Export (501 toast) and Delete
-   (confirm + DELETE) actions. Reuse the existing
-   confirm-with-dependents component from
-   `crypto_provider_details.html` where applicable.
-7. **UI — per-provider keys table.** Apply the same row
-   changes to the keys table embedded in
-   [crypto_provider_details.html](../web/templates/crypto_provider_details.html).
-   Verify the inactive-provider banner is consistent.
-8. **Docs cleanup.** Fold the canonical bits of this proposal
-   into §5, §9.2, §10.2, §10 (new §10.5), §11, §13, §14; remove
-   §18.1 entry; update [PROGRESS.md §3](PROGRESS.md) and
-   [roadmap.md §3](roadmap.md) to reference the closed work.
-
-**Resolved decisions** (settled 2026-05-12, folded into the
-proposed behaviour above):
-
-1. **Global keys list — DB-only.** When no `provider_id` is
-   supplied, `present_only` rows are not merged into the
-   response. Operators scope to a `pkcs11` provider to see
-   unregistered on-token keys. Keeps the global view bounded
-   and paginatable.
-2. **Drift — detect on list only.** `registered_only` is
-   surfaced on every list call against a `pkcs11` provider by
-   comparing `KeyStorage.hsm_token_id` to the backend's
-   `list_keys()` output. No separate "verify keys" probe ships
-   in this proposal; if drift becomes operationally noisy, a
-   follow-up adds an explicit check button.
-3. **Unsupported key types — visible, muted, no action.** Rows
-   whose `CKA_KEY_TYPE` does not map to the §8.1 conservative
-   subset render with a "Unsupported key type" badge and no
-   Import / Details affordance. The operator sees that the slot
-   has something there; pyPKI does not pretend it can manage it.
-4. **Paired-object public keys only — no raw-attribute
-   fallback.** Step 1 of the action plan reads public-key DER
-   exclusively from a paired `CKO_PUBLIC_KEY` object on the
-   token. Private keys whose paired object is missing surface
-   as `present_only` with `unimportable_reason =
-   "public_key_unavailable"`; recovering them via raw attribute
-   reads is a follow-up.
-5. **Per-row Import — one-field prompt, pre-filled from
-   `CKA_LABEL`.** Clicking Import on a `present_only` row opens
-   an inline prompt with the row's `CKA_LABEL` already filled
-   in; the operator confirms or renames and the request POSTs
-   without leaving the list view.
-6. **Audit-log trail on the details page — yes.** The details
-   page renders the key's `AuditLogs` history below the usage
-   panel. No new event types are introduced — the existing
-   `key_generate`, `key_import`, and `key_delete` events
-   already cover the trail; the reserved `key_export` event
-   joins it when the export action lands.
-
-**Acceptance criteria** (in addition to §14):
-
-- An operator can land on a `pkcs11` provider's details page,
-  see every key on the slot in one table (including those not
-  in pyPKI), and click Import on an unregistered row without
-  typing a `CKA_ID` anywhere.
-- The keys list in
-  [kms_keys.html](../web/templates/kms_keys.html) and the keys
-  table embedded in
-  [crypto_provider_details.html](../web/templates/crypto_provider_details.html)
-  surface no destructive button inline. Destructive actions
-  live on the details page only.
-- The details page lists every dependent (CA, certificate, OCSP
-  responder, signing service when §17 lands) by name. The set is
-  identical to the relations that drive the
-  `DELETE /api/kms/keys/{id}` 409 path.
-- The Export button is visible on the details page for
-  registered keys and returns the documented 501 with a
-  user-visible "not yet implemented" toast. No partial export
-  flow exists.
-- Provider deactivation does not break the list view; rows
-  registered in `KeyStorage` remain visible with the documented
-  envelope flag, only on-token-only rows disappear.
-- The parametrised test suite (Phase 0 §13) covers both backends
-  and exercises all three `state` values on the `pkcs11` side.

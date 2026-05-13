@@ -48,22 +48,26 @@
     <i class="bi bi-key me-1"></i>Manage keys
   </a>
 </div>
+<div class="alert alert-warning d-none mb-3" id="tokenBanner"></div>
+
 <div class="card shadow-sm">
   <div class="card-body p-0">
     <table class="table mb-0" id="keysTable">
       <thead class="table-light">
         <tr>
           <th>Id</th>
+          <th>State</th>
           <th>Type</th>
           <th>Label</th>
           <th>Storage</th>
           <th>HSM CKA_ID</th>
           <th>Usage</th>
           <th>Created</th>
+          <th class="text-end">Actions</th>
         </tr>
       </thead>
       <tbody id="keysBody">
-        <tr><td colspan="7" class="text-muted small p-3">Loading…</td></tr>
+        <tr><td colspan="9" class="text-muted small p-3">Loading…</td></tr>
       </tbody>
     </table>
   </div>
@@ -71,6 +75,36 @@
 {% endblock %}
 
 {% block modals %}
+<!-- Inline import prompt for present_only rows (CR-0001 decision 5). -->
+<div class="modal fade" id="inlineImportModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Import on-token key</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small mb-2">
+          Registering CKA_ID <code id="inlineImpCkaId"></code> on this provider.
+          The on-token objects are not modified.
+        </p>
+        <div class="mb-2">
+          <label class="form-label">Label</label>
+          <input class="form-control" id="inlineImpLabel">
+          <div class="form-text">Pre-filled from <code>CKA_LABEL</code>; edit to override inside pyPKI.</div>
+        </div>
+        <div class="alert alert-danger d-none mb-0" id="inlineImpError"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="inlineImpBtn">
+          <i class="bi bi-check-circle me-1"></i>Import
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="position-fixed bottom-0 end-0 p-3" style="z-index:9999">
   <div id="toast" class="toast align-items-center text-bg-success border-0" role="alert">
     <div class="d-flex">
@@ -119,19 +153,52 @@
       return;
     }
     try {
-      const [p, status, keys] = await Promise.all([
+      const [p, status, body] = await Promise.all([
         fetchJson(`${apiBase}/crypto-providers/${_providerId}`),
         fetchJson(`${apiBase}/crypto-providers/${_providerId}/status`).catch(() => ({})),
-        fetchJson(`${apiBase}/kms/keys?provider_id=${_providerId}`).catch(() => []),
+        fetchJson(`${apiBase}/kms/keys?provider_id=${_providerId}`).catch(() => ({ keys: [], token_enumeration: {} })),
       ]);
       renderHeader(p, status);
       renderInfo(p);
-      renderKeys(keys);
+      renderTokenBanner(body.token_enumeration || {});
+      renderKeys(body.keys || []);
     } catch (e) {
       document.getElementById('provLabelHeader').textContent = 'Provider not found';
       document.getElementById('keysBody').innerHTML =
-        `<tr><td colspan="7" class="text-danger small p-3">Failed to load: ${e.message}</td></tr>`;
+        `<tr><td colspan="9" class="text-danger small p-3">Failed to load: ${e.message}</td></tr>`;
     }
+  }
+
+  function renderTokenBanner(env) {
+    const el = document.getElementById('tokenBanner');
+    if (env.available === true || !env.reason || env.reason === 'no_provider_scope' || env.reason === 'not_applicable') {
+      el.classList.add('d-none');
+      el.innerHTML = '';
+      return;
+    }
+    let msg, cls = 'alert-warning';
+    switch (env.reason) {
+      case 'slot-missing':
+        cls = 'alert-danger';
+        msg = 'The configured slot is no longer present on the PKCS#11 module — the token may have been deleted or the hardware removed.';
+        break;
+      case 'auth-failed':
+        cls = 'alert-danger';
+        msg = 'The provider\'s PIN was rejected by the token. The token may have been reinitialised with a new PIN, or the PIN is locked.';
+        break;
+      case 'module-error':
+        cls = 'alert-danger';
+        msg = 'The PKCS#11 module could not be loaded. Check the provider\'s module_path and the deployment environment.';
+        break;
+      case 'provider-inactive':
+        msg = 'Token enumeration unavailable — activate the provider to see unregistered on-token keys.';
+        break;
+      default:
+        msg = `Token enumeration failed (${env.reason}); showing registered keys only.`;
+    }
+    el.className = `alert ${cls} mb-3`;
+    el.innerHTML = `<i class="bi bi-exclamation-triangle me-1"></i>${msg}`;
+    el.classList.remove('d-none');
   }
 
   function renderHeader(p, status) {
@@ -188,32 +255,118 @@
     set('provCreatedAt',       (p.created_at || '').slice(0, 19).replace('T', ' '));
   }
 
+  function _stateCell(k) {
+    if (k.state === 'registered_only') {
+      return `<span class="badge bg-danger-subtle text-danger border border-danger-subtle"
+                title="Registered in pyPKI but missing on the token">Missing on token</span>`;
+    }
+    if (k.state === 'present_only') {
+      if (k.unimportable_reason === 'unsupported_key_type') {
+        return `<span class="badge bg-secondary-subtle text-secondary border"
+                  title="CKA_KEY_TYPE outside the §8.1 conservative subset">Unsupported key type</span>`;
+      }
+      if (k.unimportable_reason === 'public_key_unavailable') {
+        return `<span class="badge bg-secondary-subtle text-secondary border"
+                  title="Paired CKO_PUBLIC_KEY object missing on the token">Public key unavailable</span>`;
+      }
+      if (k.unimportable_reason === 'duplicate_cka_id') {
+        return `<span class="badge bg-secondary-subtle text-secondary border"
+                  title="Another on-token key already uses this CKA_ID; pyPKI addresses keys by CKA_ID and cannot disambiguate">Duplicate CKA_ID</span>`;
+      }
+      return `<span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle"
+                title="On token; not registered in pyPKI">Not registered</span>`;
+    }
+    return '<span class="text-muted small">—</span>';
+  }
+
+  function _actionsCell(k) {
+    if (k.state === 'present_only') {
+      if (k.unimportable_reason) return '<span class="text-muted small">—</span>';
+      if (!window._isAdmin) return '';
+      const labelEsc = (k.label || '').replace(/'/g, "\\'");
+      const cka = k.hsm_token_id || '';
+      return `<button class="btn btn-outline-primary btn-sm"
+                onclick="openInlineImport('${cka}', '${labelEsc}')"
+                title="Import this on-token key">
+                <i class="bi bi-box-arrow-in-down me-1"></i>Import
+              </button>`;
+    }
+    if (k.id != null) {
+      return `<a class="btn btn-outline-secondary btn-sm"
+                href="/key_details.html?id=${k.id}" title="Details">
+                <i class="bi bi-info-circle me-1"></i>Details
+              </a>`;
+    }
+    return '<span class="text-muted small">—</span>';
+  }
+
   function renderKeys(keys) {
     const tbody = document.getElementById('keysBody');
     if (!keys.length) {
-      tbody.innerHTML = `<tr><td colspan="7" class="text-muted small p-3">No keys on this provider yet.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="text-muted small p-3">No keys on this provider yet.</td></tr>`;
       return;
     }
     tbody.innerHTML = keys.map(k => {
-      const usage = (k.usage && k.usage.total) || 0;
-      const usageBadge = usage > 0
-        ? `<span class="badge bg-warning text-dark" title="In use by ${k.usage.cas} CA / ${k.usage.ocsp_responders} OCSP / ${k.usage.certificates} cert">${usage} ref(s)</span>`
-        : '<span class="text-muted small">unused</span>';
+      const usage = (k.usage && k.usage.count) || 0;
+      const usageBadge = (k.usage == null)
+        ? '<span class="text-muted small">—</span>'
+        : (usage > 0
+            ? `<span class="badge bg-warning text-dark">${usage} ref(s)</span>`
+            : '<span class="text-muted small">unused</span>');
       const cka = k.hsm_token_id ? `<code class="small">${k.hsm_token_id}</code>` : '<span class="text-muted">—</span>';
       const created = (k.created_at || '').slice(0, 19).replace('T', ' ');
       const labelStr = k.label || '<span class="text-muted">—</span>';
+      const idCell = (k.id != null) ? k.id : '<span class="text-muted">—</span>';
       return `
         <tr>
-          <td>${k.id}</td>
+          <td>${idCell}</td>
+          <td>${_stateCell(k)}</td>
           <td><code class="small">${k.key_type || ''}</code></td>
           <td>${labelStr}</td>
-          <td><span class="badge bg-light text-dark border">${k.storage_type}</span></td>
+          <td><span class="badge bg-light text-dark border">${k.storage_type || '—'}</span></td>
           <td>${cka}</td>
           <td>${usageBadge}</td>
           <td class="small text-muted">${created}</td>
+          <td class="text-end">${_actionsCell(k)}</td>
         </tr>`;
     }).join('');
   }
+
+  // ── Inline import from a present_only row (CR-0001 decision 5) ───────────
+  let _inlineImpCka = null;
+  function openInlineImport(ckaId, ckaLabel) {
+    _inlineImpCka = ckaId;
+    document.getElementById('inlineImpCkaId').textContent = ckaId;
+    document.getElementById('inlineImpLabel').value = ckaLabel || '';
+    document.getElementById('inlineImpError').classList.add('d-none');
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('inlineImportModal')).show();
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('inlineImpBtn').onclick = async () => {
+      if (!_inlineImpCka) return;
+      const label = document.getElementById('inlineImpLabel').value.trim() || null;
+      const errBox = document.getElementById('inlineImpError');
+      errBox.classList.add('d-none');
+      try {
+        await fetchJson(`${apiBase}/kms/keys/import`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider_id: _providerId,
+            hsm_token_id: _inlineImpCka,
+            label,
+          }),
+        });
+        bootstrap.Modal.getInstance(document.getElementById('inlineImportModal')).hide();
+        showToast(`Imported CKA_ID <code>${_inlineImpCka}</code>.`);
+        load();
+      } catch (e) {
+        errBox.textContent = e.message;
+        errBox.classList.remove('d-none');
+      }
+    };
+  });
 
   async function activate() {
     try {

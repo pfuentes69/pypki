@@ -220,6 +220,13 @@ class SoftwareBackend:
         Provided so the backend contract is uniform with PKCS11Backend."""
         return
 
+    def list_keys(self) -> list[dict]:
+        """Software keys live exclusively in ``KeyStorage``; there is no
+        parallel store to enumerate. Returns ``[]`` so the merged-listing
+        adapter (kms-specs.md §18.1) can call ``list_keys`` uniformly on
+        either backend and skip the merge step for software providers."""
+        return []
+
 
 def _looks_like_pem(blob) -> bool:
     """Return True if the value looks like a *plaintext* PEM-armoured

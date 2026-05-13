@@ -4,18 +4,90 @@ import re
 import shutil
 from datetime import datetime
 
-from flask import Blueprint, jsonify, request, abort, Response, send_from_directory, g
+from flask import Blueprint, jsonify, request, abort, Response, send_from_directory, g, make_response
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import pkcs7
 from web.services import api_adapters
 
 from pypki import logger
+from pypki.backends.base import (
+    AuthenticationFailed, BackendError, BackendNotActive,
+    KeyMissingOnToken, ModuleLoadFailed, SlotNotFound,
+)
 
 # Serve CRL from this local folder
 #CRL_FOLDER = "/Users/pedro/Development/Python/pypki/out/crl"
 CRL_FOLDER = "../out/crl"
 
 bp = Blueprint('main', __name__)
+
+
+# CR-0005: structured error surfacing for backend failures. The
+# ``handle_backend_error`` function below is registered at the Flask
+# *app* level in ``create_app`` so the same JSON 503 shape covers
+# every blueprint (main / ocsp / est) without duplicating the body
+# logic. Routes no longer need per-call try/except blocks for
+# ``BackendError`` — the typed exception simply propagates.
+def _build_backend_error_body(e: BackendError) -> tuple[dict, str]:
+    if isinstance(e, KeyMissingOnToken):
+        code = "key_missing_on_token"
+        description = (
+            "Key is missing on the HSM — the bound signer cannot sign "
+            "until the on-token material is restored or the pyPKI key "
+            "row is deleted."
+        )
+    elif isinstance(e, SlotNotFound):
+        code = "slot-missing"
+        description = (
+            "The configured slot is no longer present on the PKCS#11 "
+            "module — the token may have been deleted or the hardware "
+            "removed. Reconfigure the provider against an existing slot."
+        )
+    elif isinstance(e, AuthenticationFailed):
+        code = "auth-failed"
+        description = (
+            "The provider's PIN was rejected by the token. The token "
+            "may have been reinitialised with a new PIN, or the PIN is "
+            "locked."
+        )
+    elif isinstance(e, ModuleLoadFailed):
+        code = "module-error"
+        description = (
+            "The PKCS#11 shared library could not be loaded. Check the "
+            "provider's module_path and the deployment environment."
+        )
+    elif isinstance(e, BackendNotActive):
+        code = "provider-inactive"
+        description = (
+            "The bound cryptographic provider is not active — activate "
+            "it (or fix its configuration) before retrying."
+        )
+    else:
+        code = "backend-error"
+        description = str(e) or "Backend operation failed."
+
+    body = {
+        "description": description,
+        "code": code,
+        "key_id": getattr(e, "key_id", None),
+        "provider_id": getattr(e, "provider_id", None),
+    }
+    if body["key_id"] is not None:
+        body["recovery"] = f"/key_details.html?id={body['key_id']}"
+    return body, code
+
+
+def handle_backend_error(e: BackendError):
+    """Application-level error handler for :class:`BackendError` and
+    its subclasses. Registered in ``web.create_app`` so every
+    blueprint surfaces the same structured 503 envelope (CR-0005)."""
+    body, code = _build_backend_error_body(e)
+    logger.warning(
+        f"Backend error surfaced from route: code={code} "
+        f"key_id={body['key_id']} provider_id={body['provider_id']} "
+        f"detail={str(e)!r}"
+    )
+    return jsonify(body), 503
 
 
 @bp.before_request
@@ -488,6 +560,11 @@ def issue_certificate_from_csr():
 
         return jsonify(response_body), 201
 
+    except BackendError:
+        # CR-0005: let typed backend failures reach the blueprint error
+        # handler so the caller gets the structured 503 with key_id /
+        # provider_id / recovery URL instead of an opaque 500.
+        raise
     except Exception as e:
         logger.error(f"Error issuing certificate: {e}")
         abort(500, description="Internal Server Error")
@@ -559,6 +636,10 @@ def issue_certificate_pkcs12():
     except (ValueError, TypeError) as e:
         logger.error(f"Error issuing PKCS12 (validation/build): {e}", exc_info=True)
         abort(400, description=str(e))
+    except BackendError:
+        # CR-0005: propagate to the blueprint handler for the structured
+        # 503 surface (drifted key, slot gone, etc.).
+        raise
     except Exception as e:
         logger.error(f"Error issuing PKCS12: {e}", exc_info=True)
         abort(500, description="Certificate generation failed")
@@ -981,6 +1062,52 @@ def import_kms_key():
     return jsonify(api_adapters.convert_to_serializable(result)), 201
 
 
+@bp.route('/kms/keys/<int:key_id>/export', methods=['POST'])
+def export_kms_key(key_id):
+    """
+    Export an owned software key as a passphrase-encrypted PKCS#8 PEM
+    (kms-specs.md §18.1 CR-0002). The response body is the raw PEM
+    with ``Content-Type: application/x-pem-file`` and a
+    ``Content-Disposition`` header so the browser's download helper
+    can save it without any client-side parsing.
+
+    HSM-backed and imported-software rows are refused with 409 — the
+    UI hides the Export button for those classes, but the server
+    enforces independently so direct API callers cannot side-step the
+    policy. Role gate is ``superadmin`` only; ``admin`` cannot
+    extract plaintext private material.
+    """
+    logger.info(f"API - POST Export KMS Key {key_id}")
+    err = _require_role('superadmin')
+    if err: return err
+    data = request.get_json(silent=True) or {}
+    passphrase = data.get('passphrase')
+    if not passphrase or not isinstance(passphrase, str):
+        abort(400, description="passphrase (string, ≥ 12 chars) is required")
+    if len(passphrase) < 12:
+        abort(400, description="passphrase must be at least 12 characters")
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+    try:
+        pem = api_adapters.export_kms_key(
+            int(key_id), passphrase, user_id=user_id,
+        )
+    except KeyError:
+        abort(404, description="KMS key not found")
+    except PermissionError as e:
+        abort(409, description=str(e))
+    except ValueError as e:
+        abort(400, description=str(e))
+    except RuntimeError as e:
+        abort(503, description=str(e))
+
+    response = make_response(pem)
+    response.headers['Content-Type'] = 'application/x-pem-file'
+    response.headers['Content-Disposition'] = (
+        f'attachment; filename="key-{key_id}.pem"'
+    )
+    return response
+
+
 @bp.route('/kms/keys/<int:key_id>', methods=['DELETE'])
 def delete_kms_key(key_id):
     logger.info(f"API - DELETE KMS Key {key_id}")
@@ -1204,7 +1331,14 @@ def list_audit_logs():
     if err: return err
     page     = request.args.get('page', default=1, type=int)
     per_page = request.args.get('per_page', default=25, type=int)
-    total, rows = api_adapters.get_audit_logs(page, per_page)
+    # Optional filters used by the key details page (kms-specs.md §18.1)
+    # and any other resource-scoped trail view that may follow.
+    resource_type = request.args.get('resource_type')
+    resource_id   = request.args.get('resource_id', type=int)
+    total, rows = api_adapters.get_audit_logs(
+        page, per_page,
+        resource_type=resource_type, resource_id=resource_id,
+    )
     return jsonify(api_adapters.convert_to_serializable({
         "total": total,
         "page": page,

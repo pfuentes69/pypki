@@ -6,6 +6,7 @@ from werkzeug.security import check_password_hash
 from web.services import api_adapters
 
 from pypki import logger
+from pypki.backends.base import BackendError
 
 bp = Blueprint('est', __name__)
 
@@ -107,6 +108,13 @@ def simple_enroll(label=None):
         return response
 
 
+    except BackendError:
+        # CR-0005 (decision 3): EST enrolment surfaces the same JSON
+        # 503 envelope as the other consumer routes via the app-level
+        # error handler. A future EST service spec will define the
+        # RFC-8951 mapping; until then the structured 503 beats a
+        # generic 400.
+        raise
     except Exception as e:
         return Response(f"Error: {str(e)}", status=400)
 
@@ -148,6 +156,13 @@ def simple_enroll_pem(label=None):
         response.headers['Content-Disposition'] = 'attachment; filename=certificate.pem'
         return response
 
+    except BackendError:
+        # CR-0005 (decision 3): EST enrolment surfaces the same JSON
+        # 503 envelope as the other consumer routes via the app-level
+        # error handler. A future EST service spec will define the
+        # RFC-8951 mapping; until then the structured 503 beats a
+        # generic 400.
+        raise
     except Exception as e:
         return Response(f"Error: {str(e)}", status=400)
     

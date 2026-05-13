@@ -30,7 +30,139 @@ from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
 from ..log import logger
 from ..pkcs11_helper import PKCS11Helper
-from .base import BackendNotActive, KeyHandle
+from .base import (
+    AuthenticationFailed,
+    BackendNotActive,
+    KeyHandle,
+    KeyMissingOnToken,
+    ModuleLoadFailed,
+    SlotNotFound,
+)
+
+
+# PKCS#11 CKR_* return codes that map to login-time authentication
+# failures (CKR_PIN_INCORRECT, CKR_PIN_LOCKED, CKR_USER_PIN_NOT_INITIALIZED,
+# CKR_USER_TYPE_INVALID). The integer values are stable across PKCS#11
+# versions; held here so the classification in :meth:`PKCS11Backend.open`
+# is grep-able.
+_AUTH_FAILED_CKRS = frozenset({
+    int(PyKCS11.CKR_PIN_INCORRECT),
+    int(PyKCS11.CKR_PIN_LOCKED),
+    int(PyKCS11.CKR_PIN_EXPIRED),
+    int(PyKCS11.CKR_USER_PIN_NOT_INITIALIZED),
+    int(PyKCS11.CKR_USER_TYPE_INVALID),
+})
+
+# CKR_* codes that mean the slot or token is gone (vs a generic
+# session-handle error that the existing reconnect path covers).
+_SLOT_MISSING_CKRS = frozenset({
+    int(PyKCS11.CKR_SLOT_ID_INVALID),
+    int(PyKCS11.CKR_TOKEN_NOT_PRESENT),
+    int(PyKCS11.CKR_TOKEN_NOT_RECOGNIZED),
+})
+
+# CKR_* codes that mid-session ``sign_digest`` should treat as
+# "session probably stale, try one reconnect" (CR-0004). The set is
+# wider than the original Phase 3 pair (`CKR_SESSION_HANDLE_INVALID`
+# + `CKR_DEVICE_REMOVED`) because real-world out-of-band mutations
+# of the token (`softhsm2-util --delete-token`, USB unplug, token
+# reinitialisation) surface as a different code depending on the
+# vendor / state. If the reconnect itself fails, its own classified
+# exception propagates and the KMS evicts the cached backend.
+_RECONNECTABLE_CKRS = frozenset({
+    int(PyKCS11.CKR_SESSION_HANDLE_INVALID),
+    int(PyKCS11.CKR_SESSION_CLOSED),
+    int(PyKCS11.CKR_DEVICE_REMOVED),
+    int(PyKCS11.CKR_DEVICE_ERROR),
+    int(PyKCS11.CKR_TOKEN_NOT_PRESENT),
+    int(PyKCS11.CKR_TOKEN_NOT_RECOGNIZED),
+})
+
+
+def _open_session_classified(helper, pin: str, slot_label: str, provider: dict) -> None:
+    """Open the PKCS#11 session for ``provider`` and classify any
+    failure into the matching :class:`BackendNotActive` subclass.
+
+    Shared between :meth:`PKCS11Backend.open` (activation) and
+    :meth:`PKCS11Backend._reconnect` (mid-session recovery) so the
+    UI sees the same `slot-missing` / `auth-failed` / `module-error`
+    reason regardless of *when* the failure shows up.
+
+    Each typed exception carries ``provider_id`` (CR-0005) so the
+    Flask error handler can render a structured 503 body without
+    re-deriving the context.
+    """
+    pid = provider.get("id")
+    plabel = provider.get("label")
+    try:
+        helper.open_session(pin, slot_label=slot_label)
+    except PyKCS11.PyKCS11Error as e:
+        ckr = int(getattr(e, "value", -1))
+        if ckr in _AUTH_FAILED_CKRS:
+            raise AuthenticationFailed(
+                f"PKCS11Backend: authentication failed for provider "
+                f"id={pid} ('{plabel}') — PIN was rejected ({e}). "
+                f"Common cause: token was reinitialised with a new PIN.",
+                provider_id=pid,
+            ) from e
+        if ckr in _SLOT_MISSING_CKRS:
+            raise SlotNotFound(
+                f"PKCS11Backend: slot / token unavailable for provider "
+                f"id={pid} ('{plabel}') — {e}. The slot may have been "
+                f"deleted or the token removed.",
+                provider_id=pid,
+            ) from e
+        raise BackendNotActive(
+            f"PKCS11Backend: failed to open session for provider "
+            f"id={pid} ('{plabel}'): {e}",
+            provider_id=pid,
+        ) from e
+    except RuntimeError as e:
+        msg = str(e)
+        if "no token with label" in msg or "No PKCS#11 tokens found" in msg:
+            raise SlotNotFound(
+                f"PKCS11Backend: slot_label={slot_label!r} not present on "
+                f"the module for provider id={pid} ('{plabel}'): {e}",
+                provider_id=pid,
+            ) from e
+        raise BackendNotActive(
+            f"PKCS11Backend: failed to open session for provider "
+            f"id={pid} ('{plabel}'): {e}",
+            provider_id=pid,
+        ) from e
+    except Exception as e:
+        raise BackendNotActive(
+            f"PKCS11Backend: failed to open session for provider "
+            f"id={pid} ('{plabel}'): {e}",
+            provider_id=pid,
+        ) from e
+
+
+def _classify_pkcs11_error_midsession(e, provider: dict):
+    """Map a mid-session ``PyKCS11Error`` to a typed
+    :class:`BackendNotActive` subclass without re-running activation.
+    Used by ``list_keys`` / ``find_key_by_id`` where CR-0004 decision
+    2 says "no silent retry" — the caller wants the typed reason
+    immediately. ``provider_id`` is attached on the throw site so
+    the Flask error handler can name the failing provider."""
+    if not isinstance(e, PyKCS11.PyKCS11Error):
+        return None
+    ckr = int(getattr(e, "value", -1))
+    pid = provider.get("id") if provider else None
+    plabel = provider.get("label") if provider else None
+    if ckr in _AUTH_FAILED_CKRS:
+        return AuthenticationFailed(
+            f"PKCS11Backend: authentication failed mid-session on "
+            f"provider id={pid} ('{plabel}'): {e}",
+            provider_id=pid,
+        )
+    if ckr in _SLOT_MISSING_CKRS:
+        return SlotNotFound(
+            f"PKCS11Backend: slot / token unavailable mid-session on "
+            f"provider id={pid} ('{plabel}'): {e}",
+            provider_id=pid,
+        )
+    return None
 
 
 # Conservative PKCS#11 subset (kms-specs.md §8.1).
@@ -107,12 +239,22 @@ class PKCS11Backend:
             slot_label = provider.get("slot_label")
             try:
                 helper = PKCS11Helper(lib_path=module_path) if module_path else PKCS11Helper()
-                helper.open_session(pin, slot_label=slot_label)
             except Exception as e:
-                raise BackendNotActive(
-                    f"PKCS11Backend: failed to open session for provider "
-                    f"id={provider.get('id')} ('{provider.get('label')}'): {e}"
+                # Module load failures originate from ``PyKCS11Lib.load``
+                # (missing .so, bad ABI, etc.) — diagnose separately from
+                # token-state failures so the operator looks at the
+                # deployment config, not the token.
+                raise ModuleLoadFailed(
+                    f"PKCS11Backend: failed to load PKCS#11 module "
+                    f"{module_path!r} for provider id={provider.get('id')} "
+                    f"('{provider.get('label')}'): {e}",
+                    provider_id=provider.get("id"),
                 ) from e
+
+            # Session-open + classification shared with the mid-session
+            # reconnect path (CR-0004) so activation-time and mid-session
+            # failures surface as the same typed exception.
+            _open_session_classified(helper, pin, slot_label, provider)
 
             self._helper = helper
             self._provider = provider
@@ -161,7 +303,14 @@ class PKCS11Backend:
                     f"has no hsm_token_id"
                 )
             cka_id_bytes = _validate_cka_id_hex(cka_id, key_id=record.get("id"))
-            token_object = self._find_private_by_id(cka_id_bytes)
+            try:
+                token_object = self._find_private_by_id(cka_id_bytes)
+            except KeyMissingOnToken as e:
+                # Enrich with the KeyStorage id at the layer that knows
+                # it (CR-0005) so the Flask error handler can render the
+                # recovery URL pointing at /key_details.html?id=…
+                e.key_id = record.get("id")
+                raise
             session = self._helper.get_session()
             cka_key_type = session.getAttributeValue(
                 token_object, [PyKCS11.CKA_KEY_TYPE]
@@ -256,18 +405,156 @@ class PKCS11Backend:
 
     def _find_private_by_id(self, cka_id_bytes: bytes):
         """Locate the private-key object on the open session by raw CKA_ID
-        bytes. Raises RuntimeError if not found. Caller must hold ``self._lock``."""
+        bytes. Raises :class:`KeyMissingOnToken` if not found — distinct
+        from session / login failures so callers can render a clean
+        "key has been deleted from the HSM" message rather than a bare
+        500. Caller must hold ``self._lock``."""
         session = self._helper.get_session()
         priv_keys = session.findObjects([
             (PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY),
             (PyKCS11.CKA_ID, cka_id_bytes),
         ])
         if not priv_keys:
-            raise RuntimeError(
+            raise KeyMissingOnToken(
                 f"PKCS11Backend: private key with CKA_ID={cka_id_bytes.hex()} "
-                f"not found on provider id={self._provider.get('id')}"
+                f"not found on provider id={self._provider.get('id')}",
+                provider_id=self._provider.get("id"),
             )
         return priv_keys[0]
+
+    def list_keys(self) -> list[dict]:
+        """
+        Enumerate every ``CKO_PRIVATE_KEY`` object on the open session and
+        return one dict per key with the metadata needed to render a row in
+        the "token-aware" key listing (kms-specs.md §18.1).
+
+        Each entry has::
+
+            {
+                "hsm_token_id":       <hex CKA_ID>,
+                "cka_label":          <CKA_LABEL or None>,
+                "key_type":           <"RSA-3072" | "ECDSA-P-256" | … | None>,
+                "public_key":         <PEM SubjectPublicKeyInfo or None>,
+                "unimportable_reason": None
+                                      | "unsupported_key_type"
+                                      | "public_key_unavailable",
+            }
+
+        Per CR-0001 decision 4, the public-key DER is read **only** from the
+        paired ``CKO_PUBLIC_KEY`` object (matched by ``CKA_ID``); if it is
+        missing or unreadable, the row surfaces with
+        ``unimportable_reason="public_key_unavailable"`` and ``public_key=None``.
+        Per decision 3, keys whose ``CKA_KEY_TYPE`` does not map to the §8.1
+        conservative subset surface with
+        ``unimportable_reason="unsupported_key_type"`` and ``key_type=None``.
+        Such rows are visible so the operator knows the slot has objects on
+        it, but pyPKI offers no action on them.
+        """
+        with self._lock:
+            if self._helper is None:
+                raise BackendNotActive("PKCS11Backend.list_keys: backend is not open")
+            session = self._helper.get_session()
+
+            # CR-0004 decision 2: diagnostic operations do not retry.
+            # If the session has gone stale between activation and this
+            # call (token deleted, slot reinitialised), surface the
+            # typed exception immediately so the adapter can map it to
+            # the right ``token_enumeration.reason``.
+            try:
+                priv_objs = session.findObjects([
+                    (PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY),
+                ])
+            except PyKCS11.PyKCS11Error as e:
+                typed = _classify_pkcs11_error_midsession(e, self._provider)
+                if typed is not None:
+                    raise typed from e
+                raise
+
+            results: list[dict] = []
+            for priv in priv_objs:
+                cka_id_raw = session.getAttributeValue(priv, [PyKCS11.CKA_ID])[0]
+                if not cka_id_raw:
+                    # PKCS#11 allows objects without CKA_ID; pyPKI cannot
+                    # address such a key, so it is invisible to the API.
+                    continue
+                cka_id_bytes = bytes(cka_id_raw)
+                hex_id = cka_id_bytes.hex()
+                label = _read_cka_label(session, priv)
+
+                # Algorithm normalisation. _normalise_key_type_from_token
+                # returns "ECDSA-unknown" for curves outside the §8.1 table,
+                # and raises ValueError for entirely foreign key types.
+                cka_key_type = session.getAttributeValue(
+                    priv, [PyKCS11.CKA_KEY_TYPE]
+                )[0]
+                try:
+                    normalised = _normalise_key_type_from_token(
+                        session, priv, cka_key_type,
+                    )
+                except (ValueError, PyKCS11.PyKCS11Error):
+                    results.append({
+                        "hsm_token_id": hex_id,
+                        "cka_label": label,
+                        "key_type": None,
+                        "public_key": None,
+                        "unimportable_reason": "unsupported_key_type",
+                    })
+                    continue
+                if normalised.endswith("-unknown"):
+                    results.append({
+                        "hsm_token_id": hex_id,
+                        "cka_label": label,
+                        "key_type": None,
+                        "public_key": None,
+                        "unimportable_reason": "unsupported_key_type",
+                    })
+                    continue
+
+                # Paired public-key object (preferred). CR-0003 adds a
+                # fallback to reading the public attributes off the
+                # private-key handle itself when the paired object is
+                # missing — covers the common "operator deleted only
+                # the pubkey out-of-band" case without surfacing the
+                # row as read-only.
+                pub_objs = session.findObjects([
+                    (PyKCS11.CKA_CLASS, PyKCS11.CKO_PUBLIC_KEY),
+                    (PyKCS11.CKA_ID, cka_id_bytes),
+                ])
+                pem_handle = pub_objs[0] if pub_objs else priv
+                try:
+                    public_pem = _read_public_key_pem_attributes(
+                        session, pem_handle, normalised,
+                    )
+                except Exception as e:
+                    # Broad catch: vendors return different attributes as
+                    # ``None`` when a public-key object is partially missing,
+                    # which surfaces here as ``TypeError`` (None → bytes),
+                    # ``ValueError`` (curve mismatch), ``PyKCS11Error``, or
+                    # something else entirely. Any failure means the key is
+                    # importable as "public key unavailable" rather than
+                    # blocking the whole list — preserves CR-0001 decision 4.
+                    logger.warning(
+                        f"PKCS11Backend.list_keys: CKA_ID={hex_id} on provider "
+                        f"id={self._provider.get('id')} — paired public key "
+                        f"unreadable: {e!r}"
+                    )
+                    results.append({
+                        "hsm_token_id": hex_id,
+                        "cka_label": label,
+                        "key_type": normalised,
+                        "public_key": None,
+                        "unimportable_reason": "public_key_unavailable",
+                    })
+                    continue
+
+                results.append({
+                    "hsm_token_id": hex_id,
+                    "cka_label": label,
+                    "key_type": normalised,
+                    "public_key": public_pem,
+                    "unimportable_reason": None,
+                })
+            return results
 
     def find_key_by_id(self, hsm_token_id: str) -> dict | None:
         """
@@ -297,25 +584,55 @@ class PKCS11Backend:
                 return None
             try:
                 priv_handle = self._find_private_by_id(cka_id_bytes)
-            except RuntimeError:
+            except KeyMissingOnToken:
+                # Genuine "no such CKA_ID on the token" — the public
+                # contract of find_key_by_id is to return None, not to
+                # raise. Distinct from the session-level failure cases
+                # caught further down with the mid-session classifier.
                 return None
-            cka_key_type = session.getAttributeValue(priv_handle, [PyKCS11.CKA_KEY_TYPE])[0]
+            try:
+                cka_key_type = session.getAttributeValue(priv_handle, [PyKCS11.CKA_KEY_TYPE])[0]
+            except PyKCS11.PyKCS11Error as e:
+                # CR-0004 decision 2: diagnostic operations do not retry.
+                # Classify the mid-session failure so probe_key_on_token
+                # / explicit-import callers see the typed reason.
+                typed = _classify_pkcs11_error_midsession(e, self._provider)
+                if typed is not None:
+                    raise typed from e
+                raise
             normalised = _normalise_key_type_from_token(session, priv_handle, cka_key_type)
             cka_label = _read_cka_label(session, priv_handle)
-            # Find the matching public key (same CKA_ID) for the SPKI.
+            # Prefer the paired CKO_PUBLIC_KEY for the SPKI. CR-0003
+            # falls back to attributes on the private-key handle when
+            # the paired object is missing — covers the "operator
+            # deleted the pubkey out-of-band" case while still raising
+            # a clean error when even the private-key attributes don't
+            # yield a usable public key.
             pub_objs = session.findObjects([
                 (PyKCS11.CKA_CLASS, PyKCS11.CKO_PUBLIC_KEY),
                 (PyKCS11.CKA_ID, cka_id_bytes),
             ])
-            if not pub_objs:
-                raise RuntimeError(
-                    f"PKCS11Backend.find_key_by_id: private key {hsm_token_id} found "
-                    f"but no matching public key on the token"
-                )
-            public_pem = _read_public_key_pem(session, pub_objs[0], normalised)
-            # Fall back to the public key's label if the private one is empty.
-            if not cka_label:
-                cka_label = _read_cka_label(session, pub_objs[0])
+            if pub_objs:
+                public_pem = _read_public_key_pem_attributes(session, pub_objs[0], normalised)
+                # Fall back to the public key's label if the private one is empty.
+                if not cka_label:
+                    cka_label = _read_cka_label(session, pub_objs[0])
+            else:
+                try:
+                    public_pem = _read_public_key_pem_attributes(
+                        session, priv_handle, normalised,
+                    )
+                    logger.info(
+                        f"PKCS11Backend.find_key_by_id: CKA_ID={hsm_token_id} on "
+                        f"provider id={self._provider.get('id')} — paired public "
+                        f"key missing; reconstructed from private-key attributes"
+                    )
+                except Exception as e:
+                    raise RuntimeError(
+                        f"PKCS11Backend.find_key_by_id: private key {hsm_token_id} "
+                        f"found but the paired public key is missing and the "
+                        f"private-key attribute fallback failed: {e}"
+                    ) from e
             return {
                 "hsm_token_id": hsm_token_id,
                 "public_key": public_pem,
@@ -354,18 +671,31 @@ class PKCS11Backend:
             try:
                 return self._sign_with_state(handle._state, tbs_digest)
             except PyKCS11.PyKCS11Error as e:
-                if int(e.value) not in (
-                    int(PyKCS11.CKR_SESSION_HANDLE_INVALID),
-                    int(PyKCS11.CKR_DEVICE_REMOVED),
-                ):
+                # Mid-session classification (CR-0004). The reconnect
+                # path covers any CKR code where retrying the session
+                # might recover; everything else is classified and
+                # propagated as a typed exception so the KMS / Flask
+                # error handler can render the right operator
+                # guidance.
+                if int(e.value) not in _RECONNECTABLE_CKRS:
+                    typed = _classify_pkcs11_error_midsession(e, self._provider)
+                    if typed is not None:
+                        raise typed from e
                     raise
                 logger.warning(
                     f"PKCS11Backend: session invalidated ({e}); attempting one reconnect "
                     f"for provider id={self._provider.get('id')}"
                 )
+                # CR-0004 decision 1: one reconnect attempt, no more.
+                # ``_reconnect`` raises a typed BackendNotActive
+                # subclass on failure (`SlotNotFound` /
+                # `AuthenticationFailed` / `ModuleLoadFailed`); the
+                # KMS catches those and evicts the cached backend.
                 self._reconnect()
                 # The new session has a different CK_OBJECT_HANDLE for the same
-                # on-token object; re-find it by CKA_ID.
+                # on-token object; re-find it by CKA_ID. If the on-token
+                # object itself is gone (vs just the session), the find
+                # raises ``KeyMissingOnToken`` which propagates cleanly.
                 cka_id_bytes = _validate_cka_id_hex(handle._state.cka_id)
                 handle._state.token_object = self._find_private_by_id(cka_id_bytes)
                 return self._sign_with_state(handle._state, tbs_digest)
@@ -409,7 +739,10 @@ class PKCS11Backend:
     def _reconnect(self) -> None:
         """Close the current session and open a fresh one against the same
         provider. Caller must hold ``self._lock``. Raises
-        :class:`BackendNotActive` if the backend was never opened."""
+        :class:`BackendNotActive` (or one of its typed subclasses —
+        :class:`SlotNotFound`, :class:`AuthenticationFailed` — via the
+        shared ``_open_session_classified`` helper) when the slot /
+        PIN no longer authorise the activation."""
         if self._helper is None or self._provider is None:
             raise BackendNotActive("PKCS11Backend._reconnect: backend is not open")
 
@@ -426,7 +759,12 @@ class PKCS11Backend:
         else:
             pin = resolve_provider_secret(self._provider).decode("utf-8")
         slot_label = self._provider.get("slot_label")
-        self._helper.open_session(pin, slot_label=slot_label)
+        # Shared classification path with PKCS11Backend.open — a
+        # reconnect that fails because the slot was deleted or the
+        # PIN was rotated raises ``SlotNotFound`` /
+        # ``AuthenticationFailed`` (CR-0004) rather than a raw
+        # PyKCS11Error.
+        _open_session_classified(self._helper, pin, slot_label, self._provider)
         logger.info(
             f"PKCS11Backend: reconnected provider id={self._provider.get('id')} "
             f"('{self._provider.get('label')}')"
@@ -563,13 +901,58 @@ def _normalise_key_type_from_token(session, key_handle, cka_key_type) -> str:
     raise ValueError(f"Unsupported CKA_KEY_TYPE on token: {cka_key_type}")
 
 
-def _read_public_key_pem(session, pub_handle, normalised: str) -> str:
-    """Read a public-key object off the token and return PEM
-    SubjectPublicKeyInfo for storage in ``KeyStorage.public_key``."""
+def _read_public_key_pem_attributes(session, handle, normalised: str) -> str:
+    """Reconstruct the PEM ``SubjectPublicKeyInfo`` from a token
+    object's attributes. Works on *either* a public-key handle (the
+    original call site) or a private-key handle (the CR-0003 fallback
+    path used when the paired ``CKO_PUBLIC_KEY`` object is missing).
+
+    Strategy, attempted in order:
+
+    1. ``CKA_PUBLIC_KEY_INFO`` — PKCS#11 v3.x DER-encoded SPKI;
+       optional on private-key objects but the most direct path when
+       the vendor supports it.
+    2. Per-algorithm reconstruction:
+       - RSA: ``CKA_MODULUS`` + ``CKA_PUBLIC_EXPONENT`` (both listed
+         in the PKCS#11 RSA private-key template, well-supported).
+       - EC: ``CKA_EC_POINT`` (standard on public handles; SoftHSM2
+         and several vendors also expose it on private handles).
+
+    Raises :class:`ValueError` if neither path yields a usable PEM —
+    callers (``list_keys`` / ``find_key_by_id``) decide how to surface
+    that (muted ``public_key_unavailable`` badge in the list view; a
+    clear error in the explicit-import path).
+    """
+    # Path 1 — PKCS#11 v3 CKA_PUBLIC_KEY_INFO.
+    cka_public_key_info = getattr(PyKCS11, "CKA_PUBLIC_KEY_INFO", None)
+    if cka_public_key_info is not None:
+        try:
+            spki_attr = session.getAttributeValue(handle, [cka_public_key_info])[0]
+        except PyKCS11.PyKCS11Error:
+            spki_attr = None
+        if spki_attr:
+            try:
+                return serialization.load_der_public_key(bytes(spki_attr)).public_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PublicFormat.SubjectPublicKeyInfo,
+                ).decode()
+            except Exception:
+                # CKA_PUBLIC_KEY_INFO returned bytes but they did not
+                # parse as a SubjectPublicKeyInfo (vendor-specific
+                # encoding). Fall through to the algorithm-specific
+                # path below.
+                pass
+
+    # Path 2 — algorithm-specific reconstruction.
     if normalised.startswith("RSA-"):
         modulus, exponent = session.getAttributeValue(
-            pub_handle, [PyKCS11.CKA_MODULUS, PyKCS11.CKA_PUBLIC_EXPONENT]
+            handle, [PyKCS11.CKA_MODULUS, PyKCS11.CKA_PUBLIC_EXPONENT]
         )
+        if modulus is None or exponent is None:
+            raise ValueError(
+                "RSA public components (CKA_MODULUS / CKA_PUBLIC_EXPONENT) "
+                "not readable on this handle"
+            )
         n = int.from_bytes(bytes(modulus), "big")
         e = int.from_bytes(bytes(exponent), "big")
         pubkey = rsa.RSAPublicNumbers(e=e, n=n).public_key()
@@ -583,10 +966,16 @@ def _read_public_key_pem(session, pub_handle, normalised: str) -> str:
         curves = {"P-256": ec.SECP256R1(), "P-384": ec.SECP384R1()}
         if curve_name not in curves:
             raise ValueError(f"Cannot read PEM for ECDSA curve {curve_name!r}")
+        ec_point_attr = session.getAttributeValue(handle, [PyKCS11.CKA_EC_POINT])[0]
+        if ec_point_attr is None:
+            raise ValueError(
+                "CKA_EC_POINT not readable on this handle "
+                "(typical for vendor-restricted private-key objects)"
+            )
         # CKA_EC_POINT is the DER-encoded OCTET STRING wrapping the raw point.
-        ec_point_der = bytes(session.getAttributeValue(pub_handle, [PyKCS11.CKA_EC_POINT])[0])
         # The first two bytes are the OCTET STRING tag/length; strip them.
         # OCTET STRING values longer than 127 bytes use long-form length encoding.
+        ec_point_der = bytes(ec_point_attr)
         if not ec_point_der or ec_point_der[0] != 0x04:
             raise ValueError("CKA_EC_POINT did not begin with an OCTET STRING tag")
         if ec_point_der[1] & 0x80:
@@ -601,3 +990,10 @@ def _read_public_key_pem(session, pub_handle, normalised: str) -> str:
         ).decode()
 
     raise ValueError(f"Cannot read PEM for unsupported key type {normalised!r}")
+
+
+# Compatibility alias for the original name. Several call sites
+# (generate_key, find_key_by_id) use this with a public-key handle;
+# the new helper accepts either kind, so the alias keeps grep-ability
+# intact without a wider rename.
+_read_public_key_pem = _read_public_key_pem_attributes

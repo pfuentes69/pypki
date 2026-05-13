@@ -11,6 +11,7 @@ from flask import Blueprint, request, Response
 
 from web.services import api_adapters
 from pypki import logger, PKITools, OCSPResponder
+from pypki.backends.base import BackendError
 
 OCSP_NONCE_OID = ObjectIdentifier("1.3.6.1.5.5.7.48.1.2")
 
@@ -119,6 +120,12 @@ def ocsp_responder(encoded_request=None):
 
         return http_resp
 
+    except BackendError:
+        # CR-0005: typed backend failures (KeyMissingOnToken,
+        # SlotNotFound, AuthenticationFailed) propagate to the
+        # blueprint error handler for the structured 503 envelope
+        # rather than a generic 400 here.
+        raise
     except Exception as e:
         logger.error(f"Error: {e}")
         return Response(status=400)
