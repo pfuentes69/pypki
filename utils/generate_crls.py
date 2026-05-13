@@ -23,6 +23,9 @@ pki = PyPKI(config_path)
 ca_collection = pki.get_ca_collection()
 
 for ca_item in ca_collection:
+    if ca_item.get("state", "active") != "active":
+        print(f"Skipping CA {ca_item['name']} (state={ca_item.get('state')})")
+        continue
     pki.select_ca_by_id(ca_item["id"])
     # Generate the CRL
     crl = pki.generate_crl()

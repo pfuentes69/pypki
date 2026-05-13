@@ -255,17 +255,18 @@ class CertificateTools:
                         x509.AuthorityInformationAccess(_aia_list), critical=_aia_critical
                     )
 
-            # CDP — template controls include/useCADefault/url
+            # CDP — template controls include/useCADefault/url and criticality.
+            # The CA's extensions store only the URL fallback; criticality is
+            # always a per-template decision (matches AIA's existing behaviour).
             _cdp_ext = self.__template__["extensions"].get("cdp", {})
             if _cdp_ext.get("include", False):
                 if _cdp_ext.get("useCADefault", False):
                     _ca_cdp = (issuing_ca.get_config()["extensions"].get("cdp", {})
                                if issuing_ca else {})
-                    _cdp_url      = _ca_cdp.get("url")
-                    _cdp_critical = _ca_cdp.get("critical", False)
+                    _cdp_url = _ca_cdp.get("url")
                 else:
-                    _cdp_url      = _cdp_ext.get("url", "")
-                    _cdp_critical = _cdp_ext.get("critical", False)
+                    _cdp_url = _cdp_ext.get("url", "")
+                _cdp_critical = _cdp_ext.get("critical", False)
                 if _cdp_url:
                     builder = builder.add_extension(
                         x509.CRLDistributionPoints([x509.DistributionPoint(

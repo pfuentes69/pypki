@@ -1,0 +1,231 @@
+{% extends "base.html" %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-2">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/index.html">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="/cas_and_crls.html">CAs &amp; CRL</a></li>
+    <li class="breadcrumb-item active">Install signed certificate</li>
+  </ol>
+</nav>
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0">Install signed certificate</h4>
+  <div>
+    <span id="caStateBadge" class="badge bg-secondary">…</span>
+  </div>
+</div>
+
+<div id="alertSection" class="d-none mb-3"></div>
+
+<div id="loading" class="text-muted small">Loading CA details…</div>
+
+<div id="content" class="d-none">
+
+  <!-- Loaded CA summary -->
+  <div class="card mb-4">
+    <div class="card-header fw-semibold"><i class="bi bi-building me-2"></i>Pending CA</div>
+    <div class="card-body row g-3">
+      <div class="col-md-6">
+        <label class="form-label small text-muted">CA Name</label>
+        <div class="fw-semibold" id="caName">—</div>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small text-muted">CA ID</label>
+        <div id="caId">—</div>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small text-muted">Key ownership</label>
+        <div id="caKeyOwned">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stored CSR (so operators can re-download from this page) -->
+  <div class="card mb-4">
+    <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+      <span><i class="bi bi-file-earmark-code me-2"></i>Stored CSR</span>
+      <div class="d-flex gap-2">
+        <button class="btn btn-sm btn-outline-secondary" onclick="copyCsr()">
+          <i class="bi bi-clipboard me-1"></i>Copy
+        </button>
+        <button class="btn btn-sm btn-outline-primary" onclick="downloadCsr()">
+          <i class="bi bi-download me-1"></i>Download .pem
+        </button>
+      </div>
+    </div>
+    <div class="card-body p-0">
+      <textarea class="form-control font-monospace small border-0" id="storedCsr" rows="10" readonly></textarea>
+    </div>
+  </div>
+
+  <!-- Install -->
+  <div class="card mb-4">
+    <div class="card-header fw-semibold"><i class="bi bi-upload me-2"></i>Signed certificate from external CA</div>
+    <div class="card-body">
+      <div class="row g-3">
+        <div class="col-12">
+          <label class="form-label">Signed Certificate (PEM) <span class="text-danger">*</span></label>
+          <div class="input-group input-group-sm mb-1">
+            <input type="file" class="form-control form-control-sm" id="certFile"
+                   accept=".pem,.crt,.cer" onchange="loadFile(this,'certPem')">
+          </div>
+          <textarea class="form-control font-monospace small" id="certPem" rows="10"
+            placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea>
+          <div class="form-text">
+            Server checks: the cert's public key matches the bound KMS key, and BasicConstraints
+            <code>cA=TRUE</code>. The cert's subject DN is authoritative — it does not need to match
+            the CSR exactly (external issuers routinely canonicalize DNs).
+          </div>
+        </div>
+        <div class="col-12">
+          <label class="form-label">Certificate Chain (PEM, optional)</label>
+          <div class="input-group input-group-sm mb-1">
+            <input type="file" class="form-control form-control-sm" id="chainFile"
+                   accept=".pem,.crt,.cer" onchange="loadFile(this,'chainPem')">
+          </div>
+          <textarea class="form-control font-monospace small" id="chainPem" rows="4"
+            placeholder="Issuer chain in PEM format, root last. The issuer's parents are not inferred."></textarea>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Actions -->
+  <div class="d-flex gap-2">
+    <button class="btn btn-primary btn-sm" id="installBtn" onclick="install()">
+      <i class="bi bi-check-circle me-1"></i>Install certificate
+    </button>
+    <a href="/cas_and_crls.html" class="btn btn-outline-secondary btn-sm">Cancel</a>
+  </div>
+
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function escHtml(s) {
+    return String(s || '').replace(/[&<>"']/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────────────────────
+  function showAlert(msg, type = 'danger') {
+    const el = document.getElementById('alertSection');
+    el.className = `alert alert-${type}`;
+    el.innerHTML = msg;
+    el.classList.remove('d-none');
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+  function loadFile(input, targetId) {
+    const file = input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = e => { document.getElementById(targetId).value = e.target.result; };
+    reader.readAsText(file);
+  }
+  function getCaIdFromQuery() {
+    const sp = new URLSearchParams(window.location.search);
+    const id = parseInt(sp.get('id'), 10);
+    return isNaN(id) ? null : id;
+  }
+  function copyCsr() {
+    const pem = document.getElementById('storedCsr').value;
+    navigator.clipboard.writeText(pem).then(
+      () => showToast('CSR copied to clipboard.'),
+      () => showToast('Copy failed — select and copy manually.', 'danger'),
+    );
+  }
+  function downloadCsr() {
+    const pem = document.getElementById('storedCsr').value;
+    const name = (document.getElementById('caName').textContent.trim() || 'ca')
+      .replace(/[^A-Za-z0-9._-]+/g, '_');
+    const blob = new Blob([pem], { type: 'application/x-pem-file' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${name}.csr.pem`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  // ── Load CA on page open ─────────────────────────────────────────────────────
+  async function loadCa() {
+    const caId = getCaIdFromQuery();
+    if (!caId) {
+      showAlert('No CA id supplied. Open this page from the CAs list.');
+      return;
+    }
+    try {
+      const res = await fetch(`${apiBase}/ca/${caId}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.description || `HTTP ${res.status}`);
+      }
+      const ca = await res.json();
+      document.getElementById('loading').classList.add('d-none');
+      document.getElementById('content').classList.remove('d-none');
+      document.getElementById('caName').textContent = ca.name || '—';
+      document.getElementById('caId').textContent = ca.id || '—';
+      document.getElementById('caKeyOwned').textContent =
+        ca.key_owned ? 'generated in-app (key_owned=TRUE)' : 'bound to existing key (key_owned=FALSE)';
+
+      const state = ca.state || 'active';
+      const badge = document.getElementById('caStateBadge');
+      if (state === 'pending-issuance') {
+        badge.textContent = 'pending-issuance';
+        badge.className = 'badge bg-secondary';
+      } else {
+        badge.textContent = state;
+        badge.className = 'badge bg-success';
+        showAlert(`This CA is in state <code>${escHtml(state)}</code> — install-cert only applies to pending-issuance rows.`, 'warning');
+        document.getElementById('installBtn').disabled = true;
+      }
+
+      document.getElementById('storedCsr').value = ca.pending_csr || '';
+    } catch (e) {
+      showAlert(`Failed to load CA: ${escHtml(e.message)}`);
+    }
+  }
+
+  // ── Submit ───────────────────────────────────────────────────────────────────
+  async function install() {
+    const caId = getCaIdFromQuery();
+    if (!caId) { showAlert('No CA id supplied.'); return; }
+
+    const cert = document.getElementById('certPem').value.trim();
+    if (!cert) { showAlert('Signed certificate (PEM) is required.'); return; }
+    if (!cert.includes('-----BEGIN CERTIFICATE-----')) {
+      showAlert('The certificate field does not look like a PEM certificate.');
+      return;
+    }
+
+    const payload = {
+      certificate: cert,
+      certificate_chain: document.getElementById('chainPem').value.trim(),
+    };
+
+    const btn = document.getElementById('installBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Installing…';
+
+    try {
+      const res = await fetch(`${apiBase}/ca/${caId}/install-cert`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+      showToast('Certificate installed. CA is now active.');
+      setTimeout(() => { window.location.href = `/ca_details.html?id=${caId}`; }, 800);
+    } catch (e) {
+      showAlert(`Install failed: ${escHtml(e.message)}`);
+      btn.disabled = false;
+      btn.innerHTML = '<i class="bi bi-check-circle me-1"></i>Install certificate';
+    }
+  }
+
+  window.onload = loadCa;
+</script>
+{% endblock %}

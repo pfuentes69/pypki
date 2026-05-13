@@ -155,14 +155,16 @@ def get_certification_authorities():
         {
             "id": row["id"],
             "name": row["name"],
+            "state": row.get("state", "active"),
             "max_validity": row.get("max_validity"),
             "crl_validity": row.get("crl_validity"),
             "serial_number_length": row.get("serial_number_length"),
+            "created_at": row.get("created_at"),
         }
         for row in result
     ]
 
-    return jsonify(filtered_result), 200
+    return jsonify(api_adapters.convert_to_serializable(filtered_result)), 200
 
 
 @bp.route('/ca', methods=['POST'])
@@ -228,6 +230,75 @@ def create_ca():
         abort(500, description=f"CA creation failed: {e}")
 
     return jsonify({"message": "CA created successfully", "ca_id": new_id}), 201
+
+
+@bp.route('/ca/generate', methods=['POST'])
+def generate_ca():
+    """CR-0001: in-app CA issuance.
+
+    One endpoint, three issuance scenarios × two key sources. See
+    doc/ca-management-specs.md §17.1 for the full request body.
+    """
+    logger.info("API - POST Generate CA")
+    err = _require_role('superadmin', 'admin')
+    if err:
+        return err
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+
+    data = request.get_json()
+    if not data:
+        abort(400, description="Missing JSON body")
+
+    from web.services import ca_generate
+    from pypki.db import CAStateError as _CAStateError
+
+    try:
+        result = ca_generate.generate_ca(data, user_id=user_id)
+    except ValueError as e:
+        abort(400, description=str(e))
+    except _CAStateError as e:
+        abort(409, description=str(e))
+    except BackendError:
+        raise  # handled by app-level handler → 503
+    except Exception as e:
+        logger.error(f"CA generation failed: {e}")
+        abort(500, description=f"CA generation failed: {e}")
+
+    # External-subordinate phase 1 returns a pending-issuance dict;
+    # root / internal-subordinate return a full CA record.
+    status = 202 if result.get("state") == "pending-issuance" else 201
+    return jsonify(api_adapters.convert_to_serializable(result)), status
+
+
+@bp.route('/ca/<int:ca_id>/install-cert', methods=['POST'])
+def install_ca_cert(ca_id):
+    """CR-0001: install an externally-signed certificate on a pending CA."""
+    logger.info(f"API - POST Install Cert for CA {ca_id}")
+    err = _require_role('superadmin', 'admin')
+    if err:
+        return err
+    user_id = getattr(g, 'current_user', {}).get('id', 0)
+
+    data = request.get_json()
+    if not data:
+        abort(400, description="Missing JSON body")
+
+    from web.services import ca_generate
+    from pypki.db import CAStateError as _CAStateError
+
+    try:
+        result = ca_generate.install_ca_certificate(ca_id, data, user_id=user_id)
+    except ValueError as e:
+        abort(400, description=str(e))
+    except _CAStateError as e:
+        abort(409, description=str(e))
+    except BackendError:
+        raise
+    except Exception as e:
+        logger.error(f"CA install-cert failed: {e}")
+        abort(500, description=f"CA install-cert failed: {e}")
+
+    return jsonify(api_adapters.convert_to_serializable(result)), 200
 
 
 @bp.route('/ca/<int:ca_id>', methods=['GET'])
@@ -995,6 +1066,14 @@ def delete_crypto_provider(provider_id):
 @bp.route('/kms/keys', methods=['GET'])
 def list_kms_keys():
     logger.info("API - GET KMS Keys")
+    # CR-0001 / CR-0002: `?unbound=true` filters to KeyStorage rows that no
+    # CertificationAuthority references, enriched with the 8-char SPKI
+    # fingerprint for the CA-creation dropdowns.
+    if request.args.get('unbound', '').lower() in ('1', 'true', 'yes'):
+        from web.services import ca_generate
+        rows = ca_generate.list_unbound_keys()
+        return jsonify(api_adapters.convert_to_serializable(rows)), 200
+
     provider_id = request.args.get('provider_id', type=int)
     key_type = request.args.get('key_type')
     rows = api_adapters.list_kms_keys(provider_id=provider_id, key_type=key_type)

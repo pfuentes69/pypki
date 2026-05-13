@@ -21,13 +21,14 @@
         <tr>
           <th style="width:5%">ID</th>
           <th>Name</th>
-          <th style="width:14%">Max Cert Validity</th>
+          <th style="width:13%">State</th>
+          <th style="width:12%">Max Cert Validity</th>
           <th style="width:12%">CRL Validity</th>
-          <th style="width:8%"></th>
+          <th style="width:14%"></th>
         </tr>
       </thead>
       <tbody id="caTableBody">
-        <tr><td colspan="5" class="text-muted text-center">Loading…</td></tr>
+        <tr><td colspan="6" class="text-muted text-center">Loading…</td></tr>
       </tbody>
     </table>
   </div>
@@ -36,27 +37,57 @@
 
 {% block scripts %}
 <script>
+  // CR-0001 §17.1: badge for the `pending-issuance` state, with a "stale"
+  // marker once the row has been waiting on an external signature for >30 days
+  // (resolved decision 8 — surface stale rows in the UI but never auto-cancel).
+  function _stateBadge(ca) {
+    if ((ca.state || 'active') === 'pending-issuance') {
+      let stale = '';
+      if (ca.created_at) {
+        const ageDays = (Date.now() - new Date(ca.created_at).getTime()) / 86400000;
+        if (ageDays > 30) {
+          stale = ' <span class="badge bg-warning text-dark ms-1" title="No signed cert installed in 30+ days">stale</span>';
+        }
+      }
+      return '<span class="badge bg-secondary">pending-issuance</span>' + stale;
+    }
+    return '<span class="badge bg-success">active</span>';
+  }
+
+  // CR-0001 §17.1: pending-issuance rows replace the Details action with
+  // "Install signed certificate"; Delete remains available so the operator
+  // can abandon the request.
+  function _actionsCell(ca) {
+    if ((ca.state || 'active') === 'pending-issuance') {
+      return `<a class="btn btn-sm btn-outline-success" href="/ca_install_cert.html?id=${ca.id}">
+                <i class="bi bi-upload me-1"></i>Install cert
+              </a>`;
+    }
+    return `<a class="btn btn-sm btn-outline-primary" href="/ca_details.html?id=${ca.id}">Details</a>`;
+  }
+
   function loadCAs() {
     fetch(`${apiBase}/ca`)
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(cas => {
         const tbody = document.getElementById('caTableBody');
         if (!cas.length) {
-          tbody.innerHTML = '<tr><td colspan="5" class="text-muted text-center">No Certification Authorities found.</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="6" class="text-muted text-center">No Certification Authorities found.</td></tr>';
           return;
         }
         tbody.innerHTML = cas.map(ca => `
           <tr>
             <td>${ca.id}</td>
             <td>${ca.name}</td>
+            <td>${_stateBadge(ca)}</td>
             <td>${ca.max_validity != null ? ca.max_validity + ' days' : '—'}</td>
             <td>${ca.crl_validity != null ? ca.crl_validity + ' days' : '—'}</td>
-            <td><a class="btn btn-sm btn-outline-primary" href="/ca_details.html?id=${ca.id}">Details</a></td>
+            <td>${_actionsCell(ca)}</td>
           </tr>`).join('');
       })
       .catch(err => {
         document.getElementById('caTableBody').innerHTML =
-          `<tr><td colspan="5"><div class="alert alert-danger mb-0">Failed to load CAs: ${err.message}</div></td></tr>`;
+          `<tr><td colspan="6"><div class="alert alert-danger mb-0">Failed to load CAs: ${err.message}</div></td></tr>`;
       });
   }
 

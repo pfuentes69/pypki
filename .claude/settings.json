@@ -30,7 +30,19 @@
       "Bash(docker run *)",
       "Bash(python -m pytest tests/test_kms_phase5_keymgmt.py::test_list_kms_keys_no_provider_returns_envelope_with_db_rows_only -xvs)",
       "Bash(docker stop *)",
-      "Bash(python -m pytest tests/test_kms_pkcs11_backend.py tests/test_kms_software_backend.py tests/test_kms_phase4_secrets.py tests/test_kms_phase6_hardening.py tests/test_pkcs12_storage_regime.py)"
+      "Bash(python -m pytest tests/test_kms_pkcs11_backend.py tests/test_kms_software_backend.py tests/test_kms_phase4_secrets.py tests/test_kms_phase6_hardening.py tests/test_pkcs12_storage_regime.py)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('pypki/db.py'\\).read\\(\\)\\); print\\('OK: db.py parses'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('pypki/db.py'\\).read\\(\\)\\); ast.parse\\(open\\('pypki/core.py'\\).read\\(\\)\\); print\\('OK: both parse'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('pypki/db.py'\\).read\\(\\)\\); ast.parse\\(open\\('pypki/core.py'\\).read\\(\\)\\); ast.parse\\(open\\('utils/generate_crls.py'\\).read\\(\\)\\); print\\('OK: all parse'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('web/services/ca_generate.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c \"from asn1crypto.csr import CertificationRequest; print\\('asn1crypto.csr OK:', CertificationRequest\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('web/routes/main_routes.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c \"from web.services import ca_generate; print\\('Imports OK:', ca_generate.generate_ca, ca_generate.install_ca_certificate, ca_generate.list_unbound_keys\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python3)",
+      "Bash(grep -rn 'placeholder=\"\\\\${escHtml\\(cfg.default\\\\|value=\"\\\\${escHtml\\(cfg.default' /Users/pedro/Development/Python/pypki/web/templates/)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('pypki/certificate_tools.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(grep -nE \"^#{1,4} \" /Users/pedro/Development/Python/pypki/doc/ca-management-specs.md)"
     ]
   }
 }

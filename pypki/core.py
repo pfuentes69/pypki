@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 
 from cryptography.hazmat.primitives.asymmetric import rsa, ec
 
-from .db import PKIDataBase, DuplicateSerialError
+from .db import PKIDataBase, DuplicateSerialError, CAStateError
 from .certificate_tools import CertificateTools
 from .pki_tools import PKITools
 from .key_tools import KeyTools
@@ -153,6 +153,50 @@ class PyPKI:
             ca_record = self.__db.get_ca_record_by_id(ca_id)
         return ca_record
 
+    def insert_pending_ca(self,
+                          name: str,
+                          private_key_reference: int,
+                          key_owned: bool,
+                          pending_csr: str,
+                          max_validity: int,
+                          serial_number_length: int,
+                          crl_validity: int,
+                          extensions: dict) -> int:
+        """Insert a `pending-issuance` CA row (CR-0001 external-subordinate phase 1)."""
+        with self.__db.connection():
+            return self.__db.insert_pending_ca(
+                name=name,
+                private_key_reference=private_key_reference,
+                key_owned=key_owned,
+                pending_csr=pending_csr,
+                max_validity=max_validity,
+                serial_number_length=serial_number_length,
+                crl_validity=crl_validity,
+                extensions=extensions,
+            )
+
+    def install_ca_certificate(self,
+                                ca_id: int,
+                                certificate_pem: str,
+                                certificate_chain: str,
+                                ski: str) -> dict:
+        """Transition a `pending-issuance` CA to `active` (CR-0001 phase 2).
+
+        Raises `CAStateError` if the row is not in `pending-issuance`.
+        """
+        with self.__db.connection():
+            return self.__db.install_ca_certificate(
+                ca_id=ca_id,
+                certificate_pem=certificate_pem,
+                certificate_chain=certificate_chain,
+                ski=ski,
+            )
+
+    def get_unbound_keys(self):
+        """Return KeyStorage rows not referenced by any CA (CR-0001 / CR-0002 dropdown)."""
+        with self.__db.connection():
+            return self.__db.get_unbound_keys()
+
 
     def select_ca_by_name(self, ca_name: str) -> CertificationAuthority:
         self.__ca_id = 0
@@ -172,11 +216,22 @@ class PyPKI:
 
         Reads the CA record from the database on every call. Safe to call
         concurrently from multiple request threads (no shared mutable state).
+
+        Raises `CAStateError` if the row exists but is not in `'active'`
+        state — a `pending-issuance` row has no certificate and cannot
+        sign / issue CRLs / back an OCSP responder. Callers that need the
+        raw row regardless of state (the install-cert handler, the CA
+        list view, etc.) should use `get_ca_by_id` instead.
         """
         with self.__db.connection():
             ca_item = self.__db.get_ca_record_by_id(ca_id)
         if ca_item is None:
             return None
+        state = ca_item.get("state", "active")
+        if state != "active":
+            raise CAStateError(
+                f"CA id={ca_id} is in state '{state}' — signing / CRL / OCSP operations require 'active'"
+            )
         ca = CertificationAuthority()
         ca_config = {
             "ca_name": ca_item.get("name"),

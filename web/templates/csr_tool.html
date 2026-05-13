@@ -1,6 +1,12 @@
 {% extends "base.html" %}
 {% block head_extra %}
-<style>textarea.mono { font-family: monospace; font-size: 0.78rem; resize: vertical; }</style>
+<style>
+  textarea.mono { font-family: monospace; font-size: 0.78rem; resize: vertical; }
+  .san-row { display:flex; gap:.35rem; margin-bottom:.3rem; }
+  .san-row input { flex:1; }
+  .field-ok    { border-color: #198754 !important; }
+  .field-error { border-color: #dc3545 !important; }
+</style>
 {% endblock %}
 
 {% block content %}
@@ -13,54 +19,59 @@
 <h4 class="mb-4">CSR Generator</h4>
 
 <div class="card shadow-sm mb-4">
-  <div class="card-header"><i class="bi bi-sliders me-2"></i>Key &amp; Subject</div>
+  <div class="card-header"><i class="bi bi-file-earmark-text me-2"></i>Template</div>
   <div class="card-body">
-    <div class="row g-3">
-      <div class="col-md-4">
-        <label class="form-label fw-semibold small">Algorithm <span class="text-danger">*</span></label>
-        <select class="form-select" id="algo" onchange="onAlgoChange()">
-          <option value="EC">ECC P-256</option>
-          <option value="RSA">RSA 2048</option>
-        </select>
-        <div id="rsaNote" class="form-text text-warning" style="display:none">
-          <i class="bi bi-clock me-1"></i>RSA key generation may take a few seconds.
-        </div>
-      </div>
+    <div class="row g-3 align-items-end">
       <div class="col-md-8">
-        <label class="form-label fw-semibold small">Common Name (CN) <span class="text-danger">*</span></label>
-        <input type="text" class="form-control" id="cn" placeholder="e.g. device_name">
-        <div class="invalid-feedback">Common Name is required.</div>
-      </div>
-      <div class="col-md-4">
-        <label class="form-label fw-semibold small">Organization (O)</label>
-        <input type="text" class="form-control" id="org" placeholder="e.g. Acme Corp">
-      </div>
-      <div class="col-md-2">
-        <label class="form-label fw-semibold small">Country (C)</label>
-        <input type="text" class="form-control text-uppercase" id="country" maxlength="2" placeholder="e.g. US">
-        <div class="invalid-feedback">Must be 2 letters.</div>
-      </div>
-      <div class="col-md-6">
-        <label class="form-label fw-semibold small">Serial Number</label>
-        <input type="text" class="form-control" id="serialNum" placeholder="e.g. 123456">
-      </div>
-      <div class="col-md-6">
-        <label class="form-label fw-semibold small">DNS SAN</label>
-        <div class="input-group">
-          <span class="input-group-text text-muted small">DNS</span>
-          <input type="text" class="form-control" id="san" placeholder="e.g. device.local">
+        <label class="form-label fw-semibold small">Certificate Template</label>
+        <select class="form-select" id="templateSelect" onchange="onTemplateChange()">
+          <option value="">— Free-form (no template) —</option>
+        </select>
+        <div class="form-text">
+          Selecting a template drives the subject fields, SAN types, and key-algorithm choices below.
+          Free-form keeps the simple legacy form.
         </div>
       </div>
-      <div class="col-12 pt-1">
-        <button class="btn btn-primary" id="btnGenerate" onclick="generate()">
-          <i class="bi bi-gear-fill me-2"></i>Generate Key &amp; CSR
-        </button>
-      </div>
+    </div>
+    <div id="libraryWarning" class="alert alert-warning small mt-3 d-none">
+      <i class="bi bi-exclamation-triangle-fill me-1"></i><span id="libraryWarningMsg"></span>
     </div>
   </div>
 </div>
 
-<div id="results" style="display:none">
+<div class="card shadow-sm mb-4">
+  <div class="card-header"><i class="bi bi-sliders me-2"></i>Key &amp; Subject</div>
+  <div class="card-body">
+
+    <div class="row g-3 mb-3">
+      <div class="col-md-4">
+        <label class="form-label fw-semibold small">Algorithm <span class="text-danger">*</span></label>
+        <select class="form-select" id="algoSelect" onchange="onAlgoChange()"></select>
+        <div id="rsaNote" class="form-text text-warning d-none">
+          <i class="bi bi-clock me-1"></i>RSA key generation may take a few seconds.
+        </div>
+      </div>
+      <div class="col-md-4" id="keyTypeCol">
+        <label class="form-label fw-semibold small" id="keyTypeLabel">Key Size</label>
+        <select class="form-select" id="keyTypeSelect"></select>
+      </div>
+    </div>
+
+    <h6 class="fw-semibold mt-2"><i class="bi bi-person me-2"></i>Subject</h6>
+    <div id="subjectFields"></div>
+
+    <h6 class="fw-semibold mt-3" id="sanHeader"><i class="bi bi-link-45deg me-2"></i>Subject Alternative Names</h6>
+    <div id="sanFields"></div>
+
+    <div class="pt-2">
+      <button class="btn btn-primary" id="btnGenerate" onclick="generate()">
+        <i class="bi bi-gear-fill me-2"></i>Generate Key &amp; CSR
+      </button>
+    </div>
+  </div>
+</div>
+
+<div id="results" class="d-none">
   <div class="alert alert-warning d-flex gap-2 align-items-start py-2">
     <i class="bi bi-exclamation-triangle-fill flex-shrink-0 mt-1"></i>
     <span class="small">The private key is generated entirely in your browser and is never transmitted.
@@ -115,66 +126,511 @@
 <script src="https://cdn.jsdelivr.net/npm/jsrsasign@10.9.0/lib/jsrsasign-all-min.js"></script>
 <script>
   function $(id) { return document.getElementById(id); }
-
-  function showToast(msg, type = 'success') {
-    const el = $('toast');
-    $('toastMsg').textContent = msg;
-    el.className = `toast align-items-center text-bg-${type} border-0`;
-    bootstrap.Toast.getOrCreateInstance(el, { delay: 2000 }).show();
+  function escHtml(s) {
+    return String(s || '').replace(/[&<>"']/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
-  function onAlgoChange() { $('rsaNote').style.display = $('algo').value === 'RSA' ? '' : 'none'; }
+  // ── Label maps (mirror certificate_request.html / ca_add.html) ───────────────
+  const SUBJECT_LABELS = {
+    commonName: 'Common Name (CN)', countryName: 'Country (C)',
+    stateOrProvinceName: 'State / Province (ST)', localityName: 'Locality (L)',
+    organizationName: 'Organization (O)', organizationalUnitName: 'Organizational Unit (OU)',
+    serialNumber: 'Serial Number', emailAddress: 'Email',
+    givenName: 'Given Name', surname: 'Surname', title: 'Title',
+    streetAddress: 'Street Address', postalCode: 'Postal Code',
+    pseudonym: 'Pseudonym', domainComponent: 'Domain Component (DC)', userId: 'User ID',
+  };
+  // OpenSSL-style short names for jsrsasign's `/`-delimited subject string.
+  const OPENSSL_SHORT = {
+    commonName: 'CN', countryName: 'C', stateOrProvinceName: 'ST', localityName: 'L',
+    organizationName: 'O', organizationalUnitName: 'OU', serialNumber: 'serialNumber',
+    emailAddress: 'emailAddress', givenName: 'GN', surname: 'SN', title: 'T',
+    streetAddress: 'street', postalCode: 'postalCode', pseudonym: 'pseudonym',
+    domainComponent: 'DC', userId: 'UID',
+  };
+  const SAN_LABELS = {
+    dnsNames: 'DNS Names', ipAddresses: 'IP Addresses',
+    emailAddresses: 'Email Addresses', uris: 'URIs',
+  };
+  // jsrsasign extreq key per SAN type.
+  const SAN_JSRSASIGN_KEY = {
+    dnsNames: 'dns', ipAddresses: 'ip', emailAddresses: 'rfc822', uris: 'uri',
+  };
 
-  function validate() {
-    let ok = true;
-    const cnEl = $('cn');
-    if (!cnEl.value.trim()) { cnEl.classList.add('is-invalid'); ok = false; } else { cnEl.classList.remove('is-invalid'); }
-    const cEl = $('country');
-    const cVal = cEl.value.trim();
-    if (cVal && !/^[A-Za-z]{2}$/.test(cVal)) { cEl.classList.add('is-invalid'); ok = false; } else { cEl.classList.remove('is-invalid'); }
-    return ok;
+  // ── State ────────────────────────────────────────────────────────────────────
+  let _template = null;       // loaded template definition (null = free-form)
+  let _libraryBlocks = false; // true when the chosen template needs an algo we can't generate
+
+  // ── jsrsasign capabilities (what we can generate in-browser) ─────────────────
+  // RSA: any key size jsrsasign supports. ECDSA: P-256 / P-384 / P-521.
+  // No Ed25519 / Ed448 keypair generation today.
+  const SUPPORTED_RSA_SIZES   = [2048, 3072, 4096];
+  const SUPPORTED_EC_CURVES   = ['P-256', 'P-384', 'P-521'];
+  // Template curve name → jsrsasign curve name.
+  const JSRSASIGN_CURVE = {
+    'P-256': 'secp256r1', 'P-384': 'secp384r1', 'P-521': 'secp521r1',
+  };
+
+  // ── Init ─────────────────────────────────────────────────────────────────────
+  window.onload = async function () {
+    await loadTemplates();
+    renderForFreeForm();
+  };
+
+  async function loadTemplates() {
+    try {
+      const res = await fetch(`${apiBase}/template`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const templates = await res.json();
+      const sel = $('templateSelect');
+      templates.forEach(t => {
+        const o = document.createElement('option');
+        o.value = t.id; o.textContent = t.name;
+        sel.appendChild(o);
+      });
+    } catch (e) {
+      showToast('Failed to load templates: ' + e.message, 'danger');
+    }
   }
 
+  async function onTemplateChange() {
+    const id = $('templateSelect').value;
+    _template = null;
+    _libraryBlocks = false;
+    hideLibraryWarning();
+    if (!id) {
+      renderForFreeForm();
+      return;
+    }
+    try {
+      const res = await fetch(`${apiBase}/template/${id}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      _template = await res.json();
+      renderForTemplate(_template);
+    } catch (e) {
+      showToast('Failed to load template: ' + e.message, 'danger');
+      $('templateSelect').value = '';
+      renderForFreeForm();
+    }
+  }
+
+  // ── Free-form rendering (the legacy CSR-tool form) ───────────────────────────
+  function renderForFreeForm() {
+    // Subject: today's CN / O / C / serialNumber.
+    $('subjectFields').innerHTML = `
+      <div class="row g-3">
+        <div class="col-md-8">
+          <label class="form-label fw-semibold small">Common Name (CN) <span class="text-danger">*</span></label>
+          <input type="text" class="form-control" id="subj_commonName" placeholder="e.g. device_name">
+        </div>
+        <div class="col-md-4">
+          <label class="form-label fw-semibold small">Serial Number</label>
+          <input type="text" class="form-control" id="subj_serialNumber" placeholder="e.g. 123456">
+        </div>
+        <div class="col-md-6">
+          <label class="form-label fw-semibold small">Organization (O)</label>
+          <input type="text" class="form-control" id="subj_organizationName" placeholder="e.g. Acme Corp">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label fw-semibold small">Country (C)</label>
+          <input type="text" class="form-control text-uppercase" id="subj_countryName" maxlength="2" placeholder="e.g. US">
+        </div>
+      </div>`;
+
+    // SAN: today's single DNS row.
+    $('sanFields').innerHTML = `
+      <div class="row g-3">
+        <div class="col-md-6">
+          <label class="form-label small">DNS Name</label>
+          <div class="input-group">
+            <span class="input-group-text text-muted small">DNS</span>
+            <input type="text" class="form-control" id="freeformDnsSan" placeholder="e.g. device.local">
+          </div>
+        </div>
+      </div>`;
+
+    // Algorithm: today's ECC P-256 + RSA 2048.
+    const algo = $('algoSelect');
+    algo.innerHTML = '<option value="EC">ECC P-256</option><option value="RSA">RSA 2048</option>';
+    $('keyTypeCol').classList.add('d-none');
+    onAlgoChange();
+  }
+
+  // ── Template-driven rendering ────────────────────────────────────────────────
+  function renderForTemplate(tpl) {
+    // Subject — one input per template field.
+    const subjContainer = $('subjectFields');
+    subjContainer.innerHTML = '';
+    const fields = tpl.subject_name?.fields || {};
+    if (Object.keys(fields).length === 0) {
+      subjContainer.innerHTML = '<span class="text-muted small">This template has no subject fields.</span>';
+    } else {
+      const row = document.createElement('div');
+      row.className = 'row g-3';
+      for (const [key, cfg] of Object.entries(fields)) {
+        const col = document.createElement('div');
+        col.className = 'col-md-6';
+        const label = SUBJECT_LABELS[key] || key;
+        const req = cfg.mandatory && !cfg.default ? ' <span class="text-danger">*</span>' : '';
+        col.innerHTML = `
+          <label class="form-label small mb-1">${label}${req}</label>
+          <input type="text" id="subj_${key}" class="form-control font-monospace"
+                 placeholder="${escHtml(cfg.default || '')}">`;
+        row.appendChild(col);
+      }
+      subjContainer.appendChild(row);
+    }
+
+    // SAN — one dynamic group per allowed type the template permits.
+    const sanContainer = $('sanFields');
+    sanContainer.innerHTML = '';
+    const sanTypes  = tpl.extensions?.subjectAltName?.allowed_types || {};
+    const activeSan = Object.entries(sanTypes).filter(([, c]) => c.allowed !== false);
+    if (activeSan.length === 0) {
+      $('sanHeader').classList.add('d-none');
+      sanContainer.classList.add('d-none');
+    } else {
+      $('sanHeader').classList.remove('d-none');
+      sanContainer.classList.remove('d-none');
+      for (const [key, cfg] of activeSan) {
+        const label = SAN_LABELS[key] || key;
+        const req = cfg.mandatory ? ' <span class="text-danger">*</span>' : '';
+        const div = document.createElement('div');
+        div.className = 'mb-3';
+        div.innerHTML = `<div class="form-label small fw-semibold mb-1">${label}${req}</div>
+                         <div id="san_${key}"></div>`;
+        sanContainer.appendChild(div);
+        addSanRow(key, '');
+      }
+    }
+
+    // Algorithm — driven by template constraints.
+    renderTemplateAlgorithmOptions(tpl);
+  }
+
+  function renderTemplateAlgorithmOptions(tpl) {
+    const allowed = tpl.allowed_cryptography?.keyAlgorithms || [];
+    const algo = $('algoSelect');
+    algo.innerHTML = '';
+    hideLibraryWarning();
+    _libraryBlocks = false;
+
+    // Identify which template-permitted algorithms the in-browser library can satisfy.
+    const supported = [];
+    const unsupported = [];
+    if (allowed.length === 0) {
+      // No constraint → offer the legacy free-form pair.
+      ['RSA', 'ECDSA'].forEach(name => supported.push({ name, cfg: null }));
+    } else {
+      for (const a of allowed) {
+        const name = a.name;
+        if (name === 'RSA' || name === 'ECDSA') {
+          supported.push({ name, cfg: a });
+        } else {
+          unsupported.push(name);
+        }
+      }
+    }
+
+    if (supported.length === 0) {
+      // Nothing the browser library can build.
+      const list = unsupported.join(', ') || '(unknown algorithms)';
+      showLibraryWarning(
+        `This template requires ${escHtml(list)}, which the in-browser CSR tool ` +
+        `cannot generate. Use server-side keygen via the certificate request page ` +
+        `to obtain a key of that type.`
+      );
+      _libraryBlocks = true;
+      algo.innerHTML = '<option value="">— unavailable —</option>';
+      $('keyTypeCol').classList.add('d-none');
+      onAlgoChange();
+      return;
+    }
+
+    if (unsupported.length > 0) {
+      // Some algorithms permitted but unsupported by the library — informational.
+      showLibraryWarning(
+        `This template also permits ${escHtml(unsupported.join(', '))}, but the ` +
+        `in-browser CSR tool cannot generate those. Pick a supported algorithm ` +
+        `below, or use server-side keygen for the others.`
+      );
+    }
+
+    supported.forEach(({ name }) => {
+      const o = document.createElement('option');
+      o.value = name; o.textContent = name;
+      algo.appendChild(o);
+    });
+    onAlgoChange();
+  }
+
+  // ── Algorithm / key-type selection ───────────────────────────────────────────
+  function onAlgoChange() {
+    const alg = $('algoSelect').value;
+    $('rsaNote').classList.toggle('d-none', alg !== 'RSA');
+
+    // Free-form: dropdown carries fully-qualified picks ("ECC P-256", "RSA 2048")
+    // and there is no separate key-size / curve column.
+    if (!_template) { $('keyTypeCol').classList.add('d-none'); return; }
+
+    const typeSel = $('keyTypeSelect');
+    const typeLabel = $('keyTypeLabel');
+    const typeCol = $('keyTypeCol');
+    typeSel.innerHTML = '';
+    if (!alg) { typeCol.classList.add('d-none'); return; }
+
+    const allowed = _template.allowed_cryptography?.keyAlgorithms || [];
+    const algCfg = allowed.find(a => a.name === alg);
+
+    if (alg === 'RSA') {
+      typeLabel.textContent = 'Key Size';
+      typeCol.classList.remove('d-none');
+      const minSize = algCfg?.min_size || 2048;
+      const maxSize = algCfg?.max_size || (_template ? 4096 : 2048);
+      const sizes = SUPPORTED_RSA_SIZES.filter(s => s >= minSize && s <= maxSize);
+      if (sizes.length === 0) {
+        showLibraryWarning(
+          `Template requires RSA in [${minSize}, ${maxSize}] bits, but the ` +
+          `in-browser CSR tool only supports ${SUPPORTED_RSA_SIZES.join(' / ')}.`
+        );
+        _libraryBlocks = true;
+        typeSel.innerHTML = '<option value="">— unavailable —</option>';
+        return;
+      }
+      sizes.forEach(s => {
+        const o = document.createElement('option');
+        o.value = String(s); o.textContent = s + ' bits';
+        typeSel.appendChild(o);
+      });
+    } else if (alg === 'ECDSA' || alg === 'EC') {
+      typeLabel.textContent = 'Curve';
+      typeCol.classList.remove('d-none');
+      const curves = (algCfg?.curves || SUPPORTED_EC_CURVES)
+        .filter(c => SUPPORTED_EC_CURVES.includes(c));
+      const dropped = (algCfg?.curves || []).filter(c => !SUPPORTED_EC_CURVES.includes(c));
+      if (curves.length === 0) {
+        showLibraryWarning(
+          `Template requires ECDSA curve(s) ${escHtml(dropped.join(', ') || 'unspecified')}, ` +
+          `which the in-browser CSR tool cannot generate. Supported curves: ` +
+          `${SUPPORTED_EC_CURVES.join(', ')}.`
+        );
+        _libraryBlocks = true;
+        typeSel.innerHTML = '<option value="">— unavailable —</option>';
+        return;
+      }
+      if (dropped.length > 0 && _template) {
+        showLibraryWarning(
+          `The in-browser CSR tool does not support ${escHtml(dropped.join(', '))}; ` +
+          `${escHtml(curves.join(', '))} ${curves.length === 1 ? 'is' : 'are'} offered below.`
+        );
+      }
+      curves.forEach(c => {
+        const o = document.createElement('option');
+        o.value = c; o.textContent = c;
+        typeSel.appendChild(o);
+      });
+    } else {
+      typeCol.classList.add('d-none');
+    }
+  }
+
+  // ── Library-coverage warning ────────────────────────────────────────────────
+  function showLibraryWarning(msg) {
+    $('libraryWarningMsg').innerHTML = msg;
+    $('libraryWarning').classList.remove('d-none');
+    $('btnGenerate').disabled = true;
+  }
+  function hideLibraryWarning() {
+    $('libraryWarning').classList.add('d-none');
+    $('btnGenerate').disabled = false;
+  }
+
+  // ── SAN dynamic rows ─────────────────────────────────────────────────────────
+  function addSanRow(key, value) {
+    const container = $(`san_${key}`);
+    if (!container) return;
+    const row = document.createElement('div');
+    row.className = 'san-row';
+    row.innerHTML = `
+      <input type="text" class="form-control font-monospace" value="${escHtml(value)}" placeholder="Enter value…">
+      <button class="btn btn-sm btn-outline-danger" type="button" onclick="removeSanRow(this, '${key}')">
+        <i class="bi bi-x"></i>
+      </button>`;
+    const addBtn = container.querySelector('.btn-san-add');
+    if (addBtn) container.insertBefore(row, addBtn);
+    else        container.appendChild(row);
+    if (!container.querySelector('.btn-san-add')) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-outline-secondary btn-sm btn-san-add mt-1';
+      btn.innerHTML = '<i class="bi bi-plus me-1"></i>Add';
+      btn.onclick = () => addSanRow(key, '');
+      container.appendChild(btn);
+    }
+  }
+  function removeSanRow(btn, key) {
+    btn.closest('.san-row').remove();
+    const container = $(`san_${key}`);
+    if (!container.querySelector('.san-row')) addSanRow(key, '');
+  }
+  function getSanValues(key) {
+    const container = $(`san_${key}`);
+    if (!container) return [];
+    return Array.from(container.querySelectorAll('input'))
+      .map(el => el.value.trim()).filter(v => v !== '');
+  }
+
+  // ── Subject composition (OpenSSL `/`-delimited string for jsrsasign) ─────────
+  function escSubjectValue(v) {
+    // jsrsasign accepts backslash-escaping for `/` and `\` inside an RDN value.
+    return v.replace(/\\/g, '\\\\').replace(/\//g, '\\/');
+  }
+  function composeSubject() {
+    let s = '';
+    if (_template) {
+      const fields = _template.subject_name?.fields || {};
+      for (const [key, cfg] of Object.entries(fields)) {
+        const el = $(`subj_${key}`);
+        const typed = el ? el.value.trim() : '';
+        const val = typed || (cfg.default || '');
+        if (!val) continue;
+        const short = OPENSSL_SHORT[key] || key;
+        s += `/${short}=${escSubjectValue(val)}`;
+      }
+    } else {
+      const cn = $('subj_commonName').value.trim();
+      const sn = $('subj_serialNumber').value.trim();
+      const org = $('subj_organizationName').value.trim();
+      const c = $('subj_countryName').value.trim().toUpperCase();
+      if (cn) s += `/CN=${escSubjectValue(cn)}`;
+      if (sn) s += `/serialNumber=${escSubjectValue(sn)}`;
+      if (org) s += `/O=${escSubjectValue(org)}`;
+      if (c)  s += `/C=${escSubjectValue(c)}`;
+    }
+    return s;
+  }
+
+  // ── SAN composition (jsrsasign extreq array) ─────────────────────────────────
+  function composeSanArray() {
+    const arr = [];
+    if (_template) {
+      const sanTypes = _template.extensions?.subjectAltName?.allowed_types || {};
+      for (const [key, cfg] of Object.entries(sanTypes)) {
+        if (cfg.allowed === false) continue;
+        const jsKey = SAN_JSRSASIGN_KEY[key];
+        if (!jsKey) continue;
+        for (const v of getSanValues(key)) {
+          arr.push({ [jsKey]: v });
+        }
+      }
+    } else {
+      const dns = $('freeformDnsSan')?.value.trim();
+      if (dns) arr.push({ dns });
+    }
+    return arr;
+  }
+
+  // ── Validation ───────────────────────────────────────────────────────────────
+  function validateBeforeGenerate() {
+    // Algorithm pre-flight (library coverage).
+    if (_libraryBlocks) return 'Selected template requires an algorithm or curve the in-browser CSR tool cannot generate.';
+    if (!$('algoSelect').value) return 'Pick a key algorithm.';
+
+    // Subject mandatory fields.
+    if (_template) {
+      const fields = _template.subject_name?.fields || {};
+      for (const [key, cfg] of Object.entries(fields)) {
+        if (!cfg.mandatory) continue;
+        const el = $(`subj_${key}`);
+        const v = el ? el.value.trim() : '';
+        const hasDefault = !!cfg.default;
+        if (!v && !hasDefault) {
+          el?.classList.add('field-error');
+          return `Subject field "${SUBJECT_LABELS[key] || key}" is required.`;
+        }
+        el?.classList.remove('field-error');
+      }
+      const sanTypes = _template.extensions?.subjectAltName?.allowed_types || {};
+      for (const [key, cfg] of Object.entries(sanTypes)) {
+        if (!cfg.mandatory) continue;
+        if (getSanValues(key).length === 0) {
+          return `SAN "${SAN_LABELS[key] || key}" requires at least one entry.`;
+        }
+      }
+    } else {
+      const cnEl = $('subj_commonName');
+      if (!cnEl.value.trim()) { cnEl.classList.add('field-error'); return 'Common Name is required.'; }
+      cnEl.classList.remove('field-error');
+      const cEl = $('subj_countryName');
+      const cVal = cEl.value.trim();
+      if (cVal && !/^[A-Za-z]{2}$/.test(cVal)) { cEl.classList.add('field-error'); return 'Country must be 2 letters.'; }
+      cEl.classList.remove('field-error');
+    }
+    return null;
+  }
+
+  // ── Generate ─────────────────────────────────────────────────────────────────
   async function generate() {
-    if (!validate()) return;
+    const err = validateBeforeGenerate();
+    if (err) { showToast(err, 'danger'); return; }
+
     const btn = $('btnGenerate');
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Generating…';
-    $('results').style.display = 'none';
+    $('results').classList.add('d-none');
     await new Promise(r => setTimeout(r, 60));
+
     try {
-      const algo = $('algo').value;
-      const cn = $('cn').value.trim();
-      const org = $('org').value.trim();
-      const country = $('country').value.trim().toUpperCase();
-      const sn = $('serialNum').value.trim();
-      const san = $('san').value.trim();
-
-      let subject = `/CN=${cn}`;
-      if (sn) subject += `/serialNumber=${sn}`;
-      if (org) subject += `/O=${org}`;
-      if (country) subject += `/C=${country}`;
-
+      const alg = $('algoSelect').value;
       let privKeyPem, pubKeyPem, sigalg;
-      if (algo === 'EC') {
-        const kp = KEYUTIL.generateKeypair('EC', 'secp256r1');
-        privKeyPem = KEYUTIL.getPEM(kp.prvKeyObj, 'PKCS8PRV');
-        pubKeyPem = KEYUTIL.getPEM(kp.pubKeyObj);
-        sigalg = 'SHA256withECDSA';
+
+      if (_template) {
+        if (alg === 'RSA') {
+          const size = parseInt($('keyTypeSelect').value, 10);
+          const kp = KEYUTIL.generateKeypair('RSA', size);
+          privKeyPem = KEYUTIL.getPEM(kp.prvKeyObj, 'PKCS8PRV');
+          pubKeyPem  = KEYUTIL.getPEM(kp.pubKeyObj);
+          sigalg = 'SHA256withRSA';
+        } else if (alg === 'ECDSA') {
+          const curve = $('keyTypeSelect').value;
+          const jsCurve = JSRSASIGN_CURVE[curve];
+          if (!jsCurve) throw new Error(`Unsupported curve: ${curve}`);
+          const kp = KEYUTIL.generateKeypair('EC', jsCurve);
+          privKeyPem = KEYUTIL.getPEM(kp.prvKeyObj, 'PKCS8PRV');
+          pubKeyPem  = KEYUTIL.getPEM(kp.pubKeyObj);
+          sigalg = 'SHA256withECDSA';
+        } else {
+          throw new Error(`Unsupported algorithm: ${alg}`);
+        }
       } else {
-        const kp = KEYUTIL.generateKeypair('RSA', 2048);
-        privKeyPem = KEYUTIL.getPEM(kp.prvKeyObj, 'PKCS8PRV');
-        pubKeyPem = KEYUTIL.getPEM(kp.pubKeyObj);
-        sigalg = 'SHA256withRSA';
+        // Free-form: "EC" / "RSA" values map to the legacy fixed picks.
+        if (alg === 'EC') {
+          const kp = KEYUTIL.generateKeypair('EC', 'secp256r1');
+          privKeyPem = KEYUTIL.getPEM(kp.prvKeyObj, 'PKCS8PRV');
+          pubKeyPem  = KEYUTIL.getPEM(kp.pubKeyObj);
+          sigalg = 'SHA256withECDSA';
+        } else {
+          const kp = KEYUTIL.generateKeypair('RSA', 2048);
+          privKeyPem = KEYUTIL.getPEM(kp.prvKeyObj, 'PKCS8PRV');
+          pubKeyPem  = KEYUTIL.getPEM(kp.pubKeyObj);
+          sigalg = 'SHA256withRSA';
+        }
       }
 
+      const subject = composeSubject();
+      if (!subject) throw new Error('Subject is empty.');
+
       const csrParams = { subject: { str: subject }, sbjpubkey: pubKeyPem, sigalg, sbjprvkey: privKeyPem };
-      if (san) csrParams.extreq = [{ extname: 'subjectAltName', array: [{ dns: san }] }];
+      const sanArray = composeSanArray();
+      if (sanArray.length > 0) {
+        csrParams.extreq = [{ extname: 'subjectAltName', array: sanArray }];
+      }
 
       const csrPem = KJUR.asn1.csr.CSRUtil.newCSRPEM(csrParams);
       $('privateKeyOut').value = privKeyPem.trim();
       $('csrOut').value = csrPem.trim();
-      $('results').style.display = '';
+      $('results').classList.remove('d-none');
       $('results').scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (e) {
       showToast('Generation failed: ' + e.message, 'danger');
@@ -184,6 +640,7 @@
     }
   }
 
+  // ── Output helpers ───────────────────────────────────────────────────────────
   function saveFile(filename, textareaId) {
     const content = $(textareaId).value;
     const blob = new Blob([content], { type: 'text/plain' });
@@ -193,13 +650,14 @@
     document.body.appendChild(a); a.click();
     document.body.removeChild(a); URL.revokeObjectURL(url);
   }
-
   function copyText(textareaId) {
     navigator.clipboard.writeText($(textareaId).value)
       .then(() => showToast('Copied to clipboard'))
       .catch(() => showToast('Copy failed', 'danger'));
   }
-
-  function resetForm() { $('results').style.display = 'none'; $('cn').focus(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+  function resetForm() {
+    $('results').classList.add('d-none');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
 </script>
 {% endblock %}

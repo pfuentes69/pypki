@@ -20,6 +20,14 @@ class DuplicateSerialError(Exception):
     """Raised when a generated serial number collides with an existing one for the same CA."""
 
 
+class CAStateError(Exception):
+    """Raised when an operation requires a different CA state than the row's current one.
+
+    For example: trying to sign / issue a CRL / bind an OCSP responder against a
+    `pending-issuance` row, or calling `install-cert` on an already-`active` CA.
+    """
+
+
 class PKIDataBase:
     # Default pool size. Override via db_config key "pool_size" if needed.
     _DEFAULT_POOL_SIZE = 5
@@ -703,11 +711,18 @@ class PKIDataBase:
             crypto = ca.get_config()["crypto"]
             kms_key_id = crypto.get("kms_key_id")
             private_key_pem = crypto.get("private_key")
+            # `key_owned` override: in-app CA generation (CR-0001 generate-fresh
+            # root / internal-subordinate) creates a KMS key inside the
+            # transaction and then supplies its id as `kms_key_id`; that path
+            # needs `key_owned = TRUE` so the cascade-on-delete contract
+            # (Decision B / §3.2) holds. Pre-existing key bindings leave this
+            # absent and fall back to the historical default (FALSE).
+            key_owned_override = crypto.get("key_owned")
 
             if kms_key_id is not None:
                 private_key_reference = int(kms_key_id)
-                key_owned = False
-                logger.info(f"CA bound to existing KeyStorage id={private_key_reference} (not owned)")
+                key_owned = bool(key_owned_override) if key_owned_override is not None else False
+                logger.info(f"CA bound to KeyStorage id={private_key_reference} key_owned={key_owned}")
             elif private_key_pem:
                 pub_key_pem = public_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
                 default_provider_id, enc_blob = self._encrypt_pem_under_default_provider(
@@ -943,6 +958,161 @@ class PKIDataBase:
         finally:
             cursor.close()
 
+    def insert_pending_ca(self,
+                          name: str,
+                          private_key_reference: int,
+                          key_owned: bool,
+                          pending_csr: str,
+                          max_validity: int,
+                          serial_number_length: int,
+                          crl_validity: int,
+                          extensions: dict) -> int:
+        """Insert a `pending-issuance` CA row (CR-0001 external-subordinate phase 1).
+
+        The row has no `certificate`, `ski`, or `certificate_chain` yet —
+        those are filled in by `install_ca_certificate` when the external
+        issuer's signed certificate arrives. `pending_csr` stores the
+        PEM-encoded PKCS#10 request emitted at this step so the operator
+        can re-download it from the UI.
+
+        `key_owned` mirrors the semantics of the active path: TRUE when the
+        KMS key was generated as part of this flow, FALSE when bound to a
+        pre-existing key.
+
+        Returns the new CA id, or raises on DB error.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(buffered=True)
+            cursor.execute(f"USE {db_name}")
+
+            cursor.execute(
+                """
+                INSERT INTO CertificationAuthorities (
+                    name, state, private_key_reference, key_owned, pending_csr,
+                    max_validity, serial_number_length, crl_validity, extensions
+                ) VALUES (%s, 'pending-issuance', %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    name,
+                    int(private_key_reference),
+                    bool(key_owned),
+                    pending_csr,
+                    max_validity,
+                    serial_number_length,
+                    crl_validity,
+                    json.dumps(extensions) if not isinstance(extensions, str) else extensions,
+                ),
+            )
+            new_id = cursor.lastrowid
+            self._local.connection.commit()
+            logger.info(
+                f"Inserted pending-issuance CA id={new_id} "
+                f"private_key_reference={private_key_reference} key_owned={bool(key_owned)}"
+            )
+            return new_id
+        except mysql.connector.Error as err:
+            self._local.connection.rollback()
+            logger.error(f"Error inserting pending-issuance CA: {err}")
+            raise
+        finally:
+            cursor.close()
+
+    def install_ca_certificate(self,
+                                ca_id: int,
+                                certificate_pem: str,
+                                certificate_chain: str,
+                                ski: str) -> dict:
+        """Transition a `pending-issuance` CA to `active` (CR-0001 phase 2).
+
+        Atomic UPDATE: requires `state='pending-issuance'`, sets the
+        supplied certificate / chain / SKI, flips state to `active`, and
+        clears `pending_csr`. The caller is responsible for cert parsing,
+        SPKI-match against the bound KMS key, and BasicConstraints
+        validation before invoking this method — those checks live in the
+        service layer so the DB transition is a pure data write.
+
+        Raises:
+            CAStateError: if the row is missing or not in `pending-issuance`.
+
+        Returns a dict with rowcount stats.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(buffered=True, dictionary=True)
+            cursor.execute(f"USE {db_name}")
+
+            cursor.execute(
+                "SELECT state FROM CertificationAuthorities WHERE id = %s",
+                (ca_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise CAStateError(f"CA id={ca_id} not found")
+            if row["state"] != "pending-issuance":
+                raise CAStateError(
+                    f"CA id={ca_id} state={row['state']} — install-cert requires 'pending-issuance'"
+                )
+
+            cursor.execute(
+                """
+                UPDATE CertificationAuthorities
+                SET certificate = %s,
+                    certificate_chain = %s,
+                    ski = %s,
+                    state = 'active',
+                    pending_csr = NULL
+                WHERE id = %s
+                """,
+                (certificate_pem, certificate_chain, ski, ca_id),
+            )
+            affected = cursor.rowcount
+            self._local.connection.commit()
+            logger.info(f"CA id={ca_id} installed cert; state -> active ({affected} row(s) updated)")
+            return {"ca_id": ca_id, "updated": affected}
+        except CAStateError:
+            self._local.connection.rollback()
+            raise
+        except mysql.connector.Error as err:
+            self._local.connection.rollback()
+            logger.error(f"Error installing certificate on CA id={ca_id}: {err}")
+            raise
+        finally:
+            cursor.close()
+
+    def get_unbound_keys(self):
+        """Return KeyStorage rows that no CertificationAuthority references.
+
+        Left-join exclusion against `CertificationAuthorities.private_key_reference`.
+        Used by the unbound-key listing endpoint (`GET /api/kms/keys?unbound=true`)
+        and consumed by both CR-0001 bind-existing and CR-0002 dropdowns.
+
+        Returns a list of dicts shaped like the standard KeyStorage list
+        endpoint; callers add the SPKI fingerprint when rendering.
+        """
+        try:
+            db_name = self.__config["database"]
+            cursor = self._local.connection.cursor(buffered=True, dictionary=True)
+            cursor.execute(f"USE {db_name}")
+            cursor.execute(
+                """
+                SELECT ks.id, ks.provider_id, ks.key_type, ks.label,
+                       ks.storage_type, ks.hsm_token_id, ks.key_owned,
+                       ks.public_key, ks.created_at
+                FROM KeyStorage ks
+                LEFT JOIN CertificationAuthorities ca
+                  ON ca.private_key_reference = ks.id
+                WHERE ca.id IS NULL
+                ORDER BY ks.id
+                """
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+            return rows
+        except mysql.connector.Error as err:
+            logger.error(f"Error listing unbound keys: {err}")
+            return []
+
     def get_ca_collection(self):
         """
         Retrieves a collection of CA IDs and names from the CertificationAuthorities table.
@@ -1064,6 +1234,23 @@ class PKIDataBase:
             db_name = self.__config["database"]
             cursor = self._local.connection.cursor(buffered=True)
             cursor.execute(f"USE {db_name}")
+
+            # Refuse to bind an OCSP responder to a `pending-issuance` CA —
+            # there is no CA certificate / SKI to anchor responses to, and
+            # the cert installed later may legitimately differ from the CSR.
+            # See doc/ca-management-specs.md §17.1 CR-0001.
+            ca_id_in = data.get("ca_id")
+            if ca_id_in is not None:
+                cursor.execute(
+                    "SELECT state FROM CertificationAuthorities WHERE id = %s",
+                    (int(ca_id_in),),
+                )
+                state_row = cursor.fetchone()
+                if state_row is not None and state_row[0] != "active":
+                    raise CAStateError(
+                        f"OCSP responder bind refused: CA id={ca_id_in} is in state "
+                        f"'{state_row[0]}' (must be 'active')"
+                    )
 
             # Store private key in KeyStorage
             private_key_reference = None
@@ -2298,14 +2485,22 @@ class PKIDataBase:
 
     # ── Audit Logs ────────────────────────────────────────────────────────────
 
-    def write_audit_log(self, resource_type: str, resource_id, action: str, user_id: int = 0):
-        """Insert an audit log entry. user_id=0 means automated/system action."""
+    def write_audit_log(self, resource_type: str, resource_id, action: str,
+                        user_id: int = 0, metadata: dict = None):
+        """Insert an audit log entry. user_id=0 means automated/system action.
+
+        `metadata` is an optional dict serialised into the JSON column —
+        currently used by CA creation / generation events to carry
+        ``generation_mode`` per doc/ca-management-specs.md §12.
+        """
         if self._local.connection:
             cursor = self._local.connection.cursor()
             try:
+                metadata_json = json.dumps(metadata) if metadata else None
                 cursor.execute(
-                    "INSERT INTO AuditLogs (resource_type, resource_id, action, user_id) VALUES (%s, %s, %s, %s)",
-                    (resource_type, resource_id, action, user_id)
+                    "INSERT INTO AuditLogs (resource_type, resource_id, action, user_id, metadata) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (resource_type, resource_id, action, user_id, metadata_json)
                 )
                 self._local.connection.commit()
             except mysql.connector.Error as err:
@@ -2446,6 +2641,66 @@ class PKIDataBase:
                         "ALTER TABLE CertificationAuthorities "
                         "ADD COLUMN key_owned BOOLEAN NOT NULL DEFAULT TRUE "
                         "AFTER private_key_reference"
+                    )
+                    self._local.connection.commit()
+
+                # Migration: add CertificationAuthorities.state (CR-0001).
+                # 'pending-issuance' rows have a generated/bound key and a CSR
+                # stored in pending_csr but no certificate yet; they cannot
+                # sign and are invisible to the issuance / CRL pipelines until
+                # POST /api/ca/{id}/install-cert flips them to 'active'.
+                cursor.execute(
+                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+                    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'CertificationAuthorities' "
+                    "AND COLUMN_NAME = 'state'",
+                    (db_name,)
+                )
+                row = cursor.fetchone()
+                if row is not None and row[0] == 0:
+                    logger.info("migrate_schema: adding CertificationAuthorities.state")
+                    cursor.execute(
+                        "ALTER TABLE CertificationAuthorities "
+                        "ADD COLUMN state ENUM('active', 'pending-issuance') "
+                        "NOT NULL DEFAULT 'active' "
+                        "AFTER name"
+                    )
+                    self._local.connection.commit()
+
+                # Migration: add CertificationAuthorities.pending_csr (CR-0001).
+                # Stores the PEM-encoded PKCS#10 request emitted by phase 1 of
+                # the external-subordinate flow, NULL otherwise.
+                cursor.execute(
+                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+                    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'CertificationAuthorities' "
+                    "AND COLUMN_NAME = 'pending_csr'",
+                    (db_name,)
+                )
+                row = cursor.fetchone()
+                if row is not None and row[0] == 0:
+                    logger.info("migrate_schema: adding CertificationAuthorities.pending_csr")
+                    cursor.execute(
+                        "ALTER TABLE CertificationAuthorities "
+                        "ADD COLUMN pending_csr TEXT "
+                        "AFTER certificate_chain"
+                    )
+                    self._local.connection.commit()
+
+                # Migration: add AuditLogs.metadata (CR-0001).
+                # Carries structured fields like `generation_mode` for CA
+                # creation / GENERATE_REQUEST / INSTALL_CERT events.
+                cursor.execute(
+                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+                    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'AuditLogs' "
+                    "AND COLUMN_NAME = 'metadata'",
+                    (db_name,)
+                )
+                row = cursor.fetchone()
+                if row is not None and row[0] == 0:
+                    logger.info("migrate_schema: adding AuditLogs.metadata")
+                    cursor.execute(
+                        "ALTER TABLE AuditLogs "
+                        "ADD COLUMN metadata JSON "
+                        "AFTER user_id"
                     )
                     self._local.connection.commit()
 
@@ -2912,6 +3167,7 @@ class PKIDataBase:
                     CREATE TABLE IF NOT EXISTS CertificationAuthorities (
                         id INT PRIMARY KEY AUTO_INCREMENT,
                         name VARCHAR(255) NOT NULL,
+                        state ENUM('active', 'pending-issuance') NOT NULL DEFAULT 'active',
                         description TEXT,
                         contact_email VARCHAR(255),
                         certificate TEXT,
@@ -2921,6 +3177,7 @@ class PKIDataBase:
                         private_key_reference INT,
                         key_owned BOOLEAN NOT NULL DEFAULT TRUE,
                         certificate_chain TEXT,
+                        pending_csr TEXT,
                         max_validity INT,
                         serial_number_length INT,
                         crl_validity  INT DEFAULT 365,
@@ -3016,6 +3273,7 @@ class PKIDataBase:
                         resource_id INT,
                         action VARCHAR(64) NOT NULL,
                         user_id INT NOT NULL DEFAULT 0,
+                        metadata JSON,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 """,

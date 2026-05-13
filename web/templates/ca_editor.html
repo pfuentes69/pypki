@@ -59,12 +59,6 @@
         <label class="form-label">CA Issuers URL</label>
         <input type="url" class="form-control font-monospace" id="aiaIssuersUrl" placeholder="http://ca.example.com/ca.crt">
       </div>
-      <div class="col-auto align-self-end">
-        <div class="form-check">
-          <input class="form-check-input" type="checkbox" id="aiaCritical">
-          <label class="form-check-label" for="aiaCritical">Mark AIA as critical</label>
-        </div>
-      </div>
     </div>
 
     <hr>
@@ -75,12 +69,6 @@
       <div class="col-md-8">
         <label class="form-label">CRL URL</label>
         <input type="url" class="form-control font-monospace" id="cdpUrl" placeholder="http://ca.example.com/crl.crl">
-      </div>
-      <div class="col-auto align-self-end">
-        <div class="form-check">
-          <input class="form-check-input" type="checkbox" id="cdpCritical">
-          <label class="form-check-label" for="cdpCritical">Mark CDP as critical</label>
-        </div>
       </div>
     </div>
   </div>
@@ -142,11 +130,9 @@
       const access = ext.aia.authorityInfoAccess || {};
       document.getElementById('aiaOcspUrl').value    = access.OCSP?.url ?? '';
       document.getElementById('aiaIssuersUrl').value = access.caIssuers?.url ?? '';
-      document.getElementById('aiaCritical').checked = !!ext.aia.critical;
     }
     if (ext.cdp) {
       document.getElementById('cdpUrl').value      = ext.cdp.url ?? '';
-      document.getElementById('cdpCritical').checked = !!ext.cdp.critical;
     }
   }
 
@@ -156,20 +142,14 @@
     const ocspUrl    = document.getElementById('aiaOcspUrl').value.trim();
     const issuersUrl = document.getElementById('aiaIssuersUrl').value.trim();
     if (ocspUrl || issuersUrl) {
-      ext.aia = {
-        critical: document.getElementById('aiaCritical').checked,
-        authorityInfoAccess: {},
-      };
+      ext.aia = { authorityInfoAccess: {} };
       if (ocspUrl)    ext.aia.authorityInfoAccess.OCSP       = { url: ocspUrl };
       if (issuersUrl) ext.aia.authorityInfoAccess.caIssuers  = { url: issuersUrl };
     }
 
     const cdpUrl = document.getElementById('cdpUrl').value.trim();
     if (cdpUrl) {
-      ext.cdp = {
-        critical: document.getElementById('cdpCritical').checked,
-        url: cdpUrl,
-      };
+      ext.cdp = { url: cdpUrl };
     }
 
     return ext;

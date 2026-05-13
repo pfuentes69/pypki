@@ -376,7 +376,6 @@ function renderTemplateForm(tpl) {
         <label class="form-label small mb-1">${label}${req}</label>
         <input type="text" id="subj_${key}" class="form-control form-control-sm font-monospace"
                placeholder="${escHtml(cfg.default || '')}"
-               value="${escHtml(cfg.default || '')}"
                oninput="validate()">`;
       row.appendChild(col);
     }

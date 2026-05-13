@@ -15,6 +15,9 @@
 
 <div id="alertSection" class="d-none mb-3"></div>
 
+<!-- ── Form (hidden once an external-subordinate CSR has been emitted) ───── -->
+<div id="formSection">
+
 <!-- General -->
 <div class="card mb-4">
   <div class="card-header fw-semibold"><i class="bi bi-building me-2"></i>General</div>
@@ -44,9 +47,9 @@
   <div class="card-header fw-semibold"><i class="bi bi-key me-2"></i>Key &amp; Certificate</div>
   <div class="card-body">
 
-    <!-- Mode selector -->
+    <!-- Top-level mode selector (CR-0001 + CR-0002 extend this to 4 modes) -->
     <div class="mb-4">
-      <div class="btn-group" role="group">
+      <div class="btn-group flex-wrap" role="group">
         <input type="radio" class="btn-check" name="keyMode" id="modePem" value="pem" checked>
         <label class="btn btn-outline-primary btn-sm" for="modePem">
           <i class="bi bi-file-text me-1"></i>PEM (paste or upload)
@@ -55,10 +58,18 @@
         <label class="btn btn-outline-primary btn-sm" for="modeP12">
           <i class="bi bi-archive me-1"></i>PKCS12 (.p12 / .pfx)
         </label>
+        <input type="radio" class="btn-check" name="keyMode" id="modeGenerate" value="generate">
+        <label class="btn btn-outline-primary btn-sm" for="modeGenerate">
+          <i class="bi bi-stars me-1"></i>Generate / Issue
+        </label>
+        <input type="radio" class="btn-check" name="keyMode" id="modeBind" value="bind">
+        <label class="btn btn-outline-primary btn-sm" for="modeBind">
+          <i class="bi bi-link-45deg me-1"></i>Bind KMS key + cert
+        </label>
       </div>
     </div>
 
-    <!-- PEM section -->
+    <!-- ── PEM section (legacy) ───────────────────────────────────────────── -->
     <div id="pemSection">
       <div class="row g-3">
         <div class="col-md-6">
@@ -88,7 +99,7 @@
       </div>
     </div>
 
-    <!-- PKCS12 section -->
+    <!-- ── PKCS12 section (legacy) ────────────────────────────────────────── -->
     <div id="p12Section" class="d-none">
       <div class="row g-3">
         <div class="col-md-6">
@@ -103,6 +114,152 @@
           <label class="form-label">Additional Chain PEM <span class="text-muted small">(optional — if chain is not inside the PKCS12)</span></label>
           <textarea class="form-control font-monospace small" id="p12ChainPem" rows="4"
             placeholder="Extra chain certs in PEM format, if needed."></textarea>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Generate / Issue section (CR-0001) ─────────────────────────────── -->
+    <div id="generateSection" class="d-none">
+
+      <!-- Issuance scenario -->
+      <div class="mb-3">
+        <label class="form-label fw-semibold small d-block">Issuance scenario</label>
+        <div class="btn-group btn-group-sm" role="group">
+          <input type="radio" class="btn-check" name="genScenario" id="scenRoot" value="root" checked>
+          <label class="btn btn-outline-secondary" for="scenRoot">Self-signed (root)</label>
+          <input type="radio" class="btn-check" name="genScenario" id="scenIntSub" value="internal-subordinate">
+          <label class="btn btn-outline-secondary" for="scenIntSub">Signed by an internal CA</label>
+          <input type="radio" class="btn-check" name="genScenario" id="scenExtSub" value="external-subordinate">
+          <label class="btn btn-outline-secondary" for="scenExtSub">Signed by an external CA</label>
+        </div>
+      </div>
+
+      <!-- Key source -->
+      <div class="mb-3">
+        <label class="form-label fw-semibold small d-block">Key source</label>
+        <div class="btn-group btn-group-sm" role="group">
+          <input type="radio" class="btn-check" name="genKeySource" id="keySrcGen" value="generate" checked>
+          <label class="btn btn-outline-secondary" for="keySrcGen">Generate new key in KMS</label>
+          <input type="radio" class="btn-check" name="genKeySource" id="keySrcBind" value="existing">
+          <label class="btn btn-outline-secondary" for="keySrcBind">Use existing KMS key</label>
+        </div>
+      </div>
+
+      <!-- Generate-key fields -->
+      <div id="generateKeyFields" class="row g-3 mb-3">
+        <div class="col-md-4">
+          <label class="form-label small">KMS Provider <span class="text-danger">*</span></label>
+          <select class="form-select form-select-sm" id="genProviderId">
+            <option value="">Loading…</option>
+          </select>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label small">Key Type <span class="text-danger">*</span></label>
+          <select class="form-select form-select-sm" id="genKeyType">
+            <option value="ECDSA-P-256">ECDSA-P-256</option>
+            <option value="ECDSA-P-384">ECDSA-P-384</option>
+            <option value="ECDSA-P-521">ECDSA-P-521</option>
+            <option value="RSA-2048">RSA-2048</option>
+            <option value="RSA-3072">RSA-3072</option>
+            <option value="RSA-4096">RSA-4096</option>
+          </select>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label small">Key Label <span class="text-muted">(defaults to CA name)</span></label>
+          <input type="text" class="form-control form-control-sm" id="genKeyLabel" placeholder="acme-root-2026">
+        </div>
+      </div>
+
+      <!-- Bind-existing key dropdown -->
+      <div id="bindKeyFields" class="row g-3 mb-3 d-none">
+        <div class="col-12">
+          <label class="form-label small">Existing KMS Key <span class="text-danger">*</span></label>
+          <select class="form-select form-select-sm" id="genUnboundKeyId">
+            <option value="">Loading…</option>
+          </select>
+          <div class="form-text">Only keys not yet bound to any CA are listed (see CR-0002 decision 2).</div>
+        </div>
+      </div>
+
+      <!-- Parent CA + validity (internal-sub only) -->
+      <div id="parentCaFields" class="row g-3 mb-3 d-none">
+        <div class="col-md-8">
+          <label class="form-label small">Parent CA <span class="text-danger">*</span></label>
+          <select class="form-select form-select-sm" id="genParentCaId">
+            <option value="">Loading…</option>
+          </select>
+          <div class="form-text">Only active CAs are listed.</div>
+        </div>
+      </div>
+
+      <!-- Validity (root + internal-sub) -->
+      <div id="validityFields" class="row g-3 mb-3">
+        <div class="col-md-3">
+          <label class="form-label small">Validity (days) <span class="text-danger">*</span></label>
+          <input type="number" class="form-control form-control-sm" id="genValidityDays" value="3650" min="1">
+        </div>
+      </div>
+
+      <!-- External-subordinate banner -->
+      <div id="extSubBanner" class="alert alert-info py-2 small d-none">
+        <i class="bi bi-info-circle me-1"></i>The platform will generate a CSR using
+        this key and place the CA in <code>pending-issuance</code> state. Take the CSR
+        to your external CA; once they return a signed certificate, install it via
+        the CA list view.
+      </div>
+
+      <!-- Subject DN — template-driven structured builder (resolved decision 4) -->
+      <div class="card mb-3">
+        <div class="card-header fw-semibold small d-flex justify-content-between align-items-center">
+          <span><i class="bi bi-person me-2"></i>Subject DN (template-driven)</span>
+          <select class="form-select form-select-sm w-auto" id="genTemplateSelect"
+                  onchange="onGenTemplateChange()" style="min-width:14rem">
+            <option value="">Select template…</option>
+          </select>
+        </div>
+        <div class="card-body" id="genSubjectFields">
+          <span class="text-muted small">Pick a template above to render the subject fields, or
+            <a href="#" onclick="toggleRawDn(event)">enter the DN as an RFC 4514 string</a>.</span>
+        </div>
+        <div class="card-body border-top d-none" id="genRawDnSection">
+          <label class="form-label small">Subject DN (RFC 4514) <span class="text-danger">*</span></label>
+          <input type="text" class="form-control form-control-sm font-monospace" id="genRawDn"
+                 placeholder="CN=Acme Root CA,O=Acme,C=CH">
+          <div class="form-text">Direct API callers can compose this themselves — the UI builds it
+            for you when a template is selected.</div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ── Bind KMS key + cert section (CR-0002) ──────────────────────────── -->
+    <div id="bindKmsCertSection" class="d-none">
+      <div class="row g-3">
+        <div class="col-md-12">
+          <label class="form-label">Existing KMS Key <span class="text-danger">*</span></label>
+          <select class="form-select form-select-sm" id="bindKmsKeyId">
+            <option value="">Loading…</option>
+          </select>
+          <div class="form-text">Only keys not yet bound to any CA are listed.</div>
+        </div>
+        <div class="col-md-12">
+          <label class="form-label">CA Certificate (PEM) <span class="text-danger">*</span></label>
+          <div class="input-group input-group-sm mb-1">
+            <input type="file" class="form-control form-control-sm" id="bindCertFile"
+                   accept=".pem,.crt,.cer" onchange="loadFile(this,'bindCertPem')">
+          </div>
+          <textarea class="form-control font-monospace small" id="bindCertPem" rows="8"
+            placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea>
+          <div class="form-text">The certificate's public key must match the selected KMS key (server-verified).</div>
+        </div>
+        <div class="col-12">
+          <label class="form-label">Certificate Chain (PEM, optional)</label>
+          <div class="input-group input-group-sm mb-1">
+            <input type="file" class="form-control form-control-sm" id="bindChainFile"
+                   accept=".pem,.crt,.cer" onchange="loadFile(this,'bindChainPem')">
+          </div>
+          <textarea class="form-control font-monospace small" id="bindChainPem" rows="4"
+            placeholder="Issuer chain in PEM format, root last."></textarea>
         </div>
       </div>
     </div>
@@ -128,12 +285,6 @@
         <label class="form-label">CA Issuers URL</label>
         <input type="url" class="form-control font-monospace" id="aiaIssuersUrl" placeholder="http://ca.example.com/ca.crt">
       </div>
-      <div class="col-auto align-self-end">
-        <div class="form-check">
-          <input class="form-check-input" type="checkbox" id="aiaCritical">
-          <label class="form-check-label" for="aiaCritical">Mark AIA as critical</label>
-        </div>
-      </div>
     </div>
 
     <hr>
@@ -143,12 +294,6 @@
       <div class="col-md-8">
         <label class="form-label">CRL URL</label>
         <input type="url" class="form-control font-monospace" id="cdpUrl" placeholder="http://ca.example.com/crl.crl">
-      </div>
-      <div class="col-auto align-self-end">
-        <div class="form-check">
-          <input class="form-check-input" type="checkbox" id="cdpCritical">
-          <label class="form-check-label" for="cdpCritical">Mark CDP as critical</label>
-        </div>
       </div>
     </div>
   </div>
@@ -161,18 +306,261 @@
   </button>
   <a href="/cas_and_crls.html" class="btn btn-outline-secondary btn-sm">Cancel</a>
 </div>
+
+</div>
+<!-- ── /formSection ─────────────────────────────────────────────────────── -->
+
+<!-- ── CSR-result panel (CR-0001 external-subordinate phase 1) ──────────── -->
+<div id="csrResultSection" class="d-none">
+  <div class="alert alert-success">
+    <h5 class="alert-heading"><i class="bi bi-check-circle me-2"></i>CSR generated successfully</h5>
+    <p class="mb-1">A <code>pending-issuance</code> CA row has been created
+       (id <code id="csrResultCaId"></code>). Take the CSR below to your external CA;
+       once they return a signed certificate, install it from the CAs list
+       (the row will show an "Install cert" action).</p>
+  </div>
+  <div class="card mb-3">
+    <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+      <span><i class="bi bi-file-earmark-code me-2"></i>Certificate Signing Request</span>
+      <div class="d-flex gap-2">
+        <button class="btn btn-sm btn-outline-secondary" onclick="copyCsr()">
+          <i class="bi bi-clipboard me-1"></i>Copy
+        </button>
+        <button class="btn btn-sm btn-outline-primary" onclick="downloadCsr()">
+          <i class="bi bi-download me-1"></i>Download .pem
+        </button>
+      </div>
+    </div>
+    <div class="card-body p-0">
+      <textarea class="form-control font-monospace small border-0" id="csrResultPem" rows="14" readonly></textarea>
+    </div>
+  </div>
+  <div class="d-flex gap-2">
+    <a href="/cas_and_crls.html" class="btn btn-primary btn-sm">
+      <i class="bi bi-arrow-left me-1"></i>Back to CAs
+    </a>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+  function escHtml(s) {
+    return String(s || '').replace(/[&<>"']/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
   // ── Mode toggle ──────────────────────────────────────────────────────────────
+  const MODE_SECTIONS = {
+    pem:      'pemSection',
+    p12:      'p12Section',
+    generate: 'generateSection',
+    bind:     'bindKmsCertSection',
+  };
   document.querySelectorAll('input[name="keyMode"]').forEach(radio => {
     radio.addEventListener('change', () => {
-      const isPem = radio.value === 'pem';
-      document.getElementById('pemSection').classList.toggle('d-none', !isPem);
-      document.getElementById('p12Section').classList.toggle('d-none', isPem);
+      Object.entries(MODE_SECTIONS).forEach(([mode, id]) => {
+        document.getElementById(id).classList.toggle('d-none', mode !== radio.value);
+      });
+      // Lazy-load supporting data the first time we enter a mode that needs it.
+      if (radio.value === 'generate' && !_loaded.generate) {
+        loadGenerateData();
+      }
+      if (radio.value === 'bind' && !_loaded.bind) {
+        loadUnboundKeys('bindKmsKeyId');
+        _loaded.bind = true;
+      }
+      // Re-evaluate the save button label to match the active mode/scenario.
+      updateSaveLabel();
     });
   });
+
+  // ── Sub-toggles inside the Generate / Issue section ──────────────────────────
+  document.querySelectorAll('input[name="genScenario"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      const s = radio.value;
+      document.getElementById('parentCaFields').classList.toggle('d-none', s !== 'internal-subordinate');
+      document.getElementById('validityFields').classList.toggle('d-none', s === 'external-subordinate');
+      document.getElementById('extSubBanner').classList.toggle('d-none', s !== 'external-subordinate');
+      updateSaveLabel();
+    });
+  });
+  document.querySelectorAll('input[name="genKeySource"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      const isGen = radio.value === 'generate';
+      document.getElementById('generateKeyFields').classList.toggle('d-none', !isGen);
+      document.getElementById('bindKeyFields').classList.toggle('d-none', isGen);
+    });
+  });
+
+  // ── State ────────────────────────────────────────────────────────────────────
+  const _loaded = { generate: false, bind: false };
+  let _template = null;          // currently-loaded certificate template definition
+
+  // ── Generate-mode data loaders ───────────────────────────────────────────────
+  async function loadGenerateData() {
+    try {
+      const [provRes, tplRes, caRes] = await Promise.all([
+        fetch(`${apiBase}/crypto-providers`),
+        fetch(`${apiBase}/template`),
+        fetch(`${apiBase}/ca`),
+      ]);
+      const [provs, tpls, cas] = await Promise.all([provRes.json(), tplRes.json(), caRes.json()]);
+
+      const provSel = document.getElementById('genProviderId');
+      provSel.innerHTML = '<option value="">Select provider…</option>';
+      (provs || []).forEach(p => {
+        const o = document.createElement('option');
+        o.value = p.id;
+        o.textContent = `${p.label} (${p.kind || ''})`;
+        provSel.appendChild(o);
+      });
+
+      const tplSel = document.getElementById('genTemplateSelect');
+      tplSel.innerHTML = '<option value="">Select template…</option>';
+      (tpls || []).forEach(t => {
+        const o = document.createElement('option');
+        o.value = t.id; o.textContent = t.name;
+        tplSel.appendChild(o);
+      });
+
+      const parentSel = document.getElementById('genParentCaId');
+      parentSel.innerHTML = '<option value="">Select parent CA…</option>';
+      (cas || []).filter(c => (c.state || 'active') === 'active').forEach(c => {
+        const o = document.createElement('option');
+        o.value = c.id; o.textContent = c.name;
+        parentSel.appendChild(o);
+      });
+
+      loadUnboundKeys('genUnboundKeyId');
+      _loaded.generate = true;
+    } catch (e) {
+      showAlert('Failed to load generate-mode data: ' + e.message);
+    }
+  }
+
+  async function loadUnboundKeys(targetSelectId) {
+    try {
+      const res = await fetch(`${apiBase}/kms/keys?unbound=true`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const keys = await res.json();
+      const sel = document.getElementById(targetSelectId);
+      sel.innerHTML = '<option value="">Select key…</option>';
+      keys.forEach(k => {
+        const o = document.createElement('option');
+        o.value = k.id;
+        const fp = k.spki_fp8 ? ` — ${k.spki_fp8}` : '';
+        o.textContent = `${k.label || '(unlabelled)'} — provider #${k.provider_id} — ${k.key_type}${fp}`;
+        sel.appendChild(o);
+      });
+      if (!keys.length) {
+        sel.innerHTML = '<option value="">No unbound keys available</option>';
+      }
+    } catch (e) {
+      const sel = document.getElementById(targetSelectId);
+      sel.innerHTML = `<option value="">Failed to load: ${escHtml(e.message)}</option>`;
+    }
+  }
+
+  // ── Template-driven subject DN builder (mirrors certificate_request.html) ────
+  const SUBJECT_LABELS = {
+    commonName: 'Common Name (CN)', countryName: 'Country (C)',
+    stateOrProvinceName: 'State / Province (ST)', localityName: 'Locality (L)',
+    organizationName: 'Organization (O)', organizationalUnitName: 'Organizational Unit (OU)',
+    serialNumber: 'Serial Number', emailAddress: 'Email',
+    givenName: 'Given Name', surname: 'Surname', title: 'Title',
+    streetAddress: 'Street Address', postalCode: 'Postal Code',
+    pseudonym: 'Pseudonym', domainComponent: 'Domain Component (DC)', userId: 'User ID',
+  };
+  // RFC 4514 short names — used to compose the DN string sent to the API.
+  const RFC4514_SHORT = {
+    commonName: 'CN', countryName: 'C', stateOrProvinceName: 'ST', localityName: 'L',
+    organizationName: 'O', organizationalUnitName: 'OU', serialNumber: 'SERIALNUMBER',
+    emailAddress: 'emailAddress', domainComponent: 'DC',
+  };
+
+  async function onGenTemplateChange() {
+    const id = document.getElementById('genTemplateSelect').value;
+    _template = null;
+    const fields = document.getElementById('genSubjectFields');
+    if (!id) {
+      fields.innerHTML = '<span class="text-muted small">Pick a template above to render the subject fields, or '
+        + '<a href="#" onclick="toggleRawDn(event)">enter the DN as an RFC 4514 string</a>.</span>';
+      return;
+    }
+    try {
+      const res = await fetch(`${apiBase}/template/${id}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      _template = await res.json();
+      renderSubjectFields(_template);
+    } catch (e) {
+      fields.innerHTML = `<div class="text-danger small">Failed to load template: ${escHtml(e.message)}</div>`;
+    }
+  }
+
+  function renderSubjectFields(tpl) {
+    const container = document.getElementById('genSubjectFields');
+    container.innerHTML = '';
+    const fields = tpl.subject_name?.fields || {};
+    if (Object.keys(fields).length === 0) {
+      container.innerHTML = '<span class="text-muted small">This template has no subject fields. '
+        + '<a href="#" onclick="toggleRawDn(event)">Enter the DN manually</a>.</span>';
+      return;
+    }
+    const row = document.createElement('div');
+    row.className = 'row g-2';
+    for (const [key, cfg] of Object.entries(fields)) {
+      const col = document.createElement('div');
+      col.className = 'col-md-6';
+      const label = SUBJECT_LABELS[key] || key;
+      const req = cfg.mandatory && !cfg.default ? ' <span class="text-danger">*</span>' : '';
+      col.innerHTML = `
+        <label class="form-label small mb-1">${label}${req}</label>
+        <input type="text" id="subj_${key}" class="form-control form-control-sm font-monospace"
+               placeholder="${escHtml(cfg.default || '')}">`;
+      row.appendChild(col);
+    }
+    container.appendChild(row);
+  }
+
+  function toggleRawDn(e) {
+    e?.preventDefault();
+    document.getElementById('genRawDnSection').classList.toggle('d-none');
+  }
+
+  function composeSubjectDn() {
+    const raw = document.getElementById('genRawDn').value.trim();
+    if (raw) return raw;
+    if (!_template) return null;
+    const fields = _template.subject_name?.fields || {};
+    const parts = [];
+    for (const key of Object.keys(fields)) {
+      const el = document.getElementById(`subj_${key}`);
+      const typed = el ? el.value.trim() : '';
+      const val = typed || (fields[key].default || '');
+      if (!val) continue;
+      const short = RFC4514_SHORT[key] || key;
+      const escaped = val.replace(/([,\\+"<>;=])/g, '\\$1');
+      parts.push(`${short}=${escaped}`);
+    }
+    return parts.length ? parts.join(',') : null;
+  }
+
+  // ── Save-button label reflects the active mode/scenario ──────────────────────
+  function updateSaveLabel() {
+    const mode = document.querySelector('input[name="keyMode"]:checked').value;
+    const btn = document.getElementById('saveBtn');
+    if (mode === 'generate') {
+      const scen = document.querySelector('input[name="genScenario"]:checked').value;
+      if (scen === 'external-subordinate') {
+        btn.innerHTML = '<i class="bi bi-file-earmark-arrow-up me-1"></i>Generate CSR';
+      } else {
+        btn.innerHTML = '<i class="bi bi-stars me-1"></i>Generate & Add CA';
+      }
+    } else {
+      btn.innerHTML = '<i class="bi bi-plus-circle me-1"></i>Add CA';
+    }
+  }
 
   // ── File → textarea helper ───────────────────────────────────────────────────
   function loadFile(input, targetId) {
@@ -206,16 +594,13 @@
     const ocspUrl    = document.getElementById('aiaOcspUrl').value.trim();
     const issuersUrl = document.getElementById('aiaIssuersUrl').value.trim();
     if (ocspUrl || issuersUrl) {
-      ext.aia = {
-        critical: document.getElementById('aiaCritical').checked,
-        authorityInfoAccess: {},
-      };
+      ext.aia = { authorityInfoAccess: {} };
       if (ocspUrl)    ext.aia.authorityInfoAccess.OCSP      = { url: ocspUrl };
       if (issuersUrl) ext.aia.authorityInfoAccess.caIssuers = { url: issuersUrl };
     }
     const cdpUrl = document.getElementById('cdpUrl').value.trim();
     if (cdpUrl) {
-      ext.cdp = { critical: document.getElementById('cdpCritical').checked, url: cdpUrl };
+      ext.cdp = { url: cdpUrl };
     }
     return ext;
   }
@@ -227,6 +612,33 @@
     el.innerHTML = msg;
     el.classList.remove('d-none');
     el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  // ── CSR-result helpers ───────────────────────────────────────────────────────
+  function showCsrResult(payload) {
+    document.getElementById('formSection').classList.add('d-none');
+    document.getElementById('csrResultSection').classList.remove('d-none');
+    document.getElementById('csrResultCaId').textContent = payload.ca_id;
+    document.getElementById('csrResultPem').value = payload.csr_pem || '';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+  function copyCsr() {
+    const pem = document.getElementById('csrResultPem').value;
+    navigator.clipboard.writeText(pem).then(
+      () => showToast('CSR copied to clipboard.'),
+      () => showToast('Copy failed — select and copy manually.', 'danger'),
+    );
+  }
+  function downloadCsr() {
+    const pem = document.getElementById('csrResultPem').value;
+    const name = (document.getElementById('caName').value.trim() || 'ca')
+      .replace(/[^A-Za-z0-9._-]+/g, '_');
+    const blob = new Blob([pem], { type: 'application/x-pem-file' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${name}.csr.pem`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
   }
 
   // ── Submit ───────────────────────────────────────────────────────────────────
@@ -243,48 +655,140 @@
     if (isNaN(crlValidity)  || crlValidity  < 1)       { showAlert('CRL validity must be a positive integer.'); return; }
 
     const mode = document.querySelector('input[name="keyMode"]:checked').value;
-    let payload = { name, max_validity: maxValidity, serial_number_length: serialLength,
-                    crl_validity: crlValidity, extensions: buildExtensions() };
+    const basePayload = {
+      name,
+      max_validity: maxValidity,
+      serial_number_length: serialLength,
+      crl_validity: crlValidity,
+      extensions: buildExtensions(),
+    };
 
+    const btn = document.getElementById('saveBtn');
+    btn.disabled = true;
+    const originalLabel = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Working…';
+
+    try {
+      if (mode === 'pem' || mode === 'p12') {
+        await saveLegacy(mode, basePayload);
+      } else if (mode === 'bind') {
+        await saveBindKmsCert(basePayload);
+      } else if (mode === 'generate') {
+        await saveGenerate(basePayload);
+      }
+    } catch (e) {
+      showAlert(`Failed: ${e.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = originalLabel;
+    }
+  }
+
+  // PEM / PKCS12 → existing POST /api/ca
+  async function saveLegacy(mode, payload) {
     if (mode === 'pem') {
       const cert = document.getElementById('certPem').value.trim();
       const key  = document.getElementById('keyPem').value.trim();
-      if (!cert) { showAlert('CA Certificate (PEM) is required.'); return; }
-      if (!key)  { showAlert('Private Key (PEM) is required.'); return; }
-      if (!cert.includes('-----BEGIN CERTIFICATE-----')) { showAlert('The certificate field does not look like a PEM certificate.'); return; }
-      if (!key.includes('-----BEGIN') || !key.includes('PRIVATE KEY-----')) { showAlert('The private key field does not look like a PEM private key.'); return; }
+      if (!cert) throw new Error('CA Certificate (PEM) is required.');
+      if (!key)  throw new Error('Private Key (PEM) is required.');
+      if (!cert.includes('-----BEGIN CERTIFICATE-----'))
+        throw new Error('The certificate field does not look like a PEM certificate.');
+      if (!key.includes('-----BEGIN') || !key.includes('PRIVATE KEY-----'))
+        throw new Error('The private key field does not look like a PEM private key.');
       payload.certificate       = cert;
       payload.private_key       = key;
       payload.certificate_chain = document.getElementById('chainPem').value.trim();
     } else {
-      try {
-        payload.pkcs12_b64      = await readP12AsBase64();
-        payload.pkcs12_password = document.getElementById('p12Password').value;
-        payload.certificate_chain = document.getElementById('p12ChainPem').value.trim();
-      } catch (e) {
-        showAlert(e.message);
-        return;
-      }
+      payload.pkcs12_b64        = await readP12AsBase64();
+      payload.pkcs12_password   = document.getElementById('p12Password').value;
+      payload.certificate_chain = document.getElementById('p12ChainPem').value.trim();
+    }
+    const res = await fetch(`${apiBase}/ca`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+    showToast('CA added successfully.');
+    setTimeout(() => { window.location.href = `/ca_details.html?id=${data.ca_id}`; }, 800);
+  }
+
+  // CR-0002 → existing POST /api/ca with kms_key_id + certificate
+  async function saveBindKmsCert(payload) {
+    const keyId = document.getElementById('bindKmsKeyId').value;
+    const cert  = document.getElementById('bindCertPem').value.trim();
+    if (!keyId) throw new Error('Select an existing KMS key.');
+    if (!cert)  throw new Error('CA Certificate (PEM) is required.');
+    if (!cert.includes('-----BEGIN CERTIFICATE-----'))
+      throw new Error('The certificate field does not look like a PEM certificate.');
+    payload.kms_key_id        = parseInt(keyId, 10);
+    payload.certificate       = cert;
+    payload.certificate_chain = document.getElementById('bindChainPem').value.trim();
+    const res = await fetch(`${apiBase}/ca`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+    showToast('CA added successfully.');
+    setTimeout(() => { window.location.href = `/ca_details.html?id=${data.ca_id}`; }, 800);
+  }
+
+  // CR-0001 → POST /api/ca/generate
+  async function saveGenerate(payload) {
+    const scenario = document.querySelector('input[name="genScenario"]:checked').value;
+    const keySource = document.querySelector('input[name="genKeySource"]:checked').value;
+
+    const subjectDn = composeSubjectDn();
+    if (!subjectDn) throw new Error('Subject DN is required (fill the template fields or enter the raw RFC 4514 string).');
+
+    payload.mode = scenario;
+    payload.subject_dn = subjectDn;
+
+    if (keySource === 'generate') {
+      const providerId = document.getElementById('genProviderId').value;
+      const keyType = document.getElementById('genKeyType').value;
+      const keyLabel = document.getElementById('genKeyLabel').value.trim();
+      if (!providerId) throw new Error('Select a KMS provider.');
+      if (!keyType)    throw new Error('Select a key type.');
+      payload.provider_id = parseInt(providerId, 10);
+      payload.key_type    = keyType;
+      if (keyLabel) payload.key_label = keyLabel;
+    } else {
+      const kmsKeyId = document.getElementById('genUnboundKeyId').value;
+      if (!kmsKeyId) throw new Error('Select an existing KMS key.');
+      payload.kms_key_id = parseInt(kmsKeyId, 10);
     }
 
-    const btn = document.getElementById('saveBtn');
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Adding…';
+    if (scenario === 'internal-subordinate') {
+      const parentId = document.getElementById('genParentCaId').value;
+      if (!parentId) throw new Error('Select a parent CA.');
+      payload.parent_ca_id = parseInt(parentId, 10);
+    }
 
-    try {
-      const res = await fetch(`${apiBase}/ca`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify(payload),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
-      showToast('CA added successfully.');
-      setTimeout(() => { window.location.href = `/ca_details.html?id=${data.ca_id}`; }, 1200);
-    } catch (e) {
-      showAlert(`Failed to add CA: ${e.message}`);
-      btn.disabled = false;
-      btn.innerHTML = '<i class="bi bi-plus-circle me-1"></i>Add CA';
+    if (scenario !== 'external-subordinate') {
+      const v = parseInt(document.getElementById('genValidityDays').value, 10);
+      if (isNaN(v) || v < 1) throw new Error('Validity (days) must be a positive integer.');
+      payload.validity_days = v;
+    }
+
+    const res = await fetch(`${apiBase}/ca/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.description || `HTTP ${res.status}`);
+
+    if (data.state === 'pending-issuance') {
+      showCsrResult(data);
+      showToast('CSR generated. Pending-issuance CA created.');
+    } else {
+      showToast('CA created successfully.');
+      const id = data.id || data.ca_id;
+      setTimeout(() => { window.location.href = `/ca_details.html?id=${id}`; }, 800);
     }
   }
 </script>

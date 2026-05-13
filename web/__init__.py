@@ -13,6 +13,7 @@ _PAGES = {
     'ca_details.html':          ('cas_and_crls',        'CA Details'),
     'ca_add.html':              ('cas_and_crls',        'Add New CA'),
     'ca_editor.html':           ('cas_and_crls',        'Edit CA'),
+    'ca_install_cert.html':     ('cas_and_crls',        'Install Signed Certificate'),
     'template_list.html':       ('template_list',       'Certificate Templates'),
     'template_editor.html':     ('template_list',       'Template Editor'),
     'est_list.html':            ('est_list',            'EST Config'),

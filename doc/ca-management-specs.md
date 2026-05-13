@@ -299,15 +299,17 @@ the first place.
 |---|---|---|
 | `id` | INT PK AI | |
 | `name` | VARCHAR(255) NOT NULL | Operator-facing label. Should be unique but not enforced at the schema level today. |
+| `state` | ENUM('active','pending-issuance') NOT NULL DEFAULT 'active' | Row lifecycle state per §5. `'pending-issuance'` rows have `certificate` / `ski` NULL and a CSR in `pending_csr`; they cannot sign. |
 | `description` | TEXT | |
 | `contact_email` | VARCHAR(255) | |
-| `certificate` | TEXT | CA certificate PEM. |
+| `certificate` | TEXT | CA certificate PEM. NULL while `state='pending-issuance'`. |
 | `public_key` | TEXT | Currently unpopulated by the insert path; the public key is parseable from `certificate`. Reserved for caching. |
-| `ski` | VARCHAR(64) | Hex SubjectKeyIdentifier; computed at insert time from the certificate's SKI extension or RFC 5280 §4.2.1.2 Method 1. |
+| `ski` | VARCHAR(64) | Hex SubjectKeyIdentifier; computed at insert time from the certificate's SKI extension or RFC 5280 §4.2.1.2 Method 1. NULL while `state='pending-issuance'`. |
 | `private_key` | TEXT | **Legacy.** Pre-Phase-1 inline software-key PEM. Modern rows leave this NULL and reference `KeyStorage` via `private_key_reference`. |
 | `private_key_reference` | INT FK → `KeyStorage(id)` | The KMS key id this CA signs with. |
 | `key_owned` | BOOLEAN NOT NULL DEFAULT TRUE | TRUE: key created with CA, deleted on CA delete. FALSE: key pre-existed (KMS-key-bound CA), preserved on CA delete. |
 | `certificate_chain` | TEXT | Concatenated PEM of issuer certificates. Stored verbatim; not validated. |
+| `pending_csr` | TEXT | PEM-encoded PKCS#10 emitted by phase 1 of the external-subordinate flow; NULL otherwise. Cleared back to NULL by `install-cert`. |
 | `max_validity` | INT | Days. `-1` = unlimited (issuance uses GeneralizedTime far-future). |
 | `serial_number_length` | INT | Bytes. Drives the random serial generator. |
 | `crl_validity` | INT DEFAULT 365 | Days. Sets `nextUpdate` on generated CRLs. |
@@ -337,6 +339,10 @@ the first place.
   Phase 0.2 migration.
 - Recent — `key_owned` column added (idempotent migration in
   [db.py:2341–2356](../pypki/db.py#L2341-L2356)).
+- Recent — `state` ENUM and `pending_csr` TEXT columns added
+  for in-app CA generation (CR-0001); idempotent migrations
+  alongside the `key_owned` block in
+  [db.py migrate_schema](../pypki/db.py).
 - Pending — `parent_ca_id` FK + `is_self_signed BOOLEAN` for
   hierarchy modelling (see §2.2).
 
@@ -849,29 +855,51 @@ allocated in order of creation; numbers are never reused.
 
 ### 17.1 CR-0001 — In-app CA generation
 
-**Status:** Proposed.
+**Status:** Accepted.
 
 **Motivation:** §2.2 and §6.4 — every CA-creation path today
-requires the operator to bring a pre-built certificate and key
-(PEM, PKCS#12, or pre-generated KMS key + cert). There is no path
-that generates a fresh signing key in the KMS and obtains the CA
-certificate in-app. This forces operators through out-of-band
-tooling (`openssl req`, `step-ca`, etc.) and re-introduces the
-§13.1 plaintext-transit risk that an in-app flow would avoid by
-construction.
+requires the operator to bring a pre-built certificate (PEM,
+PKCS#12, or pre-generated KMS key + cert). There is no path that
+produces a CA certificate in-app — either against a freshly
+generated key or against an existing KMS key whose certificate
+the operator does not yet have. This forces operators through
+out-of-band tooling (`openssl req`, `step-ca`, etc.) and
+re-introduces the §13.1 plaintext-transit risk that an in-app
+flow would avoid by construction.
 
-Three CA-issuance scenarios must be covered:
+The flow is parameterised on two independent axes:
 
-1. **Self-signed root.** The new key signs its own CA certificate;
-   one transaction.
-2. **Subordinate signed by an internal CA.** An existing `active` CA
-   in this platform signs the new CA certificate; one transaction.
+**Issuance scenario** — who signs the new CA certificate:
+
+1. **Self-signed root.** The CA's own key signs its own
+   certificate; one transaction.
+2. **Subordinate signed by an internal CA.** An existing `active`
+   CA in this platform signs the new CA certificate; one
+   transaction.
 3. **Subordinate signed by an external CA.** The signer lives
    outside this platform (offline / customer / partner PKI). The
-   flow must split in two phases: phase 1 generates the new key
-   and emits a CSR for the operator to take to the external CA;
+   flow splits in two phases: phase 1 prepares the CA's key and
+   emits a CSR for the operator to take to the external CA;
    phase 2 accepts the issuer-signed certificate when it returns
    and transitions the CA to `active`.
+
+**Key source** — where the CA's signing key comes from:
+
+- **Generate** — the platform creates a new key in the KMS as
+  part of the transaction; the new CA row is `key_owned = TRUE`
+  and the key is rolled back (deleted) if the transaction fails.
+  Typical for soft-stored providers or when the operator
+  delegates key custody to the platform.
+- **Bind existing** — the operator selects a pre-existing
+  `KeyStorage` row whose key was created out-of-band (HSM key
+  ceremony, vendor CLI, pre-loaded slot). The new CA row is
+  `key_owned = FALSE`; the key is never deleted by this flow
+  (the platform did not create it). The selected key must be
+  *unbound* — no `CertificationAuthorities` row may reference it.
+
+All six (scenario × key-source) combinations are supported by the
+same endpoint. The downstream signing pipeline is identical from
+step 3 onward; only the initial key-resolution step differs.
 
 **Proposed behaviour:**
 
@@ -887,11 +915,17 @@ POST /api/ca/generate
 {
   "mode":          "root",              // "root" | "internal-subordinate" | "external-subordinate"
   "name":          "Acme Root CA",
+  "subject_dn":    "CN=Acme Root,O=Acme,C=CH",
+  "validity_days": 7300,                // ignored for "external-subordinate"
+
+  // ── key source: exactly one of the two blocks below ────────────────
+  // (a) generate: create a fresh key in the KMS
   "provider_id":   3,                   // KMS provider, must be active
   "key_type":      "ECDSA-P-256",       // see kms-specs.md §9
   "key_label":     "acme-root-2026",    // optional; defaults to name
-  "subject_dn":    "CN=Acme Root,O=Acme,C=CH",
-  "validity_days": 7300,                // ignored for "external-subordinate"
+  // (b) bind existing: reuse a pre-existing KMS key
+  "kms_key_id":    42,                  // KeyStorage.id; must be unbound; provider must be active
+  // ───────────────────────────────────────────────────────────────────
 
   // internal-subordinate only:
   "parent_ca_id":  17,
@@ -905,30 +939,51 @@ POST /api/ca/generate
 }
 ```
 
+The presence of `kms_key_id` discriminates: when set, all of
+`provider_id`, `key_type`, and `key_label` must be absent and the
+request is treated as bind-existing; otherwise `provider_id` and
+`key_type` are required and the request is treated as
+generate-fresh. Supplying both blocks (or neither) returns 400.
+
 Server flow for `mode ∈ {"root", "internal-subordinate"}` — single
 transaction with rollback hooks:
 
-1. Validate inputs; for `internal-subordinate`, resolve
-   `parent_ca_id` and confirm the parent is `active` per §5.
-2. `KMS.generate_key(provider_id, key_type, key_label)` → new
-   `KeyStorage.id`. Treat the returned key id as the rollback handle.
+1. Validate inputs (including the key-source XOR above); for
+   `internal-subordinate`, resolve `parent_ca_id` and confirm the
+   parent is `active` per §5.
+2. Resolve the signing key (`signing_key_id`, `key_owned_flag`):
+   - **generate** (`provider_id + key_type` supplied):
+     `KMS.generate_key(provider_id, key_type, key_label)` → new
+     `KeyStorage.id`; `key_owned_flag = TRUE`; treat the returned
+     id as the rollback handle.
+   - **bind existing** (`kms_key_id` supplied): load the
+     `KeyStorage` row, confirm its provider is `active`, confirm
+     no `CertificationAuthorities` row references it (left-join
+     exclusion, same predicate as `GET /api/kms/keys?unbound=true`
+     — see below), confirm the key's algorithm is permitted for
+     CA signing by the provider. `key_owned_flag = FALSE`; no
+     rollback handle (the key pre-existed).
 3. Build the to-be-signed certificate: subject = `subject_dn`,
    issuer = `subject_dn` (root) or parent's subject
    (internal-subordinate), validity = `now → now + validity_days`,
-   SPKI from the new key, SKI computed per RFC 5280 §4.2.1.2
-   Method 1.
+   SPKI read from `signing_key_id`, SKI computed per RFC 5280
+   §4.2.1.2 Method 1.
 4. Sign:
-   - **root** — self-sign via `KMS.sign_digest(new_key_id, ...)`.
+   - **root** — self-sign via `KMS.sign_digest(signing_key_id, ...)`.
    - **internal-subordinate** — parent-sign via the parent CA's
      `sign_tbs_digest` (§7 pipeline; uses the parent's KMS key).
 5. Insert `CertificationAuthorities` row with `state = 'active'`,
-   `private_key_reference = new_key_id`, `key_owned = TRUE`, chain
-   = parent's `certificate || parent's certificate_chain`
-   (internal-subordinate) or empty (root).
+   `private_key_reference = signing_key_id`,
+   `key_owned = key_owned_flag`, chain = parent's `certificate ||
+   parent's certificate_chain` (internal-subordinate) or empty
+   (root).
 6. Write `CREATE` audit event (§12) with a `generation_mode`
-   metadata field distinguishing this from the upload paths.
-7. On any failure between steps 2 and 5: delete the just-generated
-   KMS key (rollback), abort the transaction, return the error.
+   metadata field distinguishing the (scenario × key-source)
+   combination from the upload paths.
+7. On any failure between steps 2 and 5: if `key_owned_flag = TRUE`,
+   delete the just-generated KMS key (rollback); for
+   `key_owned_flag = FALSE` the pre-existing key is left
+   untouched. Abort the transaction, return the error.
 
 Returns the new CA's full record (same shape as
 `GET /api/ca/{id}/full`).
@@ -936,27 +991,36 @@ Returns the new CA's full record (same shape as
 Server flow for `mode = "external-subordinate"` — single
 transaction:
 
-1. Validate inputs. `parent_ca_id` and `validity_days` must be
-   absent (the external issuer controls both; the operator's
-   request to the external CA is the negotiation channel).
-2. `KMS.generate_key(provider_id, key_type, key_label)` → new
-   `KeyStorage.id`. Rollback handle.
+1. Validate inputs (including the key-source XOR). `parent_ca_id`
+   and `validity_days` must be absent (the external issuer
+   controls both; the operator's request to the external CA is
+   the negotiation channel).
+2. Resolve the signing key (`signing_key_id`, `key_owned_flag`)
+   exactly as in step 2 of the root / internal-subordinate flow
+   above — same generate vs. bind-existing branches, same
+   unbound / provider-active checks, same rollback semantics.
 3. Build a PKCS#10 CertificationRequest: subject = `subject_dn`,
-   SPKI from the new key, requested extensions reflecting CA
-   policy (BasicConstraints `cA=TRUE`, KeyUsage
-   `keyCertSign + cRLSign`, plus any operator-supplied
-   `extensions`). Sign the CSR with the new key via
-   `KMS.sign_digest(new_key_id, ...)`.
+   SPKI read from `signing_key_id`, no requested-extensions
+   attribute. The CSR's job is to convey the public key (and
+   prove possession via the self-signature); the external issuer
+   chooses the resulting certificate's extensions per its own
+   policy, and the CA's operational policy is held in the row's
+   `extensions` field (used at issuance time, not in the CSR).
+   Sign the CSR via `KMS.sign_digest(signing_key_id, ...)`.
 4. Insert `CertificationAuthorities` row with
    `state = 'pending-issuance'`,
-   `private_key_reference = new_key_id`, `key_owned = TRUE`,
-   `pending_csr` = CSR PEM, `certificate` NULL,
-   `certificate_chain` NULL, `ski` NULL (computed at install
-   time).
-5. Write `GENERATE_REQUEST` audit event with
-   `generation_mode = "generate-external-subordinate"`.
-6. On any failure between steps 2 and 4: delete the just-generated
-   KMS key (rollback), abort the transaction, return the error.
+   `private_key_reference = signing_key_id`,
+   `key_owned = key_owned_flag`, `pending_csr` = CSR PEM,
+   `certificate` NULL, `certificate_chain` NULL, `ski` NULL
+   (computed at install time).
+5. Write `GENERATE_REQUEST` audit event with a `generation_mode`
+   value reflecting the (scenario × key-source) combination
+   (e.g. `generate-external-subordinate` or
+   `bind-external-subordinate`).
+6. On any failure between steps 2 and 4: if `key_owned_flag = TRUE`,
+   delete the just-generated KMS key (rollback); otherwise leave
+   the pre-existing key untouched. Abort the transaction, return
+   the error.
 
 Returns:
 
@@ -997,8 +1061,11 @@ Server flow — single transaction:
      otherwise be invalid).
    - BasicConstraints `cA=TRUE` is asserted (rejects an issuer who
      accidentally issued an end-entity cert).
-   - The cert's subject DN matches the stored CSR's subject DN
-     (see open question 7 below — strict by default).
+   - The cert's subject DN is **not** compared against the CSR's
+     DN. External issuers routinely canonicalize DNs (RDN order,
+     casing, attribute encoding); the issued certificate's DN is
+     authoritative and becomes the CA's effective subject going
+     forward.
 3. Update the CA row: `certificate`, `certificate_chain`
    (operator-supplied chain only — issuer's parents are *not*
    inferred), `ski` (recomputed from the cert),
@@ -1008,27 +1075,49 @@ Server flow — single transaction:
 Returns the CA's full record.
 
 A `pending-issuance` CA can also be cancelled by
-`DELETE /api/ca/{id}`: the existing cascade-delete runs as today;
-because `key_owned = TRUE`, the generated KMS key is removed.
+`DELETE /api/ca/{id}`: the existing cascade-delete runs as today.
+The KMS key is removed only when `key_owned = TRUE` (the
+generate path); for `key_owned = FALSE` (the bind-existing path)
+the pre-existing KMS key remains in `KeyStorage` and may be bound
+to a different CA later.
 
 #### UI
 
 Extends [ca_add.html](../web/templates/ca_add.html):
 
-- New top-level mode radio "Generate" alongside "PEM" and "PKCS12".
-- Inside "Generate", a sub-selector picks the issuance source:
-  "Self-signed (root)", "Signed by an internal CA",
-  "Signed by an external CA".
-- Common fields: provider dropdown (filtered to `active`),
+- New top-level mode radio "Generate / Issue" alongside "PEM" and
+  "PKCS12".
+- Inside this mode, two sub-selectors:
+  - **Issuance scenario** — "Self-signed (root)", "Signed by an
+    internal CA", "Signed by an external CA".
+  - **Key source** — "Generate new key in KMS" (default) or
+    "Use existing KMS key".
+- Key-source = generate: provider dropdown (filtered to `active`),
   key-type dropdown (provider's supported set per
-  [kms-specs.md §9](kms-specs.md)), subject-DN builder (CN, O,
-  OU, C, ST, L), policy fields (max_validity,
-  serial_number_length, crl_validity, extensions).
-- Self-signed mode: also asks for `validity_days`.
-- Internal-subordinate mode: asks for `validity_days` and a
+  [kms-specs.md §9](kms-specs.md)), and an optional `key_label`
+  input.
+- Key-source = existing: a KMS-key dropdown populated from
+  `GET /api/kms/keys?unbound=true` (see backend additions below).
+  Each entry shows `{label} — {provider name} — {key_type} —
+  {spki_fp8}` where `spki_fp8` is the first 8 hex chars of the
+  SPKI SHA-256. Inactive-provider keys are filtered out (the
+  flow needs the provider to sign / build the CSR).
+- Common fields (all scenario × key-source combinations):
+  template dropdown (drives the structured subject-DN builder —
+  same mechanism the certificate-request UI uses today via
+  [certificate_request.html](../web/templates/certificate_request.html);
+  the form renders one input per `subject_name.fields` entry,
+  applies the template's constraints, and the page composes the
+  resulting RFC 4514 DN string before submit), and CA policy
+  fields (max_validity, serial_number_length, crl_validity,
+  extensions). The API itself accepts `subject_dn` as a string
+  (composed by the UI) so direct API callers and scripts can
+  bypass the template layer.
+- Self-signed scenario: also asks for `validity_days`.
+- Internal-subordinate scenario: asks for `validity_days` and a
   parent CA dropdown (filtered to `active` CAs).
-- External-subordinate mode: no `validity_days`. On submit, the
-  result page renders the returned `csr_pem` with copy and
+- External-subordinate scenario: no `validity_days`. On submit,
+  the result page renders the returned `csr_pem` with copy and
   download buttons, and an explanatory banner ("take this CSR to
   your external CA; once they return a signed certificate, come
   back to install it"). The CA row appears in the list view in
@@ -1041,10 +1130,22 @@ the operator can abandon the request). The install form accepts a
 PEM upload / textarea and an optional chain PEM, then calls
 `POST /api/ca/{id}/install-cert`.
 
+**Backend additions:**
+
+- `GET /api/kms/keys?unbound=true` — filtered list of `KeyStorage`
+  rows with no `CertificationAuthorities` row referencing them.
+  Implementation is a left-join exclusion against
+  `CertificationAuthorities.private_key_reference`. Same response
+  shape as the existing list endpoint; `unbound` is the only new
+  query parameter. Used by the UI to populate the key dropdown
+  in bind-existing mode, and shared with the residual byo-cert
+  path covered by CR-0002.
+
 **Impact on existing sections:**
 
-- §2.2 — "In-app CA generation" bullet closes; "Operator-visible
-  gaps" shrinks by one.
+- §2.2 — "In-app CA generation" bullet closes (this proposal now
+  covers both fresh-generation and bind-existing key sources);
+  "Operator-visible gaps" shrinks by one.
 - §4.1 — add `state ENUM('active','pending-issuance')` (default
   `'active'`) and `pending_csr TEXT` (nullable); allow
   `certificate` and `ski` to be NULL when
@@ -1055,163 +1156,208 @@ PEM upload / textarea and an optional chain PEM, then calls
   with documented transitions.
 - §6 — promote §6.4 from sketch to a full subsection matching
   the §6.1–§6.3 shape; the request bodies above are canonical;
-  document the two-phase external-subordinate flow.
-- §10 — add `POST /api/ca/generate` and
-  `POST /api/ca/{id}/install-cert` to the route table. Both
-  require `superadmin` or `admin`.
+  document the two-phase external-subordinate flow and both
+  key-source paths.
+- §10 — add `POST /api/ca/generate`,
+  `POST /api/ca/{id}/install-cert`, and the `?unbound=true` query
+  parameter on the existing `GET /api/kms/keys` route to the
+  route table. The two new POST routes require `superadmin` or
+  `admin`; `?unbound=true` reuses the existing list endpoint's
+  authorization.
 - §11 — "Generate CA" wizard bullet closes; mode-selector
-  enumeration grows; list view gains the `pending-issuance`
+  enumeration grows; the "Generate / Issue" mode exposes the
+  key-source sub-selector; list view gains the `pending-issuance`
   badge and "Install signed certificate" action.
 - §12 — `CREATE` audit events gain `generation_mode ∈ {pem,
   pkcs12, kms_bind, generate-root, generate-internal-subordinate,
-  generate-external-subordinate}`. Two new event types:
-  `GENERATE_REQUEST` (CSR emitted) and `INSTALL_CERT` (signed
-  cert installed).
-- §13.1 — note that the three `generate` sub-modes do not transit
-  any plaintext private key, so this risk does not apply to them.
+  generate-external-subordinate, bind-root,
+  bind-internal-subordinate, bind-external-subordinate}`. Two
+  new event types: `GENERATE_REQUEST` (CSR emitted) and
+  `INSTALL_CERT` (signed cert installed). Both event types
+  also carry the same `generation_mode` value as the
+  corresponding `CREATE`.
+- §13.1 — note that neither the `generate-*` nor the `bind-*`
+  sub-modes transit any plaintext private key (generate-* never
+  leaves the KMS; bind-* references a key that was already in
+  the KMS), so this risk does not apply to them.
 - §13 — add a new risk entry for orphan `pending-issuance` CAs
-  (operator generates a CSR, never installs the cert, KMS key
-  sits unused; see open question 8 below).
+  (operator emits a CSR, never installs the cert). For the
+  `generate-*` variant the freshly-created KMS key also sits
+  unused; for `bind-*` the key was pre-existing, so the orphan
+  is the CA row alone. Mitigation: no auto-cancellation — the
+  row stays until the operator either installs a cert or issues
+  `DELETE /api/ca/{id}`; the UI surfaces a "stale pending CA"
+  badge once the row is older than 30 days so operators can
+  spot abandoned requests.
 - §14 — this proposal is the design backing all three bullets of
   Phase 2.
 
-**Open questions:**
+**Resolved decisions:**
 
-1. Reuse `POST /api/ca` with a `mode` discriminator, or add a new
-   `POST /api/ca/generate` endpoint? Current draft chooses the
-   latter to keep the existing route's contract stable and avoid a
-   union type on the request body. Confirm.
-2. For internal-subordinates, is `certificate_chain` always
-   derived from the parent (parent's cert + parent's chain), or
-   may the operator override? Current draft: derive by default,
-   allow override.
-3. Validity cap: reject when internal-subordinate `validity_days`
-   would push `notAfter` past the parent's `notAfter`? Current
-   draft: yes.
-4. Subject-DN entry — operator-typed string vs structured builder?
-   UI sketch is structured; the API accepts the string form so
-   power users can bypass.
-5. `key_label` collisions on the chosen provider — auto-suffix or
-   reject? Lean: reject with 409 and force the operator to pick a
-   unique label.
-6. CSR contents for external-subordinate — does the operator
-   control the requested extensions block (KU, EKU, name
-   constraints, AIA, CDP), or do we hard-code a minimal CA
-   profile and rely on the external issuer's policy? Lean:
-   hard-code BasicConstraints + KeyUsage; allow operator-supplied
-   `extensions` to add (not override) the rest.
-7. `install-cert` subject-DN tolerance — accept the issuer-signed
-   cert when its subject DN differs from the CSR's? Conservative
-   draft: reject mismatches. Some external CAs canonicalize DNs
-   (RDN order, casing) without operator intent; might need a
-   "force install" override.
-8. Expiry on `pending-issuance` rows — auto-cancel after N days
-   if no `install-cert` arrives? Lean: no auto-cancel — leave
-   deletion to the operator, surface a "stale pending CA" badge
-   in the UI once the row is older than 30 days.
-9. Multiple outstanding `pending-issuance` CAs allowed
-   simultaneously? Lean: yes — different external issuers run on
-   different timelines, nothing prevents parallel requests.
+1. **New endpoint, not a discriminator on `POST /api/ca`.** Add
+   `POST /api/ca/generate` for all three sub-modes; the existing
+   `POST /api/ca` contract stays untouched.
+2. **`certificate_chain` for internal-subordinates: derive by
+   default, allow override.** Default is parent's `certificate ||
+   parent's certificate_chain`; the request body's
+   `certificate_chain` field overrides when supplied.
+3. **Validity capped by parent.** For internal-subordinates,
+   reject when `now + validity_days > parent.notAfter`.
+4. **Template-driven structured subject-DN builder in the UI**,
+   reusing the same template machinery as the certificate-request
+   form (one input per `subject_name.fields` entry, template
+   constraints enforced). The API still accepts `subject_dn` as a
+   composed RFC 4514 string so non-UI callers can bypass the
+   template layer.
+5. **`key_label` collisions on the chosen provider → reject with
+   409.** Applies only to the generate-fresh key source; the
+   operator must pick a unique label and no auto-suffix is
+   applied. Bind-existing requests do not supply `key_label`
+   (the label is already on the `KeyStorage` row).
+6. **External-subordinate CSR carries no requested-extensions
+   attribute.** The CSR conveys the public key, subject DN, and
+   proof of possession; the external issuer chooses the resulting
+   certificate's extensions per its own policy. The CA's
+   operational policy (`extensions`, `max_validity`, etc.) is
+   stored on the row and applied at issuance time, not in the
+   CSR — driven by the same template mechanism as decision 4.
+7. **`install-cert` does not compare DNs.** The issued
+   certificate's subject DN is authoritative and supersedes the
+   CSR's DN (external issuers routinely canonicalize RDN order,
+   casing, and attribute encoding). SPKI match and
+   BasicConstraints `cA=TRUE` are the only structural checks.
+8. **No auto-cancel on `pending-issuance` rows.** Deletion stays
+   operator-driven; the UI shows a "stale pending CA" badge once
+   a row is older than 30 days.
+9. **Multiple concurrent `pending-issuance` CAs are allowed.**
+   External issuers run on independent timelines; nothing blocks
+   parallel requests.
+10. **Two key sources on a single endpoint.** `POST /api/ca/generate`
+    accepts either `provider_id + key_type [+ key_label]`
+    (generate fresh) or `kms_key_id` (bind existing); the
+    discriminator is the presence of `kms_key_id`. The downstream
+    signing pipeline is identical from step 3 onward. The
+    bind-existing variant sets `key_owned = FALSE` on the new CA
+    row and never deletes the underlying key, even on failure or
+    on `DELETE /api/ca/{id}`. This subsumes the original CR-0002
+    scope for CAs whose certificate must still be obtained
+    in-app; the residual one-shot "I have both the KMS key and a
+    finished cert already" case is handled separately by the
+    shrunken CR-0002.
 
 **Acceptance criteria** (in addition to §15):
 
-- All four primary CA-creation paths (PEM, PKCS#12, KMS-bind,
-  generate) and the three generate sub-modes (root,
-  internal-subordinate, external-subordinate) produce
+- All four primary CA-creation paths (PEM, PKCS#12, KMS-bind
+  one-shot per CR-0002, in-app issuance per this CR) and the six
+  (scenario × key-source) combinations of this CR produce
   structurally identical `CertificationAuthorities` rows once
   the row is `active`; Decision A (§3.2) still holds.
-- Generated CAs (all sub-modes) are `key_owned = TRUE`; deletion
-  cascades to the KMS key per Decision B (§3.2), including for
-  `pending-issuance` rows.
-- Failure between key generation and the CA insert leaves no
-  orphan `KeyStorage` row, in any sub-mode.
+- `key_owned` reflects key origin: `TRUE` for the three
+  generate-* sub-modes (key created in this transaction), `FALSE`
+  for the three bind-* sub-modes (key pre-existed). Deletion
+  cascades to the KMS key per Decision B (§3.2) only when
+  `key_owned = TRUE`, including for `pending-issuance` rows.
+- Failure between key resolution and the CA insert leaves no
+  orphan `KeyStorage` row in the generate-* sub-modes and never
+  touches the `KeyStorage` row in the bind-* sub-modes.
+- Bind-existing requests targeting a key that is already
+  referenced by a `CertificationAuthorities` row, that belongs to
+  an inactive provider, or whose algorithm is not permitted for
+  CA signing return 400 / 409 with a typed error before any
+  state change.
 - SPKI match (§13.2) is satisfied by construction for root and
-  internal-subordinate; explicitly verified by `install-cert`
-  for external-subordinate.
+  internal-subordinate (both key-source variants); explicitly
+  verified by `install-cert` for external-subordinate.
 - A `pending-issuance` CA cannot sign: calls into the signing
   pipeline (§7), the CRL generator (§9), and OCSP responder bind
   raise a typed error before reaching the KMS.
 - `POST /api/ca/{id}/install-cert` succeeds only on
   `pending-issuance` rows; a second call on an `active` CA
   returns 409.
-- `CREATE` (root, internal-subordinate), `GENERATE_REQUEST`
-  (external-subordinate phase 1), and `INSTALL_CERT`
-  (external-subordinate phase 2) audit events are written
-  inside the same transaction as their respective DB writes.
+- `CREATE` (root, internal-subordinate — both key sources),
+  `GENERATE_REQUEST` (external-subordinate phase 1 — both key
+  sources), and `INSTALL_CERT` (external-subordinate phase 2)
+  audit events are written inside the same transaction as their
+  respective DB writes, with a `generation_mode` reflecting the
+  (scenario × key-source) combination.
 
-### 17.2 CR-0002 — UI for KMS-key-bound CA creation
+### 17.2 CR-0002 — UI for one-shot KMS-key-and-cert binding
 
-**Status:** Proposed.
+**Status:** Accepted.
 
 **Motivation:** §2.2 and §6.3 — the API has accepted `kms_key_id`
-as a CA-creation input since Phase 1
+together with a finished `certificate` as a single-call CA-creation
+input since Phase 1
 ([api_adapters.py:130–178](../web/services/api_adapters.py#L130-L178)),
 but [ca_add.html](../web/templates/ca_add.html) exposes only PEM
-and PKCS#12 modes. Operators with pre-generated KMS keys (typical
-for HSM-bound roots) must currently call the API directly. This is
-primarily a UI gap; one small backend addition is required to
-support an "unbound keys only" listing.
+and PKCS#12 modes. CR-0001 covers the case where the certificate
+must still be produced in-app (against either a fresh or an
+existing KMS key); this CR is the residual one-shot path for
+operators who already have *both* materials in hand — typically
+migrations from another platform, or HSM operations where the
+key ceremony also produced a certificate. Without it, those
+operators must `curl` the API directly.
+
+The supporting backend addition
+(`GET /api/kms/keys?unbound=true`) is defined in CR-0001 and
+shared with the bind-existing key source there; CR-0002 has no
+backend changes of its own.
 
 **Proposed behaviour:**
 
-Backend addition:
+UI-only. Extends [ca_add.html](../web/templates/ca_add.html):
 
-- `GET /api/kms/keys?unbound=true` — filtered list of `KeyStorage`
-  rows with no `CertificationAuthorities` row referencing them.
-  Implementation is a left-join exclusion against
-  `CertificationAuthorities.private_key_reference`. Same response
-  shape as the existing list endpoint; `unbound` is the only new
-  query parameter.
-
-UI changes:
-
-- Add a third mode radio "Bind KMS key" alongside "PEM" and
-  "PKCS12" (becomes the fourth alongside "Generate" once CR-0001
-  lands).
-- Bind-mode panel exposes:
+- Add a third top-level mode radio "Bind KMS key + certificate"
+  alongside "PEM" and "PKCS12" (becomes the fourth alongside
+  "Generate / Issue" from CR-0001).
+- Panel exposes:
   - **KMS key dropdown** — populated from
-    `GET /api/kms/keys?unbound=true`. Each entry shows
-    `{label} — {provider name} — {key_type} — {spki_fp8}` where
-    `spki_fp8` is the first 8 hex chars of the SPKI SHA-256.
-    Inactive-provider keys are shown with a muted badge.
+    `GET /api/kms/keys?unbound=true` (defined in CR-0001). Each
+    entry shows `{label} — {provider name} — {key_type} —
+    {spki_fp8}` where `spki_fp8` is the first 8 hex chars of the
+    SPKI SHA-256. Inactive-provider keys are shown with a muted
+    badge (this mode never signs in-app, so an inactive provider
+    is acceptable as long as the operator only intends to
+    register the CA for revocation / OCSP).
   - **CA certificate PEM** upload / textarea (the cert that
     matches the selected key's public key).
   - **Certificate chain PEM** upload / textarea (optional).
 - On submit: existing `POST /api/ca` with `name`, `kms_key_id`,
   `certificate`, optional `certificate_chain`, and policy fields.
-  No new server route on the create side.
+  No new server route — this mode rides the Phase-1 byo-cert
+  contract unchanged.
 
 **Impact on existing sections:**
 
-- §2.2 — "UI for KMS-key-bound CA creation" bullet closes.
+- §2.2 — "UI for KMS-key-bound CA creation" bullet closes
+  (CR-0001 closes the in-app-issuance half; this CR closes the
+  byo-cert half).
 - §6.3 — unchanged; this proposal exposes the existing path, it
   does not redesign it.
-- §10 — document the `?unbound=true` query parameter under the
-  existing `GET /api/kms/keys` route (cross-ref to
-  [kms-specs.md §9.2](kms-specs.md)).
+- §10 — the `?unbound=true` parameter is documented under CR-0001;
+  no new entries here.
 - §11 — mode-selector enumeration grows by one; the "pending UI
   work" list under §11 shrinks by one.
 
-**Open questions:**
+**Resolved decisions:**
 
-1. Show only `active`-provider keys, or all unbound keys with a
-   muted badge for inactive ones? Lean: show all with badge —
-   operators may want to register a CA against a key whose
-   provider is temporarily inactive.
-2. Where does SPKI mismatch between selected key and uploaded cert
-   surface — client-side pre-check (parse cert in JS, compare DER
-   SPKI bytes) or server 400 from the existing
-   `_verify_kms_key_for_ca`? Lean: server 400 only; client-side
-   parsing adds a JS crypto dependency for one check.
-3. Do we expose the SPKI fingerprint in the dropdown, or only
-   label + provider? Lean: include the 8-char SPKI fingerprint
-   so operators with many keys per provider can disambiguate.
+1. **SPKI mismatch surfaces as a server 400** from the existing
+   `_verify_kms_key_for_ca`. No client-side cert parsing — that
+   would add a JS crypto dependency for a single check, and the
+   server already enforces the invariant authoritatively.
+2. **The KMS-key dropdown includes the 8-char SPKI fingerprint**
+   (first 8 hex chars of SPKI SHA-256), rendered as
+   `{label} — {provider name} — {key_type} — {spki_fp8}`.
+   Operators with many keys per provider can disambiguate at a
+   glance. This dropdown is shared with CR-0001's bind-existing
+   mode, so the same format applies there.
 
 **Acceptance criteria** (in addition to §15):
 
 - An operator can create a CA via the UI by picking a pre-existing
   KMS key and uploading its matching certificate.
-- Keys already bound to a CA do not appear in the dropdown.
+- Keys already bound to a CA do not appear in the dropdown
+  (shared `?unbound=true` predicate with CR-0001).
 - SPKI mismatch produces a clear in-page error without leaving
   the form.
 - No regression in the PEM and PKCS#12 modes.

@@ -34,20 +34,17 @@
     const rows = [];
 
     if (ext.aia) {
-      const aia = ext.aia;
-      const critical = aia.critical ? '<span class="badge bg-danger ms-1">critical</span>' : '';
-      const access = aia.authorityInfoAccess || {};
+      const access = ext.aia.authorityInfoAccess || {};
       if (access.OCSP)
-        rows.push(row('AIA – OCSP' + critical,
+        rows.push(row('AIA – OCSP',
           `<span class="font-monospace small">${access.OCSP.url}</span>`));
       if (access.caIssuers)
-        rows.push(row('AIA – CA Issuers' + critical,
+        rows.push(row('AIA – CA Issuers',
           `<span class="font-monospace small">${access.caIssuers.url}</span>`));
     }
 
     if (ext.cdp) {
-      const critical = ext.cdp.critical ? '<span class="badge bg-danger ms-1">critical</span>' : '';
-      rows.push(row('CDP – CRL URL' + critical,
+      rows.push(row('CDP – CRL URL',
         `<span class="font-monospace small">${ext.cdp.url}</span>`));
     }
 

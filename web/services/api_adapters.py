@@ -29,10 +29,11 @@ def convert_to_serializable(obj):
 
 # ── Audit Logs ────────────────────────────────────────────────────────────────
 
-def write_audit_log(resource_type: str, resource_id, action: str, user_id: int = 0):
+def write_audit_log(resource_type: str, resource_id, action: str,
+                    user_id: int = 0, metadata: dict = None):
     db = pki.get_db()
     with db.connection():
-        db.write_audit_log(resource_type, resource_id, action, user_id)
+        db.write_audit_log(resource_type, resource_id, action, user_id, metadata=metadata)
 
 
 def get_audit_logs(page: int = 1, per_page: int = 25,
@@ -218,7 +219,18 @@ def create_ca(data: dict, user_id: int = 0) -> int:
         },
     }
     new_id = pki.create_ca_from_config_json(json.dumps(config))
-    write_audit_log("cas", new_id, "CREATE", user_id)
+
+    # generation_mode (see doc/ca-management-specs.md §12). The route layer
+    # decodes pkcs12_b64 into private_key + certificate before reaching us,
+    # but leaves the pkcs12_b64 marker on the dict — so it still discriminates
+    # PKCS#12 uploads from raw PEM ones.
+    if data.get("pkcs12_b64"):
+        gen_mode = "pkcs12"
+    elif kms_key_id is not None:
+        gen_mode = "kms_bind"
+    else:
+        gen_mode = "pem"
+    write_audit_log("cas", new_id, "CREATE", user_id, metadata={"generation_mode": gen_mode})
     return new_id
 
 
