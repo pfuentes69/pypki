@@ -31,3 +31,9 @@ temp
 out
 config/config.aws.json
 config/config.local.json
+
+# Runtime state — never commit. The MariaDB container writes its
+# datadir here under uid 999; tracking it pollutes the repo and
+# breaks `git pull` on production boxes because the host user can't
+# stat container-owned files.
+data/
