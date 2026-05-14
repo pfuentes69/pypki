@@ -1,0 +1,3 @@
+[submodule "methodology"]
+	path = methodology
+	url = https://github.com/wisekeylab/wisekey-ai-coding-methodology.git
