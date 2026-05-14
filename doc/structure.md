@@ -85,7 +85,7 @@ pypki/
 │
 ├── doc/                            # Documentation
 │   ├── database.md                 # Full database schema reference
-│   ├── certificate-templates.md    # Certificate template JSON format
+│   ├── certificate-template-specs.md # Certificate template management specification
 │   ├── ca-management-specs.md      # CA management specification
 │   ├── kms-specs.md                # KMS specification
 │   ├── hsm-support-specs.md        # HSM-specific contracts

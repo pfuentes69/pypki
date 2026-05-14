@@ -59,11 +59,17 @@
   // can abandon the request.
   function _actionsCell(ca) {
     if ((ca.state || 'active') === 'pending-issuance') {
-      return `<a class="btn btn-sm btn-outline-success" href="/ca_install_cert.html?id=${ca.id}">
-                <i class="bi bi-upload me-1"></i>Install cert
-              </a>`;
+      return `<div class="d-flex gap-1">
+                <a class="btn btn-sm btn-outline-success"
+                   href="/ca_install_cert.html?id=${ca.id}"
+                   title="Install signed certificate"><i class="bi bi-upload"></i></a>
+              </div>`;
     }
-    return `<a class="btn btn-sm btn-outline-primary" href="/ca_details.html?id=${ca.id}">Details</a>`;
+    return `<div class="d-flex gap-1">
+              <a class="btn btn-sm btn-outline-secondary"
+                 href="/ca_details.html?id=${ca.id}"
+                 title="View"><i class="bi bi-eye"></i></a>
+            </div>`;
   }
 
   function loadCAs() {

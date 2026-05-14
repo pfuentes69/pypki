@@ -111,7 +111,7 @@ remaining work.
 - `max_validity`, `serial_number_length`, and `extensions` drive
   per-CA issuance behaviour. Templates layered on top control
   per-certificate fields (subject, SAN, EKU, etc., specified in
-  [certificate-templates.md](certificate-templates.md)).
+  [certificate-template-specs.md](certificate-template-specs.md)).
 - Self-signed certificates without a managed CA are supported via the
   sentinel `ca_id ∈ {null, 0}` on the issuance routes. The cert is
   recorded with `ca_id = NULL` and `is_self_signed = TRUE`. See
@@ -503,11 +503,11 @@ CA-level issuance policy controls (per the row in
   generated CRLs.
 - **`extensions` (JSON).** Per-CA defaults that template `extensions`
   layer on top of. Schema defined in
-  [certificate-templates.md](certificate-templates.md).
+  [certificate-template-specs.md](certificate-template-specs.md).
 
 Per-certificate issuance is template-driven; the template carries
 subject / SAN / EKU / KU / AIA / CDP. See
-[certificate-templates.md](certificate-templates.md).
+[certificate-template-specs.md](certificate-template-specs.md).
 
 ---
 
@@ -683,7 +683,7 @@ invalid schema persists silently and breaks the next issuance.
 **Mitigation today:** none.
 **Closure:** parse-and-validate the extensions JSON against the
 schema documented in
-[certificate-templates.md](certificate-templates.md) on every
+[certificate-template-specs.md](certificate-template-specs.md) on every
 write.
 
 ### 13.8 Deletion silently orphans certificates
@@ -1642,7 +1642,7 @@ own backend change).
   contracts (PKCS#11 mechanisms, slot addressing, session
   lifecycle, storage-type semantics) that drive HSM-backed CA
   signing.
-- [certificate-templates.md](certificate-templates.md) — template
+- [certificate-template-specs.md](certificate-template-specs.md) — template
   JSON format that drives per-certificate issuance behaviour on top
   of CA policy.
 - [database.md](database.md) — current schema; the

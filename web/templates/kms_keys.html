@@ -368,17 +368,21 @@
       if (!window._isAdmin) return '';
       const labelEsc = (k.label || '').replace(/'/g, "\\'");
       const cka = k.hsm_token_id || '';
-      return `<button class="btn btn-outline-primary btn-sm"
-                onclick="openInlineImport(${k.provider_id}, '${cka}', '${labelEsc}')"
-                title="Import this on-token key">
-                <i class="bi bi-box-arrow-in-down me-1"></i>Import
-              </button>`;
+      return `<div class="d-flex gap-1 justify-content-end">
+                <button class="btn btn-outline-primary btn-sm"
+                  onclick="openInlineImport(${k.provider_id}, '${cka}', '${labelEsc}')"
+                  title="Import this on-token key">
+                  <i class="bi bi-box-arrow-in-down"></i>
+                </button>
+              </div>`;
     }
     if (k.id != null) {
-      return `<a class="btn btn-outline-secondary btn-sm"
-                href="/key_details.html?id=${k.id}" title="Details">
-                <i class="bi bi-info-circle me-1"></i>Details
-              </a>`;
+      return `<div class="d-flex gap-1 justify-content-end">
+                <a class="btn btn-outline-secondary btn-sm"
+                  href="/key_details.html?id=${k.id}" title="View">
+                  <i class="bi bi-eye"></i>
+                </a>
+              </div>`;
     }
     return '<span class="text-muted small">—</span>';
   }

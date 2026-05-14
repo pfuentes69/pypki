@@ -14,7 +14,7 @@ is specified in [ca-management-specs.md](ca-management-specs.md);
 cryptographic key handling that backs the signing operations is in
 [kms-specs.md](kms-specs.md); the JSON template format that drives
 per-issuance policy is in
-[certificate-templates.md](certificate-templates.md). This document
+[certificate-template-specs.md](certificate-template-specs.md). This document
 covers the *certificate layer* only — what sits between the operator /
 EST client and the CA signing pipeline.
 
@@ -463,7 +463,7 @@ The template controls four things, in this order:
    `useCADefault`; criticality is always a template decision
    ([ca-management-specs.md §8](ca-management-specs.md)).
 
-Detailed template grammar lives in [certificate-templates.md](certificate-templates.md).
+Detailed template grammar lives in [certificate-template-specs.md](certificate-template-specs.md).
 
 ---
 
@@ -1050,7 +1050,7 @@ No server changes. The tool keeps consuming only `GET /api/template`
 - [kms-specs.md](kms-specs.md) — KMS specification (provider model,
   backend topology, activation lifecycle, signing API). The signing
   pipeline terminates there indirectly via the CA layer.
-- [certificate-templates.md](certificate-templates.md) — template JSON
+- [certificate-template-specs.md](certificate-template-specs.md) — template JSON
   format that drives per-issuance subject / SAN / extension / key-
   algorithm policy.
 - [hsm-support-specs.md](hsm-support-specs.md) — HSM-specific contracts

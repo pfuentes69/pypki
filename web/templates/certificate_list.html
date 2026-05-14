@@ -152,7 +152,7 @@
               <td class="col-date"><small>${cert.not_before}</small></td>
               <td class="col-date"><small>${cert.not_after}</small></td>
               <td class="col-status">${statusBadge(cert.status)}</td>
-              <td class="col-action"><a class="btn btn-sm btn-outline-primary" href="/certificate_details.html?id=${cert.id}">View</a></td>
+              <td class="col-action"><div class="d-flex gap-1"><a class="btn btn-sm btn-outline-secondary" href="/certificate_details.html?id=${cert.id}" title="View"><i class="bi bi-eye"></i></a></div></td>
             </tr>`).join('');
         }
         const totalPages = data.total ? Math.ceil(data.total / pp) : '?';

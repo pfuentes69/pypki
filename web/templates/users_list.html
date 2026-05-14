@@ -145,7 +145,7 @@
     }
     tbody.innerHTML = users.map(u => {
       const editBtn = canEdit(u)
-        ? `<a href="/user_editor.html?id=${u.id}" class="btn btn-outline-secondary btn-sm me-1" title="Edit"><i class="bi bi-pencil"></i></a>`
+        ? `<a href="/user_editor.html?id=${u.id}" class="btn btn-outline-primary btn-sm" title="Edit"><i class="bi bi-pencil"></i></a>`
         : '';
       const deleteBtn = canDelete(u)
         ? `<button class="btn btn-outline-danger btn-sm" onclick="confirmDelete(${u.id}, '${u.username}')" title="Delete"><i class="bi bi-trash"></i></button>`
@@ -157,7 +157,7 @@
           <td>${activeBadge(u.is_active)}</td>
           <td class="small text-muted">${formatDate(u.last_login)}</td>
           <td class="small text-muted">${formatDate(u.created_at)}</td>
-          <td class="text-end">${editBtn}${deleteBtn}</td>
+          <td class="text-end"><div class="d-flex gap-1 justify-content-end">${editBtn}${deleteBtn}</div></td>
         </tr>`;
     }).join('');
   }

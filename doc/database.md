@@ -83,7 +83,7 @@ Policy documents that control certificate issuance. The full template definition
 |---|---|---|---|
 | `id` | INT | PK, AUTO_INCREMENT | |
 | `name` | VARCHAR(255) | NOT NULL | Template display name (mirrors `template_name` inside `definition`) |
-| `definition` | JSON | NOT NULL | Complete template JSON (see `doc/certificate-templates.md`) |
+| `definition` | JSON | NOT NULL | Complete template JSON (see `doc/certificate-template-specs.md` §7) |
 | `is_default` | BOOLEAN | DEFAULT FALSE | Whether this is the default template |
 | `created_at` | TIMESTAMP | DEFAULT NOW | |
 | `updated_at` | TIMESTAMP | ON UPDATE NOW | |

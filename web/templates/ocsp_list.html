@@ -60,7 +60,7 @@
               <div class="small font-monospace">${escHtml(r.cert_subject)}</div>
               ${r.cert_not_after ? `<div class="small text-muted">Expires: ${r.cert_not_after}</div>` : ''}
             </td>
-            <td><a class="btn btn-sm btn-outline-primary" href="/ocsp_details.html?id=${r.id}">Details</a></td>
+            <td><div class="d-flex gap-1"><a class="btn btn-sm btn-outline-secondary" href="/ocsp_details.html?id=${r.id}" title="View"><i class="bi bi-eye"></i></a></div></td>
           </tr>`).join('');
       })
       .catch(err => {

@@ -303,24 +303,24 @@
 
       // View
       actionBtns.push(
-        `<a href="/crypto_provider_details.html?id=${p.id}" class="btn btn-outline-secondary btn-sm me-1" title="View"><i class="bi bi-eye"></i></a>`
+        `<a href="/crypto_provider_details.html?id=${p.id}" class="btn btn-outline-secondary btn-sm" title="View"><i class="bi bi-eye"></i></a>`
       );
       // Activate / Deactivate (admin)
       if (window._isAdmin) {
         if (st === 'active') {
           actionBtns.push(
-            `<button class="btn btn-outline-warning btn-sm me-1" onclick="deactivateProvider(${p.id})" title="Deactivate"><i class="bi bi-power"></i></button>`
+            `<button class="btn btn-outline-warning btn-sm" onclick="deactivateProvider(${p.id})" title="Deactivate"><i class="bi bi-power"></i></button>`
           );
         } else {
           actionBtns.push(
-            `<button class="btn btn-outline-success btn-sm me-1" onclick="openActivate(${p.id})" title="Activate"><i class="bi bi-play-circle"></i></button>`
+            `<button class="btn btn-outline-success btn-sm" onclick="openActivate(${p.id})" title="Activate"><i class="bi bi-play-circle"></i></button>`
           );
         }
       }
       // Edit (superadmin)
       if (window._isSuperAdmin) {
         actionBtns.push(
-          `<button class="btn btn-outline-secondary btn-sm me-1" onclick="openEditorForUpdate(${p.id})" title="Edit"><i class="bi bi-pencil"></i></button>`
+          `<button class="btn btn-outline-primary btn-sm" onclick="openEditorForUpdate(${p.id})" title="Edit"><i class="bi bi-pencil"></i></button>`
         );
       }
       // Delete (superadmin, never the default)
@@ -341,7 +341,7 @@
           <td>${p.auto_activate ? '<i class="bi bi-check-circle text-success"></i>' : '<i class="bi bi-x-circle text-muted"></i>'}</td>
           <td>${authSourceLabel(p.auth_secret_ref)}</td>
           <td class="text-end">${keyCount}</td>
-          <td class="text-end">${actionBtns.join('')}</td>
+          <td class="text-end"><div class="d-flex gap-1 justify-content-end">${actionBtns.join('')}</div></td>
         </tr>`;
     }).join('');
   }
