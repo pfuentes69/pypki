@@ -1010,7 +1010,10 @@ A **stable platform** has, in addition:
 - [kms-specs.md](kms-specs.md) — KMS surface that signs the resulting
   certificate; allowed-cryptography enforcement upstream determines
   which KMS operations are reachable.
-- [database.md](database.md) — `CertificateTemplates` schema and the
+- [est-specs.md](est-specs.md) — EST service specification; aliases
+  reference templates via `ESTAliases.template_id` and run the same
+  enforcement pipeline.
+- [database-specs.md](database-specs.md) — `CertificateTemplates` schema and the
   FKs from `Certificates` / `ESTAliases`.
 - [PROGRESS.md](PROGRESS.md) — current implementation status.
 - [roadmap.md](roadmap.md) — strategic intent.

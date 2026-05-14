@@ -1,28 +1,31 @@
 # pyPKI — Progress Tracker
 
-This document is the operational status board for everything tracked in
-[roadmap.md](roadmap.md). Each roadmap item is broken down into concrete
-tasks with one of four status markers:
+This document is the operational status board for everything tracked
+in [roadmap.md](roadmap.md). Each roadmap item is broken down into
+concrete tasks with one of four status markers:
 
 - **[done]** — implemented, tested, and merged.
 - **[partial]** — some sub-tasks complete, others outstanding.
 - **[pending]** — not started.
-- **[deferred]** — blocked on an external dependency (hardware, SDK, …).
+- **[deferred]** — blocked on an external dependency (hardware, SDK,
+  …).
 
-When new requirements arrive, both [roadmap.md](roadmap.md) (the strategic
-view) and this document (the tactical status board) are updated together.
+When new requirements arrive, both [roadmap.md](roadmap.md) (the
+strategic view) and this document (the tactical status board) are
+updated together.
 
 ### Working rule
 
-Each entry in this file is a **single line**: state, title, link to the
-authoritative description.
+Each entry in this file is a **single line**: state, title, link to
+the authoritative description.
 
-The authoritative description lives elsewhere — in the matching module
-spec (e.g. [kms-specs.md](kms-specs.md)) for spec-backed work, or in the
+The authoritative description lives elsewhere — in the matching
+module spec (e.g. [kms-specs.md](kms-specs.md),
+[est-specs.md](est-specs.md)) for spec-backed work, or in the
 matching [roadmap.md](roadmap.md) bullet for smaller features that do
-not warrant their own spec doc. If you find yourself adding a paragraph
-of context here, the detail belongs upstream and this entry should
-shrink to a pointer.
+not warrant their own spec doc. If you find yourself adding a
+paragraph of context here, the detail belongs upstream and this entry
+should shrink to a pointer.
 
 The "at a glance" table below is the only place where this rule is
 relaxed — it summarises counts.
@@ -36,61 +39,68 @@ relaxed — it summarises counts.
 | §1 Reliability And Testing | 2 | 0 | 11 | 0 | 13 |
 | §2 Security Hardening | 5 | 0 | 4 | 0 | 9 |
 | §3 HSM / PKCS#11 Support | 1 | 1 | 0 | 3 | 5 |
-| §4 PKI And Protocol Maturity | 0 | 2 | 6 | 0 | 8 |
+| §4 PKI And Protocol Maturity | 1 | 2 | 8 | 0 | 11 |
 | §5 Deployment And Operations | 0 | 2 | 7 | 0 | 9 |
 | §6 Usability And Admin Experience | 5 | 3 | 14 | 0 | 22 |
-| §7 Documentation And Lifecycle Management | 1 | 2 | 2 | 0 | 5 |
-| §8 Functional Improvements | 1 | 0 | 1 | 0 | 2 |
-| **Total** | **15** | **10** | **45** | **3** | **73** |
+| §7 Documentation And Lifecycle Management | 2 | 1 | 2 | 0 | 5 |
+| §8 Functional Improvements | 1 | 0 | 2 | 0 | 3 |
+| **Total** | **17** | **9** | **48** | **3** | **77** |
 
 Counts reflect entries in this doc after the rule above is applied —
-broad initiatives may be a single rolled-up line that points at a spec.
-Granular work breakdowns live in the spec they reference.
+broad initiatives may be a single rolled-up line that points at a
+spec. Granular work breakdowns live in the spec they reference.
 
 Headline: HSM / PKCS#11 work (§3) is feature-complete; the only open
 items are vendor-fidelity validation passes deferred to hardware /
 SDK availability. App-level testing (§1), deployment operations (§5),
 and non-KMS UX polish (§6) are the largest remaining blocks of work.
+EST mTLS authentication (§2 / §8, CR-0001 in
+[est-specs.md §14.1](est-specs.md)) is the next-up security item.
 
 ---
 
 ## §1 — Reliability And Testing
 
 ### [done]
-- **KMS-layer pytest coverage.** 54 tests across `test_kms_software_backend.py`,
-  `test_kms_pkcs11_backend.py`, `test_kms_phase4_secrets.py`,
-  `test_kms_phase5_keymgmt.py`, `test_kms_phase6_hardening.py`. Includes a
-  multi-threaded SoftHSM2 stress test and end-to-end generate / import /
-  delete round-trips. — Phases 0–6 (kms-specs.md §13).
+- **KMS-layer pytest coverage.** 54 tests across
+  `test_kms_software_backend.py`, `test_kms_pkcs11_backend.py`,
+  `test_kms_phase4_secrets.py`, `test_kms_phase5_keymgmt.py`,
+  `test_kms_phase6_hardening.py`, plus 8 in
+  `test_pkcs12_storage_regime.py`. Includes a multi-threaded SoftHSM2
+  stress test and end-to-end generate / import / delete round-trips.
+  — Phases 0–6 ([kms-specs.md §13](kms-specs.md)).
 - **Pytest fixture infrastructure for KMS tests.** `tests/conftest.py`
   provides `FakeDB`, `kms`, `hsm_pin_kek`, `softhsm_module`,
   `softhsm_pkcs11_tool`, `softhsm_token`, `softhsm_rsa_key`,
-  `softhsm_ecdsa_key`. Skips gracefully when SoftHSM2 / pkcs11-tool are
-  not installed.
+  `softhsm_ecdsa_key`. Skips gracefully when SoftHSM2 / pkcs11-tool
+  are not installed.
 
 ### [pending]
-- **App-level pytest coverage — certificate issuance.** No tests exercise
-  the issuance flow end-to-end (CSR → template → CA → cert).
+- **App-level pytest coverage — certificate issuance.** No tests
+  exercise the issuance flow end-to-end (CSR → template → CA → cert).
 - **App-level pytest coverage — revocation.** Revoke / un-revoke,
   CRL re-generation triggers, audit-log entries.
-- **App-level pytest coverage — CRL.** CRL signing, CDP fields, scheduled
-  refresh.
-- **App-level pytest coverage — OCSP responder.** Request parsing, response
-  signing, nonce policy, hash-algorithm options, responder-id encoding.
+- **App-level pytest coverage — CRL.** CRL signing, CDP fields,
+  scheduled refresh.
+- **App-level pytest coverage — OCSP responder.** Request parsing,
+  response signing, nonce policy, hash-algorithm options, responder-id
+  encoding.
 - **App-level pytest coverage — EST.** `cacerts`, `simpleenroll`,
-  `simplereenroll`, alias resolution, Basic-Auth gate.
+  alias resolution, Basic-Auth gate (and mTLS gate once CR-0001
+  lands).
 - **App-level pytest coverage — user management.** Create / update /
   delete, role gating, password change.
-- **Replace ad-hoc smoke scripts with fixtures.** The `tests/generate_*.py`
-  scripts in the interactive menu (`python -m tests`) overlap with what
-  pytest fixtures should provide; consolidate.
+- **Replace ad-hoc smoke scripts with fixtures.** The
+  `tests/generate_*.py` scripts in the interactive menu
+  (`python -m tests`) overlap with what pytest fixtures should
+  provide; consolidate.
 - **CI workflow file.** No `.github/workflows/` directory exists.
 - **CI: lint check.** No linter wired up (ruff / flake8 / pylint).
 - **CI: syntax / import validation.** Currently done ad-hoc via
   `python -c "import ast; ast.parse(...)"`; needs a proper job.
-- **CI: pytest run.** Should run the existing 54 tests on every PR.
+- **CI: pytest run.** Should run the existing test suite on every PR.
 - **CI: integration MariaDB.** Spin up a disposable MariaDB service
-  container and exercise the migration + reset_pki path end-to-end.
+  container and exercise the migration + `reset_pki` path end-to-end.
 
 ---
 
@@ -98,44 +108,39 @@ and non-KMS UX polish (§6) are the largest remaining blocks of work.
 
 ### [done]
 - **Software-key encryption-at-rest.** `KeyStorage.private_key` for
-  asymmetric software keys is now AES-256-GCM ciphertext under a
-  per-provider KEK derived via HKDF-SHA256 from `HSM_PIN_KEK`. — Phase 0.2.
+  asymmetric software keys is AES-256-GCM ciphertext under a
+  per-provider KEK derived via HKDF-SHA256 from `HSM_PIN_KEK`. —
+  Phase 0.2.
 - **HSM PIN encryption-at-rest.** Provider auth secrets via
-  `auth_secret_ref='db:encrypted'` are wrapped under the master KEK and
-  stored in `CryptoProviders.auth_secret_blob`. — Phase 4.
+  `auth_secret_ref='db:encrypted'` are wrapped under the master KEK
+  and stored in `CryptoProviders.auth_secret_blob`. — Phase 4.
 - **Per-provider secret reference + auto-activation toggle.** Resolvers
-  `db:encrypted` / `env:` / `vault:` / `operator:prompt`; `auto_activate`
-  validated against the resolver kind. — Phase 4 (kms-specs.md §6–7).
-- **`HSM_PIN_KEK` plumbing.** Generated by `setup.sh`, written to `.env`,
-  passed to the Docker container via `docker-compose.yml`,
-  auto-loaded from `.env` in local-dev mode by `web/services/__init__.py`.
+  `db:encrypted` / `env:` / `vault:` / `operator:prompt`;
+  `auto_activate` validated against the resolver kind. — Phase 4
+  ([kms-specs.md §6–7](kms-specs.md)).
+- **`HSM_PIN_KEK` plumbing.** Generated by `setup.sh`, written to
+  `.env`, passed to the Docker container via `docker-compose.yml`,
+  auto-loaded from `.env` in local-dev mode by
+  `web/services/__init__.py`.
 - **End-entity key-escrow regime aligned with the per-provider KEK.**
-  `generate_pkcs12(store_key=True)` now KEK-wraps in both branches:
-  the no-passphrase path stores `storage_type='Encrypted'` (KEK-wrapped
-  plaintext PEM, loadable through `KMS.sign_digest`); the passphrase path
-  stores `storage_type='PassphraseEncrypted'` (KEK-wrapped passphrase-
-  encrypted PEM, accessible only via `build_pkcs12_for_certificate` with
-  the operator-supplied passphrase). The new enum value, the
-  idempotent migration that adds it, the `db.kek_wrap_pem` public helper,
-  the tightened `_looks_like_pem` (excludes PKCS#8 ENCRYPTED + PKCS#1
-  Proc-Type: 4,ENCRYPTED so the migration doesn't double-encrypt
-  passphrase-PEM), and the explicit refusal in
-  `SoftwareBackend.load_key` together restore single-meaning of
-  `'Encrypted'` and give defense-in-depth uniform at-rest encryption.
-  Touched: `pypki/db.py`, `pypki/core.py`, `pypki/backends/software.py`.
-  Regression coverage in `tests/test_pkcs12_storage_regime.py`
-  (8 tests: detection refinement, refusal-with-clear-message on the
-  sign path, KEK-wrap round-trip, wrong-passphrase failure mode).
+  `generate_pkcs12(store_key=True)` KEK-wraps in both branches;
+  `storage_type='PassphraseEncrypted'` (new enum value) distinguishes
+  the passphrase-encrypted regime so the
+  `'Encrypted'` label keeps single meaning. Refusal-with-clear-message
+  in `SoftwareBackend.load_key`. Regression coverage in
+  `tests/test_pkcs12_storage_regime.py`.
 
 ### [pending]
 - **First-class secret management for admin/bootstrap credentials.**
   Currently generated by `setup.sh` and stored in `.env` /
   `.setup_credentials`; no integration with Vault / k8s secrets / etc.
 - **MFA for the management UI.** `auth_routes.py` issues plain JWTs.
-- **Shorter-lived / rotatable JWT tokens.** Token TTL and rotation policy
-  not configurable; refresh-token flow not implemented.
-- **EST client-certificate authentication.** `est_routes.py` only
-  supports Basic Auth via the alias `username` / `password_hash`.
+- **Shorter-lived / rotatable JWT tokens.** Token TTL and rotation
+  policy not configurable; refresh-token flow not implemented.
+- **EST client-certificate authentication (CR-0001).** Schema column
+  (`ESTAliases.cert_fingerprint`) and UI placeholder exist; route-layer
+  enforcement not wired. Full design in
+  [est-specs.md §14.1](est-specs.md).
 
 ---
 
@@ -146,48 +151,73 @@ Cross-reference: [kms-specs.md](kms-specs.md) for the KMS design,
 contracts.
 
 ### [done]
-- Phases 0–6 — provider model, sibling backends, SoftHSM2 dev env, RSA + ECDSA HSM signing, slot-by-label, encrypted-at-rest software keys, `auth_secret_ref` resolvers, provider-scoped session lifecycle, thread-safe `load_key`, provider/key API+UI, hex `hsm_token_id` validation, `Symmetric` storage type, `pkcs11_helper`/`KeyTools` slim-down. Per-phase breakdown: [kms-specs.md §2](kms-specs.md).
+- Phases 0–6 — provider model, sibling backends, SoftHSM2 dev env,
+  RSA + ECDSA HSM signing, slot-by-label, encrypted-at-rest software
+  keys, `auth_secret_ref` resolvers, provider-scoped session lifecycle,
+  thread-safe `load_key`, provider/key API+UI, hex `hsm_token_id`
+  validation, `Symmetric` storage type, `pkcs11_helper`/`KeyTools`
+  slim-down. Per-phase breakdown:
+  [kms-specs.md §2](kms-specs.md).
 
 ### [partial]
-- Test parametrisation across backends — software and PKCS#11 suites exist separately; matrix consolidation pending.
+- Test parametrisation across backends — software and PKCS#11 suites
+  exist separately; matrix consolidation pending.
 
 ### [deferred]
-- YubiHSM 2 simulator fidelity pass — pending Yubico SDK availability ([kms-specs.md §13 Phase 7](kms-specs.md)).
+- YubiHSM 2 simulator fidelity pass — pending Yubico SDK availability
+  ([kms-specs.md §13 Phase 7](kms-specs.md)).
 - Thales DPoD fidelity pass — pending trial registration.
-- AWS CloudHSM (Luna fallback) fidelity pass — pending account access.
+- AWS CloudHSM (Luna fallback) fidelity pass — pending account
+  access.
 
 ---
 
 ## §4 — PKI And Protocol Maturity
 
-Cross-reference: [ca-management-specs.md](ca-management-specs.md) for
-the CA spec (lifecycle, creation paths, signing pipeline, CRL
-distribution, and the operator-visible weaknesses + risks catalogue);
-[ca-management-specs.md §17](ca-management-specs.md) for in-flight
-design proposals (`CR-NNNN`); [roadmap.md §4](roadmap.md) for
-cross-area intent.
+Cross-reference: [ca-management-specs.md](ca-management-specs.md),
+[certificate-management-specs.md](certificate-management-specs.md),
+[certificate-template-specs.md](certificate-template-specs.md),
+[est-specs.md](est-specs.md). In-flight design proposals (`CR-NNNN`)
+live in §17 / §14 of the matching spec.
+
+### [done]
+- **In-app CA generation (CR-0001).** Root, internal-subordinate, and
+  external-subordinate (CSR phase 1 + install-cert phase 2) all wired;
+  `pending-issuance` state surfaced in the UI.
+  [ca-management-specs.md §17.1](ca-management-specs.md).
 
 ### [partial]
-- **CA / template validation before persistence.** Some validation
-  landed in this conversation: `kms_key_id` ↔ certificate public-key
-  match check on CA creation, `CryptoProviders.validate_provider_auth_config`
-  cross-field rules. Comprehensive CA / template / OCSP / EST payload
-  validation still missing.
-- **CA renewal workflow (partial).** The current path requires deleting
-  and re-creating the CA. Renewal that preserves CA identity / SKI is
-  not implemented.
+- **CA / template validation before persistence.** `kms_key_id` ↔
+  certificate public-key match check on CA creation,
+  `CryptoProviders.validate_provider_auth_config` cross-field rules
+  landed. Comprehensive JSON-schema validation of template
+  `definition` still missing
+  ([certificate-template-specs.md §12.1](certificate-template-specs.md));
+  CA / OCSP / EST payload-level validation still missing.
+- **CA renewal workflow (partial).** The current path requires
+  deleting and re-creating the CA. Renewal that preserves CA identity
+  / SKI is not implemented.
 
 ### [pending]
-- **OCSP / CRL interop tests.** Run signed responses through `openssl
-  ocsp` / `certutil` / Windows CryptoAPI to confirm RP-side acceptance.
+- **OCSP / CRL interop tests.** Run signed responses through
+  `openssl ocsp` / `certutil` / Windows CryptoAPI to confirm RP-side
+  acceptance.
 - **Key rollover workflow.** Generate new key for an existing CA,
   re-sign chain, mark old key for retirement.
 - **CA decommissioning workflow.** Safe shutdown ordering: revoke
   issued certs, generate final CRL, archive, delete.
 - **OCSP responder decommissioning workflow.** Same shape, OCSP-side.
-- **OpenAPI / Swagger documentation for the management API.** Discussed
-  earlier in conversation; `flasgger` (lightest touch) or `APIFlask`
-  (cleaner, more invasive) — not implemented.
+- **EST `simplereenroll`.** Not implemented; pairs with EST CR-0001
+  mTLS work ([est-specs.md §10.5](est-specs.md)).
+- **EST `csrattrs`.** Not implemented; clients cannot query the server
+  for required CSR attributes
+  ([est-specs.md §10.5](est-specs.md)).
+- **EST `serverkeygen`.** Not implemented; would reuse the management
+  UI's PKCS#12 keygen path
+  ([est-specs.md §10.5](est-specs.md)).
+- **OpenAPI / Swagger documentation for the management API.**
+  Discussed earlier in conversation; `flasgger` (lightest touch) or
+  `APIFlask` (cleaner, more invasive) — not implemented.
 
 ---
 
@@ -206,7 +236,8 @@ cross-area intent.
 ### [pending]
 - **Production deployment guide.** README covers Docker basics; no
   TLS-termination guide, reverse-proxy guide, or backup/restore drill
-  documentation.
+  documentation. The TLS guide is a prerequisite for EST CR-0001
+  (mTLS).
 - **TLS termination guidance.** No nginx / Caddy / Traefik example.
 - **Reverse-proxy guidance.** No reference config for putting pyPKI
   behind a corporate proxy.
@@ -217,8 +248,8 @@ cross-area intent.
   and any required env vars are set. Should distinguish liveness from
   readiness for orchestration.
 - **Explicit preserve-vs-purge flag for reset_pki.** Currently
-  reset_pki always drops the database; no opt-in to preserve
-  audit logs / users / certificates.
+  `reset_pki` always drops the database; no opt-in to preserve audit
+  logs / users / certificates.
 - **Alternative runtime configuration layouts.** Utilities and the
   background scheduler all assume `config/config.json`. No explicit
   support for split / per-environment config layouts.
@@ -241,30 +272,31 @@ cross-area intent.
   (delete cascades to on-token objects) from imported keys (delete
   preserves them). — Phase 6.
 - **Crypto Provider form cross-field validation.** Auto-activate ↔
-  auth_secret_ref consistency enforced both client-side and server-side. —
-  Phase 5b.
+  `auth_secret_ref` consistency enforced both client-side and
+  server-side. — Phase 5b.
 
 ### [partial]
 - **Destructive-action confirmations.** KMS pages have rich
   confirmations with usage/ownership context; CA / OCSP / template /
-  user delete dialogs were not audited in this round and use the
-  original simpler shape.
-- **Inline form validation.** Cross-field validation done for
-  Crypto Providers; CA / template / OCSP / EST forms not audited.
+  user delete dialogs use the original simpler shape.
+- **Inline form validation.** Cross-field validation done for Crypto
+  Providers; CA / template / OCSP / EST forms not audited.
 - **Guided import flows.** Crypto Providers and Keys have guided
   modals (Phase 5b). CA / OCSP / EST imports still use the original
   flat forms.
 
 ### [pending]
 - **Destructive-action confirmation: CA delete.** Should warn about
-  certs that become orphaned, CRL impact, OCSP responder dependencies.
+  certs that become orphaned, CRL impact, OCSP responder
+  dependencies.
 - **Destructive-action confirmation: OCSP responder delete.**
 - **Destructive-action confirmation: certificate template delete.**
-  Should refuse / warn when EST aliases or CAs reference the template.
+  Should refuse / warn when EST aliases or CAs reference the template
+  ([certificate-template-specs.md §12.3](certificate-template-specs.md)).
 - **Destructive-action confirmation: user delete.**
 - **First-run guidance.** No onboarding wizard; operator lands on the
-  dashboard with the seeded `software-default` provider but no guidance
-  on next steps.
+  dashboard with the seeded `software-default` provider but no
+  guidance on next steps.
 - **Inline validation: CA form.**
 - **Inline validation: certificate template form.**
 - **Inline validation: OCSP responder form.**
@@ -274,7 +306,7 @@ cross-area intent.
 - **Audit-log filter.** No filter by resource type / action / user.
 - **Audit-log export.** No CSV / JSON export.
 - **Audit-log retention controls.** No configurable retention or
-  archival.
+  archival ([database-specs.md §8.4](database-specs.md)).
 - **Dashboard certificate lifecycle widgets.** Expiring certs list,
   OCSP/CRL freshness, issuance trend.
 - **Guided import flow: CA from PEM / PKCS#12.** Currently a single
@@ -287,19 +319,29 @@ cross-area intent.
 ## §7 — Documentation And Lifecycle Management
 
 ### [done]
-- **HSM strategy + gap-analysis docs separation.** `kms-specs.md`
-  is the forward-looking spec; `hsm-support-specs.md` is the
-  closed-bug catalogue with all 12 gaps marked CLOSED. Cross-references
+- **HSM strategy + gap-analysis docs separation.** `kms-specs.md` is
+  the forward-looking spec; `hsm-support-specs.md` is the closed-bug
+  catalogue with all 12 gaps marked CLOSED. Cross-references
   consistent.
+- **Per-area spec consolidation.** Each subsystem now has its own
+  long-form spec aligned to the same template (Goals / Status /
+  Architecture / Data model / Lifecycle / Weaknesses / Order of work /
+  Acceptance / Cross-references):
+  [database-specs.md](database-specs.md),
+  [ca-management-specs.md](ca-management-specs.md),
+  [certificate-management-specs.md](certificate-management-specs.md),
+  [certificate-template-specs.md](certificate-template-specs.md),
+  [est-specs.md](est-specs.md),
+  [kms-specs.md](kms-specs.md),
+  [hsm-support-specs.md](hsm-support-specs.md).
 
 ### [partial]
 - **Operational docs aligned with the Docker-first deployment path.**
-  README is current for Docker + SoftHSM2 + HSM_PIN_KEK + manual setup.
-  `doc/structure.md` and `doc/database.md` were not re-audited after
-  the `CryptoProviders` schema additions.
-- **Historical-vs-current docs separation.** KMS strategy / gap analysis
-  split is clean. `doc/learning/`, `doc/project-notes.md` were not
-  audited; their relevance to current operators is unclear.
+  README is current for Docker + SoftHSM2 + `HSM_PIN_KEK` + manual
+  setup. `structure.md`, `project-notes.md`, `rest-api.md`,
+  `roadmap.md`, and `PROGRESS.md` were realigned against the current
+  code state in this round. Historical-vs-current separation for
+  `doc/learning/` was not re-audited.
 
 ### [pending]
 - **Schema migration upgrade notes per release.** No release-notes
@@ -314,19 +356,25 @@ cross-area intent.
 
 Cross-reference: [roadmap.md §8](roadmap.md).
 
-### [pending]
-- Generic signing services on top of the KMS — spec [kms-specs.md §17](kms-specs.md).
-
 ### [done]
-- Self-signed certificate option in the request flow — see [roadmap.md §8](roadmap.md).
+- **Self-signed certificate option in the request flow.** `ca_id ∈
+  {null, 0}` on `/api/certificate/issue-pkcs12` produces a
+  server-keygen self-signed cert recorded with `is_self_signed=TRUE`.
+  See [certificate-management-specs.md §6.3](certificate-management-specs.md).
+
+### [pending]
+- **Generic signing services on top of the KMS** —
+  [kms-specs.md §17](kms-specs.md).
+- **EST mTLS client-cert authentication (CR-0001)** —
+  [est-specs.md §14.1](est-specs.md).
 
 ---
 
 ## How to use this document
 
-- **Triaging new work:** before starting, find the matching `[pending]`
-  task here (or add one). When complete, flip to `[done]` with a
-  one-line note about which phase / commit / PR landed it.
+- **Triaging new work:** before starting, find the matching
+  `[pending]` task here (or add one). When complete, flip to `[done]`
+  with a one-line note about which phase / commit / PR landed it.
 - **Reviewing the project state:** the at-a-glance table is a
   reasonable executive summary. The per-section breakdown is the
   honest operator-facing read.

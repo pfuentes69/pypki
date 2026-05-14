@@ -470,9 +470,10 @@ PYTHONPATH=. python -m tests
 
 | File | Contents |
 |---|---|
-| `doc/database.md` | Full schema — all tables, columns, and foreign keys |
+| `doc/database-specs.md` | Database specification — schema, foreign keys, lifecycle, operational concerns, weaknesses + risks |
 | `doc/certificate-template-specs.md` | Certificate template management specification — lifecycle, data model, JSON grammar, enforcement at issuance time, REST API, weaknesses + risks |
 | `doc/ca-management-specs.md` | CA management specification — lifecycle, creation paths, signing pipeline, issuance policy, CRL distribution, weaknesses + risks |
+| `doc/est-specs.md` | EST service specification — RFC 7030 subset, alias model, authentication (Basic + planned mTLS), REST API, weaknesses + risks |
 | `doc/kms-specs.md` | KMS specification — provider model, backend topology, activation lifecycle, REST API, PKCS#11 conformance subset |
 | `doc/hsm-support-specs.md` | HSM-specific contracts — PKCS#11 mechanisms, slot addressing, session lifecycle, storage-type semantics |
 | `doc/softhsm2-manual.md` | SoftHSM2 operator manual — install, init, key ops, backup/restore |

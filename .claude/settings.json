@@ -45,7 +45,8 @@
       "Bash(grep -nE \"^#{1,4} \" /Users/pedro/Development/Python/pypki/doc/ca-management-specs.md)",
       "Bash(python -c \"from web.services import ca_generate\")",
       "Bash(python -c \"from web.services import ca_generate; print\\('OK'\\)\")",
-      "Bash(python -c \"from web.routes import main_routes; from web.services import api_adapters; from pypki import certificate_tools; print\\('OK'\\)\")"
+      "Bash(python -c \"from web.routes import main_routes; from web.services import api_adapters; from pypki import certificate_tools; print\\('OK'\\)\")",
+      "Bash(awk '{print $1, $2, $3}')"
     ]
   }
 }

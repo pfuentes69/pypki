@@ -1645,7 +1645,9 @@ own backend change).
 - [certificate-template-specs.md](certificate-template-specs.md) — template
   JSON format that drives per-certificate issuance behaviour on top
   of CA policy.
-- [database.md](database.md) — current schema; the
+- [est-specs.md](est-specs.md) — EST service specification; aliases
+  bind a CA + template + auth policy to an RFC 7030 enrollment URL.
+- [database-specs.md](database-specs.md) — current schema; the
   `CertificationAuthorities` columns referenced here.
 - [rest-api.md](rest-api.md) — REST API reference; the routes in §10
   are documented there.

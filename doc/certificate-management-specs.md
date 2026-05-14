@@ -422,7 +422,12 @@ Authorization: Basic <base64>          # optional, per-alias
 ```
 
 (Non-aliased form `POST /.well-known/est/simpleenroll` uses the EST
-alias marked `is_default=TRUE` per [database.md](database.md).)
+alias marked `is_default=TRUE` per [database-specs.md](database-specs.md).)
+
+The full EST surface — alias model, all RFC 7030 endpoints,
+authentication modes, planned mTLS work — is specified in
+[est-specs.md](est-specs.md). This subsection captures only what the
+certificate-issuance pipeline needs to know.
 
 Server flow:
 1. Resolve the EST alias by `<label>` → `(ca_id, template_id,
@@ -1053,10 +1058,12 @@ No server changes. The tool keeps consuming only `GET /api/template`
 - [certificate-template-specs.md](certificate-template-specs.md) — template JSON
   format that drives per-issuance subject / SAN / extension / key-
   algorithm policy.
+- [est-specs.md](est-specs.md) — EST service specification; the
+  RFC 7030 surface that drives the EST issuance flow in §6.4.
 - [hsm-support-specs.md](hsm-support-specs.md) — HSM-specific contracts
   (PKCS#11 mechanisms, slot addressing, session lifecycle, storage-type
   semantics) that the KMS layer relies on for HSM-backed signing.
-- [database.md](database.md) — current schema; the `Certificates`
+- [database-specs.md](database-specs.md) — current schema; the `Certificates`
   columns referenced here.
 - [rest-api.md](rest-api.md) — REST API reference; the routes in §10
   are documented there.

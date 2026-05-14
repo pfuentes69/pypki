@@ -1064,8 +1064,9 @@ For the consolidated plan to be considered "done":
   types) on top of this KMS spec.
 - [softhsm2-manual.md](softhsm2-manual.md) — operator manual for the
   SoftHSM2 dev environment.
-- [database.md](database.md) — current schema; will be regenerated when the
-  `CryptoProviders` migration lands.
+- [database-specs.md](database-specs.md) — current schema; the
+  `CryptoProviders` and `KeyStorage` tables specified there back this
+  spec.
 - [rest-api.md](rest-api.md) — REST API reference; will be extended with the
   endpoints in Section 9.
 - [roadmap.md](roadmap.md) — broader project roadmap; the HSM section

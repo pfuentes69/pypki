@@ -268,7 +268,7 @@ HSM-specific obligations:
 - [softhsm2-manual.md](softhsm2-manual.md) — operator manual for the
   SoftHSM2 dev environment that this spec is regression-tested
   against.
-- [database.md](database.md) — current schema; the `KeyStorage` and
+- [database-specs.md](database-specs.md) — current schema; the `KeyStorage` and
   `CryptoProviders` definitions referenced here.
 - [PROGRESS.md §3](PROGRESS.md) — implementation status per contract.
 - [roadmap.md §3](roadmap.md) — strategic intent and remaining work.
