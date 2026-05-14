@@ -28,8 +28,11 @@
     </div>
     <div class="col-md-2">
       <label class="form-label">Max Cert Validity (days)</label>
-      <input type="number" class="form-control" id="maxValidity" value="-1" min="-1">
-      <div class="form-text">-1 = unlimited</div>
+      <input type="number" class="form-control" id="maxValidity" value="365" min="1">
+      <div class="form-check small mt-1">
+        <input class="form-check-input" type="checkbox" id="maxValidityUnlimited">
+        <label class="form-check-label" for="maxValidityUnlimited">Unlimited</label>
+      </div>
     </div>
     <div class="col-md-2">
       <label class="form-label">Serial Number Length (bytes)</label>
@@ -213,6 +216,10 @@
         <div class="col-md-3">
           <label class="form-label small">Validity (days) <span class="text-danger">*</span></label>
           <input type="number" class="form-control form-control-sm" id="genValidityDays" value="3650" min="1">
+          <div class="form-check small mt-1">
+            <input class="form-check-input" type="checkbox" id="genValidityUnlimited">
+            <label class="form-check-label" for="genValidityUnlimited">Unlimited</label>
+          </div>
         </div>
       </div>
 
@@ -448,6 +455,23 @@
   }
   watchUnboundKeyDropdown('genUnboundKeyId');
   watchUnboundKeyDropdown('bindKmsKeyId');
+
+  // ── Unlimited-validity checkbox helpers ──────────────────────────────────────
+  // Toggling the checkbox disables the numeric input; the textbox only accepts
+  // positive integers when the checkbox is unset. Internally we still send -1
+  // to the API when "Unlimited" is selected.
+  function wireUnlimitedCheckbox(checkboxId, inputId) {
+    const cb = document.getElementById(checkboxId);
+    const input = document.getElementById(inputId);
+    const sync = () => {
+      input.disabled = cb.checked;
+      if (cb.checked) input.value = '';
+    };
+    cb.addEventListener('change', sync);
+    sync();
+  }
+  wireUnlimitedCheckbox('maxValidityUnlimited', 'maxValidity');
+  wireUnlimitedCheckbox('genValidityUnlimited', 'genValidityDays');
 
   // ── State ────────────────────────────────────────────────────────────────────
   const _loaded = { generate: false, bind: false };
@@ -702,11 +726,16 @@
     const name = document.getElementById('caName').value.trim();
     if (!name) { showAlert('CA Name is required.'); return; }
 
-    const maxValidity   = parseInt(document.getElementById('maxValidity').value, 10);
+    const maxValidityUnlimited = document.getElementById('maxValidityUnlimited').checked;
+    const maxValidity = maxValidityUnlimited
+      ? -1
+      : parseInt(document.getElementById('maxValidity').value, 10);
     const serialLength  = parseInt(document.getElementById('serialNumberLength').value, 10);
     const crlValidity   = parseInt(document.getElementById('crlValidity').value, 10);
 
-    if (isNaN(maxValidity))                            { showAlert('Max certificate validity must be a number.'); return; }
+    if (!maxValidityUnlimited && (isNaN(maxValidity) || maxValidity < 1)) {
+      showAlert('Max certificate validity must be a positive integer (or check "Unlimited").'); return;
+    }
     if (isNaN(serialLength) || serialLength < 1)       { showAlert('Serial number length must be a positive integer.'); return; }
     if (isNaN(crlValidity)  || crlValidity  < 1)       { showAlert('CRL validity must be a positive integer.'); return; }
 
@@ -829,9 +858,13 @@
     }
 
     if (scenario !== 'external-subordinate') {
-      const v = parseInt(document.getElementById('genValidityDays').value, 10);
-      if (isNaN(v) || v < 1) throw new Error('Validity (days) must be a positive integer.');
-      payload.validity_days = v;
+      if (document.getElementById('genValidityUnlimited').checked) {
+        payload.validity_days = -1;
+      } else {
+        const v = parseInt(document.getElementById('genValidityDays').value, 10);
+        if (isNaN(v) || v < 1) throw new Error('Validity (days) must be a positive integer (or check "Unlimited").');
+        payload.validity_days = v;
+      }
     }
 
     const res = await fetch(`${apiBase}/ca/generate`, {

@@ -44,6 +44,19 @@
     </div>
   </div>
 
+  <!-- Validity -->
+  <div class="row g-3 mb-4">
+    <div class="col-md-3">
+      <label class="form-label fw-semibold">Validity (days)</label>
+      <input type="number" id="validityDays" class="form-control" value="365" min="1">
+      <div class="form-check small mt-1">
+        <input class="form-check-input" type="checkbox" id="validityUnlimited" onchange="onValidityUnlimitedChange()">
+        <label class="form-check-label" for="validityUnlimited">Unlimited</label>
+      </div>
+      <div class="form-text small">Silently capped by template, CA settings, and the CA certificate's expiration.</div>
+    </div>
+  </div>
+
   <!-- Subject + SAN (rendered after template selected) -->
   <div id="templateForm" class="d-none">
 
@@ -181,6 +194,27 @@ const SAN_LABELS = {
 
 let _template   = null;
 let _parseTimer = null;
+
+// ── Validity helpers ─────────────────────────────────────────────────────────
+
+function onValidityUnlimitedChange() {
+  const cb = document.getElementById('validityUnlimited');
+  const input = document.getElementById('validityDays');
+  input.disabled = cb.checked;
+  if (cb.checked) input.value = '';
+}
+
+// Returns the validity_days value to send to the API, or null if invalid.
+// Shows a toast and returns null when the input is missing/invalid.
+function readValidityDays() {
+  if (document.getElementById('validityUnlimited').checked) return -1;
+  const v = parseInt(document.getElementById('validityDays').value, 10);
+  if (isNaN(v) || v < 1) {
+    showToast('Validity (days) must be a positive integer (or check "Unlimited").', 'warning');
+    return null;
+  }
+  return v;
+}
 
 // ── Key mode helpers ─────────────────────────────────────────────────────────
 
@@ -707,12 +741,16 @@ async function issueCsr(caId, templateId, subjectData, sanData) {
   const csr = document.getElementById('csrInput').value.trim();
   if (!csr) { showToast('Provide a CSR.', 'warning'); return; }
 
+  const validityDays = readValidityDays();
+  if (validityDays === null) return;
+
   const res = await fetch(`${apiBase}/certificate/issue`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       ca_id: parseInt(caId), template_id: parseInt(templateId),
       csr, subject: subjectData, san: sanData,
+      validity_days: validityDays,
     }),
   });
   const data = await res.json();
@@ -728,6 +766,9 @@ async function issueServerKey(caId, templateId, subjectData, sanData) {
   const passphrase   = document.getElementById('pkcs12Passphrase').value;
   const storeKey     = document.getElementById('storeKeyInKms').checked;
 
+  const validityDays = readValidityDays();
+  if (validityDays === null) return;
+
   const res = await fetch(`${apiBase}/certificate/issue-pkcs12`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -737,6 +778,7 @@ async function issueServerKey(caId, templateId, subjectData, sanData) {
       passphrase, subject: subjectData, san: sanData,
       friendly_name: 'Certificate',
       store_key: storeKey,
+      validity_days: validityDays,
     }),
   });
 

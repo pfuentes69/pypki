@@ -560,12 +560,23 @@ class CertificateTools:
 
         # Set notValidBefore and notValidAfter
         not_valid_before = datetime.now(timezone.utc)
-        max_validity = self.__template__["max_validity"]
-        if max_validity > PKITools.INFINITE_VALIDITY:
-            if (validity_days > max_validity) or (validity_days == PKITools.INFINITE_VALIDITY):
-                validity_days = max_validity
+        # Effective max-validity cap: smaller of template.max_validity and
+        # ca.max_validity (treating -1 / INFINITE_VALIDITY as "no cap").
+        template_max = self.__template__["max_validity"]
+        ca_max = None
+        if issuing_ca is not None:
+            ca_max = issuing_ca.get_config().get("max_validity")
+        effective_max = PKITools.INFINITE_VALIDITY
+        for cap in (template_max, ca_max):
+            if cap is None or cap <= PKITools.INFINITE_VALIDITY:
+                continue
+            if effective_max == PKITools.INFINITE_VALIDITY or cap < effective_max:
+                effective_max = cap
+        if effective_max > PKITools.INFINITE_VALIDITY:
+            if (validity_days == PKITools.INFINITE_VALIDITY) or (validity_days > effective_max):
+                validity_days = effective_max
         if validity_days > -1:
-            not_valid_after = datetime.now(timezone.utc) + timedelta(days=validity_days)
+            not_valid_after = not_valid_before + timedelta(days=validity_days)
         else:
             not_valid_after = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)  # GeneralizedTime format
 

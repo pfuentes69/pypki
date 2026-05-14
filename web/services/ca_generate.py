@@ -24,8 +24,12 @@ from asn1crypto.core import OctetBitString
 from pypki import logger
 from pypki import signing_algorithm as _sa
 from pypki.db import CAStateError
+from pypki.pki_tools import PKITools
 from . import pki
 from .api_adapters import write_audit_log
+
+
+_INFINITE_NOT_AFTER = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -171,7 +175,10 @@ def _build_root_cert(data, signing_key_id, signing_pub_key, signing_algorithm) -
     subject = _parse_dn(data["subject_dn"])
     validity_days = int(data["validity_days"])
     not_valid_before = datetime.now(timezone.utc)
-    not_valid_after = not_valid_before + timedelta(days=validity_days)
+    if validity_days == PKITools.INFINITE_VALIDITY:
+        not_valid_after = _INFINITE_NOT_AFTER
+    else:
+        not_valid_after = not_valid_before + timedelta(days=validity_days)
 
     builder = (
         x509.CertificateBuilder()
@@ -226,14 +233,16 @@ def _build_internal_sub_cert(data, signing_key_id, signing_pub_key, parent_recor
     subject = _parse_dn(data["subject_dn"])
     validity_days = int(data["validity_days"])
     not_valid_before = datetime.now(timezone.utc)
-    not_valid_after = not_valid_before + timedelta(days=validity_days)
-
     parent_not_after = parent_cert.not_valid_after_utc
-    if not_valid_after > parent_not_after:
-        raise ValueError(
-            f"validity_days={validity_days} would push notAfter past parent.notAfter "
-            f"({parent_not_after.isoformat()})"
-        )
+    if validity_days == PKITools.INFINITE_VALIDITY:
+        not_valid_after = parent_not_after
+    else:
+        not_valid_after = not_valid_before + timedelta(days=validity_days)
+        if not_valid_after > parent_not_after:
+            raise ValueError(
+                f"validity_days={validity_days} would push notAfter past parent.notAfter "
+                f"({parent_not_after.isoformat()})"
+            )
 
     builder = (
         x509.CertificateBuilder()

@@ -405,13 +405,14 @@ def get_certificate_details_json(cert_id):
 def generate_certificate_from_csr(ca_template_config, csr_pem: bytes,
                                    return_certificate: bool = True,
                                    request_json: str = None,
+                                   validity_days: int = PKITools.INFINITE_VALIDITY,
                                    user_id: int = 0):
     certificate_der = pki.generate_certificate_from_csr(
         csr_pem=csr_pem,
         ca_id=ca_template_config["ca_id"],
         template_id=ca_template_config["template_id"],
         request_json=request_json,
-        validity_days=PKITools.INFINITE_VALIDITY,
+        validity_days=validity_days,
         enforce_template=True,
         return_certificate=return_certificate,
         self_signed=bool(ca_template_config.get("self_signed")),
@@ -424,7 +425,9 @@ def generate_certificate_from_csr(ca_template_config, csr_pem: bytes,
 def generate_pkcs12(ca_template_config, request_json: str,
                     key_algorithm: str = "RSA", key_type: str = "2048",
                     pfx_password: bytes = b"", friendly_name: bytes = b"MyCert",
-                    store_key: bool = False, user_id: int = 0):
+                    store_key: bool = False,
+                    validity_days: int = PKITools.INFINITE_VALIDITY,
+                    user_id: int = 0):
     p12_bytes, cert_id = pki.generate_pkcs12(
         request_json=request_json,
         ca_id=ca_template_config["ca_id"],
@@ -434,7 +437,7 @@ def generate_pkcs12(ca_template_config, request_json: str,
         pfx_password=pfx_password,
         friendly_name=friendly_name,
         self_signed=bool(ca_template_config.get("self_signed")),
-        validity_days=PKITools.INFINITE_VALIDITY,
+        validity_days=validity_days,
         store_key=store_key,
     )
     write_audit_log("certificates", cert_id, "CREATE", user_id)

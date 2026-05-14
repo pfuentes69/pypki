@@ -14,6 +14,7 @@ from pypki.backends.base import (
     AuthenticationFailed, BackendError, BackendNotActive,
     KeyMissingOnToken, ModuleLoadFailed, SlotNotFound,
 )
+from pypki.pki_tools import PKITools
 
 # Serve CRL from this local folder
 #CRL_FOLDER = "/Users/pedro/Development/Python/pypki/out/crl"
@@ -595,6 +596,20 @@ def issue_certificate_from_csr():
     # Optional parameter: return_certificate, default is True
     return_certificate = data.get('return_certificate', True)
 
+    # Optional: requested validity in days (-1 = unlimited). Silently capped
+    # later by template.max_validity, ca.max_validity and the CA cert's
+    # notAfter — see CertificateTools.generate_certificate_from_csr.
+    validity_days = data.get('validity_days')
+    if validity_days is None:
+        validity_days = PKITools.INFINITE_VALIDITY
+    else:
+        try:
+            validity_days = int(validity_days)
+        except (TypeError, ValueError):
+            abort(400, description="'validity_days' must be an integer (-1 for unlimited)")
+        if validity_days == 0 or validity_days < -1:
+            abort(400, description="'validity_days' must be -1 (unlimited) or a positive integer")
+
     # Build request_json from form-supplied subject/SAN if present.
     # This lets the UI override or supplement what is in the CSR.
     subject_data = data.get('subject') or {}
@@ -619,6 +634,7 @@ def issue_certificate_from_csr():
         # Always get the cert_id so we can redirect the caller
         cert_id = api_adapters.generate_certificate_from_csr(
             request_config, csr_pem, return_certificate=False, request_json=request_json,
+            validity_days=validity_days,
             user_id=user_id
         )
         if cert_id is None:
@@ -680,6 +696,19 @@ def issue_certificate_pkcs12():
     friendly_name = data.get('friendly_name', 'Certificate').encode()
     store_key     = bool(data.get('store_key', False))
 
+    # Optional: requested validity in days (-1 = unlimited). Silently capped
+    # by template.max_validity, ca.max_validity and the CA cert's notAfter.
+    validity_days = data.get('validity_days')
+    if validity_days is None:
+        validity_days = PKITools.INFINITE_VALIDITY
+    else:
+        try:
+            validity_days = int(validity_days)
+        except (TypeError, ValueError):
+            abort(400, description="'validity_days' must be an integer (-1 for unlimited)")
+        if validity_days == 0 or validity_days < -1:
+            abort(400, description="'validity_days' must be -1 (unlimited) or a positive integer")
+
     subject_data = data.get('subject') or {}
     san_data     = data.get('san') or {}
     if subject_data or san_data:
@@ -707,6 +736,7 @@ def issue_certificate_pkcs12():
             pfx_password=pfx_password,
             friendly_name=friendly_name,
             store_key=store_key,
+            validity_days=validity_days,
             user_id=user_id,
         )
     except (ValueError, TypeError) as e:
