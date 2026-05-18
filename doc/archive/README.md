@@ -1,0 +1,1 @@
+This folder contains archived materials. MUST NOT be processed by AI Agents.
